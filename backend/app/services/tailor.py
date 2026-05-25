@@ -137,12 +137,76 @@ def _strictify_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+# Constraints Anthropic's structured-output validator rejects. The full
+# unsupported list (per the SDK reference): numeric range/multiple-of,
+# string length/pattern, and array length/uniqueness/contains keywords.
+# Strip them everywhere — keep their intent in the field `description`
+# and in the system prompt instead.
+_UNSUPPORTED_KEYS: tuple[str, ...] = (
+    # Numeric
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    # String
+    "minLength",
+    "maxLength",
+    "pattern",
+    # Array
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "contains",
+    "minContains",
+    "maxContains",
+)
+
+
+def _drop_unsupported_constraints(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively delete unsupported JSON-schema keywords (see above)
+    from every node — root, `$defs`, properties, items, and combinator
+    branches. Same traversal shape as `_strictify_object_schema`."""
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        for key in _UNSUPPORTED_KEYS:
+            node.pop(key, None)
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            if key in node and isinstance(node[key], dict):
+                for sub in node[key].values():
+                    walk(sub)
+        if "items" in node:
+            walk(node["items"])
+        if "prefixItems" in node:
+            walk(node["prefixItems"])
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in node:
+                walk(node[key])
+
+    walk(schema)
+    return schema
+
+
+def _prepare_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Render a Pydantic model to a JSON schema Anthropic accepts: every
+    object node strict (`additionalProperties: false`) and no unsupported
+    range/length/pattern keywords."""
+    schema = model.model_json_schema()
+    _drop_unsupported_constraints(schema)
+    _strictify_object_schema(schema)
+    return schema
+
+
 # Precompute once at import time so the rendered request bytes are stable
 # (good for prompt caching too).
-ANALYSIS_SCHEMA: dict[str, Any] = _strictify_object_schema(Analysis.model_json_schema())
-TAILORED_RESUME_SCHEMA: dict[str, Any] = _strictify_object_schema(
-    TailoredResume.model_json_schema()
-)
+ANALYSIS_SCHEMA: dict[str, Any] = _prepare_schema(Analysis)
+TAILORED_RESUME_SCHEMA: dict[str, Any] = _prepare_schema(TailoredResume)
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
@@ -218,7 +282,11 @@ _SYSTEM_ANALYZE = (
     "skills and gaps, and produce three short tailoring questions whose answers "
     "would let us write a stronger, more targeted resume. Be honest about gaps; "
     "do NOT invent experience the candidate doesn't have. Output strictly the "
-    "JSON schema requested — no prose."
+    "JSON schema requested — no prose.\n"
+    "\n"
+    "Constraints (these are NOT enforced by the schema, so honour them):\n"
+    "- match_score MUST be an integer in [0, 100] (higher = better fit).\n"
+    "- questions MUST contain exactly three short questions."
 )
 
 _SYSTEM_GENERATE = (
