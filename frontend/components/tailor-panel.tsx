@@ -139,10 +139,14 @@ export function TailorPanel({ job }: { job: Job }) {
             <Separator />
             <div className="space-y-3">
               <h3 className="text-sm font-semibold">
-                Quick questions ({analysis.questions.length})
+                {analysis.questions.length === 0
+                  ? "No gap questions"
+                  : `Confirm missing skills (${analysis.questions.length})`}
               </h3>
               <p className="text-xs text-muted-foreground">
-                Optional. Even a sentence each materially improves the rewrite.
+                {analysis.questions.length === 0
+                  ? "No skills are missing from your resume — go straight to generate."
+                  : "Yes/no per skill. Answer affirmatively only if you genuinely have it; we will not invent anything."}
               </p>
               {analysis.questions.map((q, i) => (
                 <label key={q} className="block space-y-1">
@@ -269,7 +273,7 @@ function AnalysisView({ analysis }: { analysis: Analysis }) {
         </div>
         <div className="space-y-1.5">
           <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Gaps
+            Gaps (askable)
           </p>
           <div className="flex flex-wrap gap-1.5">
             {analysis.gaps.length === 0 ? (
@@ -284,6 +288,24 @@ function AnalysisView({ analysis }: { analysis: Analysis }) {
           </div>
         </div>
       </div>
+
+      {analysis.genuine_lacks && analysis.genuine_lacks.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Genuine lacks
+          </p>
+          <p className="text-xs text-muted-foreground">
+            JD requirements no answer would change — surfaced honestly.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {analysis.genuine_lacks.map((s) => (
+              <Badge key={s} variant="destructive">
+                {s}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

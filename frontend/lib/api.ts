@@ -137,6 +137,12 @@ export type Analysis = {
   matched: string[];
   gaps: string[];
   questions: string[];
+  /** Step 5 of the ATS spec — JD requirements the candidate genuinely
+   * lacks and cannot plausibly confirm via a question. Surfaced
+   * honestly instead of being asked about. Optional for backward
+   * compatibility with cached analyses created before this field
+   * landed (the backend stores Analysis.model_dump() in the cache). */
+  genuine_lacks?: string[];
 };
 
 export type ExperienceBullet = {
