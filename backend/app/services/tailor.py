@@ -52,16 +52,46 @@ MODEL = "claude-sonnet-4-6"
 
 
 class Analysis(BaseModel):
-    """The structured output of POST /api/tailor/analyze."""
+    """Structured output of POST /api/tailor/analyze.
+
+    Drives the 5-step ATS optimization spec — this object covers steps
+    1, 2, 3, and 5 (keyword extraction, gap detection, gap-only
+    questions, genuine-lack flags). Step 4 (rewriting) happens in
+    `TailoredResume` after the user answers the questions.
+    """
 
     match_score: int = Field(ge=0, le=100, description="Overall fit, 0-100")
-    top_skills: list[str] = Field(description="3-7 skills the JD emphasizes most")
-    matched: list[str] = Field(description="Candidate skills that align with the JD")
-    gaps: list[str] = Field(description="Skills/experience the JD wants that are weak or absent")
+    top_skills: list[str] = Field(
+        description=(
+            "Step 1: every hard skill, tool, certification, and keyword the JD "
+            "screens for. Extract verbatim from the JD."
+        )
+    )
+    matched: list[str] = Field(
+        description="Step 2: top_skills the candidate already has on their resume."
+    )
+    gaps: list[str] = Field(
+        description=(
+            "Step 2: top_skills missing from the resume. Each is a candidate "
+            "for confirmation via `questions` below."
+        )
+    )
     questions: list[str] = Field(
-        min_length=3,
-        max_length=3,
-        description="Three short questions whose answers would let us tailor the resume better.",
+        description=(
+            "Step 3: one short yes/no question per gap, asking whether the "
+            "candidate genuinely has that skill but failed to list it. ONLY "
+            "ask about missing skills — do NOT ask about anything in `matched`. "
+            "Empty list is valid when there are no gaps."
+        ),
+    )
+    genuine_lacks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Step 5: JD requirements the candidate genuinely lacks and cannot "
+            "plausibly confirm (e.g. years of experience, hard credentials). "
+            "These are surfaced honestly to the user — they don't get a "
+            "question because no answer would change the truth."
+        ),
     )
 
 
@@ -277,27 +307,79 @@ def generate_resume(
 # ─── LLM paths ────────────────────────────────────────────────────────────────
 
 _SYSTEM_ANALYZE = (
-    "You are an expert resume reviewer and ATS coach. You will be shown a "
-    "candidate profile and a job description. Score the fit, identify matched "
-    "skills and gaps, and produce three short tailoring questions whose answers "
-    "would let us write a stronger, more targeted resume. Be honest about gaps; "
-    "do NOT invent experience the candidate doesn't have. Output strictly the "
-    "JSON schema requested — no prose.\n"
+    "You are an ATS optimization expert. Your job here is to RESEARCH the fit "
+    "between a candidate and a target job — not to rewrite anything yet. You "
+    "will be shown a CANDIDATE PROFILE and a TARGET JOB description. Execute "
+    "these four steps in order and return the result as JSON matching the "
+    "provided schema:\n"
     "\n"
-    "Constraints (these are NOT enforced by the schema, so honour them):\n"
+    "1. KEYWORD EXTRACTION → `top_skills`. List every hard skill, tool, "
+    "programming language, framework, cloud service, certification, and "
+    "domain keyword the JD screens for. Pull terms verbatim from the JD so "
+    "the wording matches what an ATS would key on. Do not include soft "
+    'skills or fluff ("team player", "fast learner").\n'
+    "\n"
+    "2. CROSS-REFERENCE → `matched` / `gaps`. For each item in `top_skills`, "
+    "classify it as `matched` (the candidate profile already lists it or "
+    "clearly demonstrates it) or `gaps` (it's not on the resume). Be "
+    "conservative — only put something in `matched` when you can point to "
+    "concrete evidence in the candidate profile.\n"
+    "\n"
+    "3. GAP-ONLY QUESTIONS → `questions`. Produce a CONCISE BATCH of short "
+    "yes/no questions, ONE PER GAP, asking whether the candidate genuinely "
+    "has that skill but failed to list it. Do NOT ask about anything in "
+    "`matched`. NEVER invent skills — your questions are the only path by "
+    "which a gap can be added later. If `gaps` is empty, return an empty "
+    "`questions` list.\n"
+    "\n"
+    "5. GENUINE LACKS → `genuine_lacks`. Flag JD requirements the candidate "
+    "genuinely lacks and cannot plausibly confirm via a question (e.g. "
+    '"10+ years of X" when they have 2, hard credentials, specific '
+    "degrees). These are surfaced to the user honestly; do not put them "
+    "in `questions`.\n"
+    "\n"
+    "Output strictly the JSON schema requested — no prose.\n"
+    "\n"
+    "Constraints not enforced by the schema:\n"
     "- match_score MUST be an integer in [0, 100] (higher = better fit).\n"
-    "- questions MUST contain exactly three short questions."
+    "- questions MUST be one per `gaps` entry — no more, no fewer."
 )
 
 _SYSTEM_GENERATE = (
-    "You are an ATS-aware resume writer. Rewrite the candidate's resume to "
-    "match the target job while staying STRICTLY truthful — you may reframe, "
-    "reorder, and emphasize, but you may NEVER fabricate experience, skills, "
-    "employers, or outcomes that aren't in the candidate profile. Use the "
-    "user's answers to add detail where the source material is thin. Optimize "
-    "for ATS: mirror keywords from the JD where the candidate genuinely has "
-    "them, use strong action verbs, keep bullets one line where possible, and "
-    "drop irrelevant skills. Output strictly the JSON schema requested."
+    "You are an ATS optimization expert performing step 4 of the tailoring "
+    "flow: rewriting the candidate's resume against the target JD. You will "
+    "be shown the CANDIDATE PROFILE, the TARGET JOB, and the USER ANSWERS to "
+    "the gap questions from the analyze step.\n"
+    "\n"
+    "CONFIRMED SKILLS = (1) every skill already in the candidate profile, "
+    "PLUS (2) every gap-question skill the user answered AFFIRMATIVELY in "
+    'USER ANSWERS. A blank, empty, or "no" answer means the skill is NOT '
+    "confirmed — do NOT add it.\n"
+    "\n"
+    "Rules — break these and you fail the task:\n"
+    "1. Never fabricate. Use ONLY confirmed skills, employers, titles, dates, "
+    "   and outcomes. If the user didn't confirm a gap, that skill must NOT "
+    "   appear anywhere in `skills`, `summary`, `experience`, or `education`.\n"
+    "2. Mirror the JD's EXACT terminology for confirmed skills (\"Amazon Web "
+    '   Services" if the JD says that; "AWS" if the JD says that). This is '
+    "   the single biggest ATS lever.\n"
+    "3. Format for ATS: standard section headers (Summary, Skills, "
+    "   Experience, Education). NO tables, columns, graphics, or text "
+    "   boxes — the DOCX renderer enforces this, but your output must be "
+    "   plain linearly-parseable text. Bullets one line where possible.\n"
+    "4. Bullets are achievement-oriented with METRICS. Strong action verbs. "
+    '   Quantify wherever the source material allows ("reduced p95 latency '
+    '   480ms→110ms", "adopted by 6 teams", "~3000 RPS"). Drop bullets '
+    "   that are vague or irrelevant to this JD.\n"
+    "5. Fit MAX 2 PAGES when rendered with standard ATS formatting. Be ruthless "
+    "   about cutting irrelevant bullets and dropping skills the JD doesn't "
+    "   screen for. Older / less-relevant roles get fewer bullets.\n"
+    "\n"
+    "In `ats_notes`, briefly explain (a) which JD-terminology choices you "
+    "made, (b) which user-confirmed gaps you incorporated, and (c) any JD "
+    "requirement that remains genuinely unmet so the user knows.\n"
+    "\n"
+    "Output strictly the JSON schema requested — no prose."
 )
 
 
@@ -432,11 +514,19 @@ def _first_text(response: Any) -> str:
 # ─── Demo-mode (no API key) ──────────────────────────────────────────────────
 
 
+def _question_for_gap(skill: str) -> str:
+    """Deterministic question text used by demo mode AND by tests that need
+    to map an answer back to its originating gap."""
+    return f"[demo] Have you used {skill} in production?"
+
+
 def _demo_analysis(job: Job, *, candidate: dict[str, Any]) -> Analysis:
     """Deterministic mock derived from the job's detected skills + candidate.
 
     Same job → same output every time. Clearly marked so it can't be mistaken
-    for real model output, e.g. one of the questions explicitly says "[demo]".
+    for real model output (`[demo]` prefix on questions, `genuine_lacks`
+    surfaced explicitly). Questions are **one-per-gap and ONLY about gaps** —
+    matches the spec.
     """
     candidate_skills_lower = {s.lower() for s in candidate["skills"]}
     job_skills = list(job.skills or [])
@@ -446,27 +536,62 @@ def _demo_analysis(job: Job, *, candidate: dict[str, Any]) -> Analysis:
     score = max(20, min(95, score))
     return Analysis(
         match_score=score,
-        top_skills=job_skills[:5] or ["Communication", "Problem solving"],
-        matched=matched or candidate["skills"][:5],
-        gaps=gaps or ["(demo) no obvious gaps detected"],
-        questions=[
-            f"[demo] Which of your past projects best demonstrates fit for {job.title}?",
-            "[demo] What measurable impact (metric + number) are you most proud of?",
-            f"[demo] Why are you interested in {job.company} specifically?",
-        ],
+        top_skills=job_skills or ["Communication", "Problem solving"],
+        matched=matched,
+        gaps=gaps,
+        # ONE question per gap. Empty gaps → empty questions.
+        questions=[_question_for_gap(g) for g in gaps],
+        # Demo can't tell apart "gap" from "genuinely lacks", so leave empty.
+        genuine_lacks=[],
     )
 
 
+def _is_affirmative(answer: str | None) -> bool:
+    """Treat an answer as confirmation if it's non-empty and not a clear no."""
+    if not answer:
+        return False
+    a = answer.strip().lower()
+    if not a:
+        return False
+    if a in {"no", "n", "nope", "never", "not really", "false"}:
+        return False
+    return True
+
+
 def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]) -> TailoredResume:
-    """Echo the canonical candidate back in the structured shape, with the
-    user's answers folded into the summary so the round-trip still feels live."""
-    answer_blob = " | ".join(v for v in answers.values() if v).strip()
+    """Echo the canonical candidate back, plus any gap skills the user
+    confirmed via their answers. Skills the user didn't confirm are never
+    added — same rule the live prompt enforces."""
+    # Pull confirmed gaps out of the answer keys (they were generated by
+    # `_question_for_gap`, so we can recover the skill name).
+    confirmed_gaps: list[str] = []
+    for question, answer in answers.items():
+        if not _is_affirmative(answer):
+            continue
+        prefix = "[demo] Have you used "
+        suffix = " in production?"
+        if question.startswith(prefix) and question.endswith(suffix):
+            skill = question[len(prefix) : -len(suffix)]
+            confirmed_gaps.append(skill)
+
+    # Lead with user-confirmed gaps (the JD specifically asked about
+    # them), then the candidate's existing skills. Otherwise the [:18]
+    # truncate below could drop a freshly-confirmed skill while keeping
+    # ones the JD doesn't even screen for.
+    candidate_lower = {x.lower() for x in candidate["skills"]}
+    skills = [s for s in confirmed_gaps if s.lower() not in candidate_lower] + list(
+        candidate["skills"]
+    )
+
     summary = candidate["summary"]
-    if answer_blob:
-        summary = f"{summary} (demo: incorporating — {answer_blob})"
+    if confirmed_gaps:
+        summary = (
+            f"{summary} (demo: also confirmed via user answers — " f"{', '.join(confirmed_gaps)})"
+        )
+
     return TailoredResume(
         summary=summary,
-        skills=candidate["skills"][:15],
+        skills=skills[:18],
         experience=[
             ExperienceBullet(
                 company=e["company"],
@@ -483,8 +608,9 @@ def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]
         ats_notes=(
             "[demo mode] No ANTHROPIC_API_KEY is configured, so this resume is "
             f"the canonical candidate profile tailored against “{job.title}” "
-            "using a deterministic mock. Set ANTHROPIC_API_KEY on the backend to "
-            "get a real Claude-generated rewrite."
+            "using a deterministic mock. Skills the user confirmed via answers "
+            "are folded in; unconfirmed gap skills are NOT added. Set "
+            "ANTHROPIC_API_KEY on the backend to get a real Claude-generated rewrite."
         ),
     )
 

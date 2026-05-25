@@ -33,6 +33,9 @@ DEMO_JOB_DESCRIPTION = (
 
 
 def _seed_job(session) -> Job:
+    # Skills: Python/Kafka/AWS/PostgreSQL the demo candidate HAS; Rust is a
+    # deliberate GAP — verifies questions-target-only-gaps + answer-confirms-gap
+    # behaviour. Keep this in sync with the assertions below.
     job = Job(
         source="greenhouse",
         external_id="acme-100",
@@ -40,7 +43,7 @@ def _seed_job(session) -> Job:
         title="Senior Backend Engineer",
         url="https://example.com/apply",
         description=DEMO_JOB_DESCRIPTION,
-        skills=["Python", "Kafka", "AWS", "PostgreSQL"],
+        skills=["Python", "Kafka", "AWS", "PostgreSQL", "Rust"],
         content_hash="hash-acme-100",
         source_updated_at=datetime.now(UTC) - timedelta(hours=2),
     )
@@ -115,10 +118,20 @@ def test_analyze_demo_mode(client):
 
     a = body["analysis"]
     assert 0 <= a["match_score"] <= 100
-    assert len(a["questions"]) == 3
-    # Candidate has Python + AWS + PostgreSQL + Kafka — all 4 should match.
+    # Candidate has Python/Kafka/AWS/PostgreSQL — all 4 should land in
+    # `matched`. Rust is the deliberate gap and must NOT.
     assert {"Python", "Kafka", "AWS", "PostgreSQL"}.issubset(set(a["matched"]))
-    assert any("[demo]" in q for q in a["questions"])
+    assert "Rust" not in a["matched"]
+    assert "Rust" in a["gaps"]
+
+    # Questions target ONLY gaps — one per gap, never any in `matched`.
+    assert len(a["questions"]) == len(a["gaps"])
+    matched_lower = {s.lower() for s in a["matched"]}
+    for q in a["questions"]:
+        for m in matched_lower:
+            assert m not in q.lower(), f"question {q!r} mentions matched skill {m!r}"
+    # And one of the questions should be about Rust (the only gap).
+    assert any("rust" in q.lower() for q in a["questions"])
 
 
 def test_analyze_caches_result(client):
@@ -142,27 +155,48 @@ def test_analyze_404(client):
     assert res.status_code == 404
 
 
-def test_generate_demo_mode_uses_answers(client):
+def test_generate_demo_mode_confirms_gap_via_affirmative_answer(client):
+    """Answering 'yes' to a gap question MUST add that skill to the
+    rewritten resume. The demo mocks the same behaviour the live prompt
+    enforces — gap-skill stays out until the user confirms it."""
     test_client, Session = client
     with Session() as s:
         job = _seed_job(s)
 
+    # First run analyze to learn the gap question text the demo emits.
+    analysis = test_client.post("/api/tailor/analyze", json={"job_id": job.id}).json()["analysis"]
+    rust_q = next(q for q in analysis["questions"] if "rust" in q.lower())
+
+    # Confirm Rust via an affirmative answer.
     res = test_client.post(
         "/api/tailor/generate",
-        json={
-            "job_id": job.id,
-            "answers": {
-                "q1": "Led a 4B-event/day pipeline migration to Kafka",
-                "q2": "Cut p95 latency from 480ms to 110ms",
-            },
-        },
+        json={"job_id": job.id, "answers": {rust_q: "yes, 3 years in production"}},
     )
     assert res.status_code == 200
     body = res.json()
     assert body["demo_mode"] is True
-    assert "Kafka" in body["resume"]["summary"]
-    assert body["resume"]["experience"]
     assert "demo mode" in body["resume"]["ats_notes"].lower()
+    assert body["resume"]["experience"]
+    # The confirmed gap appears in the rewritten skills list.
+    assert "Rust" in body["resume"]["skills"]
+
+
+def test_generate_demo_mode_skips_unconfirmed_gap(client):
+    """A 'no' answer (or blank) MUST NOT add the gap skill — proving
+    the demo doesn't fabricate."""
+    test_client, Session = client
+    with Session() as s:
+        job = _seed_job(s)
+
+    analysis = test_client.post("/api/tailor/analyze", json={"job_id": job.id}).json()["analysis"]
+    rust_q = next(q for q in analysis["questions"] if "rust" in q.lower())
+
+    res = test_client.post(
+        "/api/tailor/generate",
+        json={"job_id": job.id, "answers": {rust_q: "no"}},
+    )
+    assert res.status_code == 200
+    assert "Rust" not in res.json()["resume"]["skills"]
 
 
 def test_docx_export(client):
@@ -448,25 +482,64 @@ def test_analysis_schema_has_no_unsupported_range_constraints():
     match_score = tailor_module.ANALYSIS_SCHEMA["properties"]["match_score"]
     assert "minimum" not in match_score and "maximum" not in match_score
     assert "0-100" in match_score["description"]
-    # And: questions has no minItems/maxItems but still says "Three" in
-    # the description and the system prompt names the exact count.
+    # Questions: no schema-level count constraint, but the system prompt
+    # carries the new spec ("one per gap").
     questions = tailor_module.ANALYSIS_SCHEMA["properties"]["questions"]
     assert "minItems" not in questions and "maxItems" not in questions
-    assert "Three" in questions["description"]
-    assert "exactly three" in tailor_module._SYSTEM_ANALYZE.lower()
+    assert "one per gap" in tailor_module._SYSTEM_ANALYZE.lower()
+    # New field: genuine_lacks (the analyze spec's step 5).
+    assert "genuine_lacks" in tailor_module.ANALYSIS_SCHEMA["properties"]
 
 
 def test_tailored_resume_schema_has_no_unsupported_range_constraints():
     assert _scan_for_forbidden_keys(tailor_module.TAILORED_RESUME_SCHEMA) == []
 
 
+def test_analyze_prompt_embodies_the_ats_spec():
+    """The analyze prompt MUST explicitly cover steps 1, 2, 3, and 5 of
+    the ATS optimization spec — keyword extraction, gap detection, gap-
+    only questions, genuine-lack flags. Step 4 (rewriting) is generate's
+    responsibility, not analyze's."""
+    p = tailor_module._SYSTEM_ANALYZE.lower()
+    # Step 1 — keyword extraction
+    assert "keyword extraction" in p
+    assert "verbatim" in p
+    # Step 2 — cross-reference & gap detection
+    assert "cross-reference" in p
+    assert "gaps" in p
+    # Step 3 — gap-only questions
+    assert "gap-only" in p
+    assert "do not ask about anything in `matched`" in p
+    assert "one per gap" in p
+    # Step 5 — genuine lacks
+    assert "genuine lacks" in p
+    # Truthfulness reminder
+    assert "never invent" in p
+
+
+def test_generate_prompt_embodies_step_4_and_2_page_max():
+    """The generate prompt MUST: only use confirmed skills, mirror JD
+    terminology, demand metric-driven bullets, enforce ATS-safe
+    formatting, and cap output at 2 pages."""
+    p = tailor_module._SYSTEM_GENERATE.lower()
+    assert "confirmed skill" in p
+    assert "never fabricate" in p
+    assert "mirror" in p and "terminology" in p
+    assert "no tables" in p and ("columns" in p or "graphics" in p)
+    assert "metric" in p
+    # 2-page max
+    assert "max 2 pages" in p or "2 pages" in p
+
+
 def test_pydantic_models_still_validate_responses_against_their_constraints():
-    """The Pydantic constraints (ge/le/min_length/max_length) are stripped
-    from the wire schema but they MUST stay on the model — they're how we
-    catch model output that's out of range when we parse the response."""
-    # match_score ≤ 100 still enforced by the Pydantic model on parse.
+    """The Pydantic constraints (ge/le on `match_score`) are stripped
+    from the wire schema but they MUST stay on the model — they're how
+    we catch model output that's out of range when we parse the
+    response. Question count is now variable (one per gap, possibly
+    zero), so the count constraint was deliberately dropped."""
     import pydantic
 
+    # match_score ≤ 100 still enforced by the Pydantic model on parse.
     with pytest.raises(pydantic.ValidationError):
         tailor_module.Analysis.model_validate(
             {
@@ -474,20 +547,22 @@ def test_pydantic_models_still_validate_responses_against_their_constraints():
                 "top_skills": ["x"],
                 "matched": ["x"],
                 "gaps": [],
-                "questions": ["a", "b", "c"],
+                "questions": [],
             }
         )
-    # Exactly three questions still enforced.
-    with pytest.raises(pydantic.ValidationError):
-        tailor_module.Analysis.model_validate(
-            {
-                "match_score": 50,
-                "top_skills": ["x"],
-                "matched": ["x"],
-                "gaps": [],
-                "questions": ["only one"],
-            }
-        )
+    # And: zero questions is valid (gaps may be empty) — proves the old
+    # min_length=3 was deliberately removed.
+    parsed = tailor_module.Analysis.model_validate(
+        {
+            "match_score": 50,
+            "top_skills": ["x"],
+            "matched": ["x"],
+            "gaps": [],
+            "questions": [],
+        }
+    )
+    assert parsed.questions == []
+    assert parsed.genuine_lacks == []  # default_factory
 
 
 # ── HTML-residue and empty-description regression tests ────────────────────
@@ -575,7 +650,10 @@ def test_tailor_handles_empty_description_gracefully(client):
 
     res = test_client.post("/api/tailor/analyze", json={"job_id": job_id})
     assert res.status_code == 200
-    assert len(res.json()["analysis"]["questions"]) == 3
+    # No JD text → no detected skills → no gaps → no questions. That's
+    # exactly the new spec: questions are gap-only.
+    analysis = res.json()["analysis"]
+    assert analysis["questions"] == analysis["gaps"] == []
 
     res2 = test_client.post("/api/tailor/generate", json={"job_id": job_id, "answers": {}})
     assert res2.status_code == 200
