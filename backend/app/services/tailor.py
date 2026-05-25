@@ -78,6 +78,66 @@ class TailoredResume(BaseModel):
     )
 
 
+# ─── Schema preparation ─────────────────────────────────────────────────────
+#
+# Anthropic's structured-output validator requires every object node in the
+# JSON schema to set `additionalProperties: false` explicitly — otherwise the
+# request 400s with "For 'object' type, 'additionalProperties' must be
+# explicitly set to false". Pydantic's `model_json_schema()` doesn't add it,
+# so we walk the rendered schema (root + every nested object in $defs,
+# properties, items, and combinator branches) and inject it everywhere.
+
+
+def _strictify_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively set `additionalProperties: false` on every object node.
+
+    Walks: the root, `$defs`/`definitions`, `properties` values, `items` (and
+    its sub-schemas when it's a list), and `anyOf` / `oneOf` / `allOf` branches.
+    Pydantic-generated `$ref` chains are followed via the resolved `$defs` —
+    we don't dereference, we just set the flag on the definition itself.
+    """
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+
+        # Treat as object schema if the node declares "object" OR carries
+        # properties — both are common in Pydantic output.
+        node_type = node.get("type")
+        is_object = node_type == "object" or "properties" in node
+        if is_object and "additionalProperties" not in node:
+            node["additionalProperties"] = False
+
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            if key in node and isinstance(node[key], dict):
+                for sub in node[key].values():
+                    walk(sub)
+
+        if "items" in node:
+            walk(node["items"])
+        if "prefixItems" in node:
+            walk(node["prefixItems"])
+
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in node:
+                walk(node[key])
+
+    walk(schema)
+    return schema
+
+
+# Precompute once at import time so the rendered request bytes are stable
+# (good for prompt caching too).
+ANALYSIS_SCHEMA: dict[str, Any] = _strictify_object_schema(Analysis.model_json_schema())
+TAILORED_RESUME_SCHEMA: dict[str, Any] = _strictify_object_schema(
+    TailoredResume.model_json_schema()
+)
+
+
 # ─── Public API ──────────────────────────────────────────────────────────────
 
 
@@ -208,7 +268,7 @@ def _llm_analyze(job: Job, *, client: Anthropic | None, settings: Settings) -> A
                 ),
             }
         ],
-        output_config={"format": {"type": "json_schema", "schema": Analysis.model_json_schema()}},
+        output_config={"format": {"type": "json_schema", "schema": ANALYSIS_SCHEMA}},
     )
     text = _first_text(response)
     return Analysis.model_validate_json(text)
@@ -248,7 +308,7 @@ def _llm_generate(
         output_config={
             "format": {
                 "type": "json_schema",
-                "schema": TailoredResume.model_json_schema(),
+                "schema": TAILORED_RESUME_SCHEMA,
             }
         },
     )
