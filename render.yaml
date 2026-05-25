@@ -1,0 +1,41 @@
+# Render blueprint for Aptly backend.
+# Hosting: Render (https://render.com). Database: Neon (managed Postgres).
+#
+# Secrets are NEVER committed here. Every `sync: false` value must be set in
+# the Render dashboard (or via `render env set`) before the first deploy.
+
+services:
+  - type: web
+    name: aptly-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    region: oregon
+    healthCheckPath: /api/health
+    autoDeploy: true
+
+    # Install backend deps.
+    buildCommand: pip install -e .
+
+    # Run Alembic migrations, then start the API.
+    # Alembic is idempotent — re-running on restart is a no-op when there's
+    # nothing to apply, so this is safe across free-tier restarts.
+    startCommand: bash scripts/start.sh
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+      - key: ENVIRONMENT
+        value: production
+
+      # Neon connection string. SQLAlchemy needs the `+psycopg` driver, e.g.
+      #   postgresql+psycopg://USER:PASS@HOST/DB?sslmode=require
+      # Set this in the Render dashboard from your Neon project.
+      - key: DATABASE_URL
+        sync: false
+
+      # Comma-separated list of allowed origins for CORS. After Vercel deploys
+      # the frontend, set this to that origin (e.g. https://aptly.vercel.app).
+      - key: CORS_ORIGINS
+        sync: false
