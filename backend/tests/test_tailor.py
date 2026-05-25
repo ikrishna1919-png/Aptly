@@ -237,6 +237,10 @@ def test_analyze_uses_anthropic_when_key_present(factories, settings_with_key, m
         isinstance(b, dict) and b.get("cache_control", {}).get("type") == "ephemeral"
         for b in call["system"]
     )
+    # The schema sent to Anthropic must be Anthropic-accepted: every object
+    # strict AND no unsupported numeric/string/array range constraints.
+    schema = call["output_config"]["format"]["schema"]
+    _assert_schema_accepted_by_anthropic(schema)
     # The schema sent to Anthropic must have additionalProperties:false on
     # every object — otherwise the API 400s with
     # "For 'object' type, 'additionalProperties' must be explicitly set to false".
@@ -295,7 +299,7 @@ def test_generate_uses_anthropic_when_key_present(factories, settings_with_key, 
     # nested ExperienceBullet object, so this exercises the recursive walk
     # into $defs / array items.
     schema = mock.calls[0]["output_config"]["format"]["schema"]
-    assert _every_object_has_additional_properties_false(schema)
+    _assert_schema_accepted_by_anthropic(schema)
 
 
 # ── JSON-schema strictness regression tests ─────────────────────────────────
@@ -362,6 +366,128 @@ def test_tailored_resume_schema_is_strict_at_every_object_level():
         }
     )
     assert parsed.experience[0].company == "C"
+
+
+# Constraints Anthropic's structured-output validator rejects (kept in sync
+# with tailor._UNSUPPORTED_KEYS — change one, change the other).
+_FORBIDDEN_KEYS = (
+    # Numeric
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    # String
+    "minLength",
+    "maxLength",
+    "pattern",
+    # Array
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "contains",
+    "minContains",
+    "maxContains",
+)
+
+
+def _scan_for_forbidden_keys(schema: dict[str, Any]) -> list[str]:
+    """Walk the schema and return the (path, key) pairs for every
+    forbidden keyword found. Empty list ⇒ schema is Anthropic-acceptable."""
+    hits: list[str] = []
+
+    def visit(node: Any, path: str) -> None:
+        if isinstance(node, list):
+            for i, item in enumerate(node):
+                visit(item, f"{path}[{i}]")
+            return
+        if not isinstance(node, dict):
+            return
+        for key in _FORBIDDEN_KEYS:
+            if key in node:
+                hits.append(f"{path or '<root>'}.{key}")
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            if key in node and isinstance(node[key], dict):
+                for sub_key, sub in node[key].items():
+                    visit(sub, f"{path}.{key}.{sub_key}")
+        if "items" in node:
+            visit(node["items"], f"{path}.items")
+        if "prefixItems" in node:
+            visit(node["prefixItems"], f"{path}.prefixItems")
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in node:
+                visit(node[key], f"{path}.{key}")
+
+    visit(schema, "")
+    return hits
+
+
+def _assert_schema_accepted_by_anthropic(schema: dict[str, Any]) -> None:
+    """Assert the schema satisfies both Anthropic constraints we care about:
+      1. every object node sets additionalProperties:false (the previous
+         regression that landed in #10)
+      2. no unsupported range/length/pattern keywords anywhere (this one)
+    Surfaces precise paths so a regression points at the offending node."""
+    _every_object_has_additional_properties_false(schema)
+    hits = _scan_for_forbidden_keys(schema)
+    if hits:
+        raise AssertionError(
+            "schema contains keys Anthropic's validator rejects "
+            f"(For 'integer'/'string'/'array' type, properties ... are not supported): {hits}"
+        )
+
+
+def test_analysis_schema_has_no_unsupported_range_constraints():
+    """Regression for 400: For 'integer' type, properties maximum,
+    minimum are not supported. The match_score field is `ge=0, le=100` in
+    Pydantic, so the rendered schema would include minimum/maximum unless
+    we strip them on the way out."""
+    assert _scan_for_forbidden_keys(tailor_module.ANALYSIS_SCHEMA) == []
+    # And specifically: match_score has no range keys, but its description
+    # still tells the model "0-100" so the constraint is preserved as prose.
+    match_score = tailor_module.ANALYSIS_SCHEMA["properties"]["match_score"]
+    assert "minimum" not in match_score and "maximum" not in match_score
+    assert "0-100" in match_score["description"]
+    # And: questions has no minItems/maxItems but still says "Three" in
+    # the description and the system prompt names the exact count.
+    questions = tailor_module.ANALYSIS_SCHEMA["properties"]["questions"]
+    assert "minItems" not in questions and "maxItems" not in questions
+    assert "Three" in questions["description"]
+    assert "exactly three" in tailor_module._SYSTEM_ANALYZE.lower()
+
+
+def test_tailored_resume_schema_has_no_unsupported_range_constraints():
+    assert _scan_for_forbidden_keys(tailor_module.TAILORED_RESUME_SCHEMA) == []
+
+
+def test_pydantic_models_still_validate_responses_against_their_constraints():
+    """The Pydantic constraints (ge/le/min_length/max_length) are stripped
+    from the wire schema but they MUST stay on the model — they're how we
+    catch model output that's out of range when we parse the response."""
+    # match_score ≤ 100 still enforced by the Pydantic model on parse.
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        tailor_module.Analysis.model_validate(
+            {
+                "match_score": 150,
+                "top_skills": ["x"],
+                "matched": ["x"],
+                "gaps": [],
+                "questions": ["a", "b", "c"],
+            }
+        )
+    # Exactly three questions still enforced.
+    with pytest.raises(pydantic.ValidationError):
+        tailor_module.Analysis.model_validate(
+            {
+                "match_score": 50,
+                "top_skills": ["x"],
+                "matched": ["x"],
+                "gaps": [],
+                "questions": ["only one"],
+            }
+        )
 
 
 # ── HTML-residue and empty-description regression tests ────────────────────
