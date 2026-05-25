@@ -137,6 +137,12 @@ export default function AdminPage() {
           >
             ← back to feed
           </Link>
+          <Link
+            href="/profile"
+            className="ml-auto text-sm text-muted-foreground hover:text-foreground"
+          >
+            profile →
+          </Link>
         </div>
         <h1 className="text-3xl font-semibold tracking-tight">Manual jobs</h1>
         <p className="max-w-xl text-sm text-muted-foreground">

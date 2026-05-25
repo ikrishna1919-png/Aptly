@@ -77,6 +77,71 @@ export async function fetchHealth(): Promise<Health | null> {
   }
 }
 
+// ── Profile editor (Phase 2 preview, single-user) ──────────────────────────
+
+export type ProfileLinks = {
+  linkedin?: string | null;
+  github?: string | null;
+};
+
+export type ProfileExperience = {
+  company: string;
+  title: string;
+  location?: string | null;
+  start: string;
+  end: string;
+  bullets: string[];
+};
+
+export type ProfileEducation = {
+  school: string;
+  degree: string;
+  location?: string | null;
+  graduation: string;
+};
+
+export type Profile = {
+  name: string;
+  headline?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  location?: string | null;
+  links: ProfileLinks;
+  summary: string;
+  skills: string[];
+  experience: ProfileExperience[];
+  education: ProfileEducation[];
+};
+
+export async function fetchProfile(token: string): Promise<Profile> {
+  const res = await fetch(`${API_URL}/api/admin/profile`, {
+    headers: { "X-Admin-Token": token },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as Profile;
+}
+
+export async function saveProfile(profile: Profile, token: string): Promise<Profile> {
+  const res = await fetch(`${API_URL}/api/admin/profile`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+    body: JSON.stringify(profile),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as Profile;
+}
+
+export async function parseProfileText(text: string, token: string): Promise<Profile> {
+  const res = await fetch(`${API_URL}/api/admin/profile/parse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as Profile;
+}
+
 export type ManualJobInput = {
   title: string;
   company: string;

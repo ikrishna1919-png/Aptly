@@ -4,6 +4,7 @@ import { BrandMark } from "@/components/brand-mark";
 
 const nav = [
   { href: "/", label: "Jobs" },
+  { href: "/profile", label: "Profile" },
   { href: "/admin", label: "Admin" },
 ];
 
