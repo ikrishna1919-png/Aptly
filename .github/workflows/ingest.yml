@@ -1,0 +1,50 @@
+name: Scheduled Ingest
+
+# Calls the deployed backend's protected ingest endpoint every 6 hours.
+# The backend handles fetch → dedupe → upsert → expiry of jobs older
+# than HOURS_WINDOW (default 48h), so the feed is always last-48h fresh.
+#
+# Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
+#   APTLY_API_URL       — base URL of the deployed backend, e.g.
+#                         https://aptly-backend.onrender.com
+#   APTLY_ADMIN_TOKEN   — must match the ADMIN_TOKEN env var on the backend.
+
+on:
+  schedule:
+    # Every 6 hours, on the hour.
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+concurrency:
+  group: aptly-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger ingest
+        env:
+          APTLY_API_URL: ${{ secrets.APTLY_API_URL }}
+          APTLY_ADMIN_TOKEN: ${{ secrets.APTLY_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APTLY_API_URL:-}" ] || [ -z "${APTLY_ADMIN_TOKEN:-}" ]; then
+            echo "::error::APTLY_API_URL and APTLY_ADMIN_TOKEN secrets must be set."
+            exit 1
+          fi
+          echo "POST ${APTLY_API_URL}/api/admin/ingest"
+          # --fail-with-body: non-2xx → exit non-zero AND print the body
+          # --max-time 600: 10-minute cap, generous for a cold-started free dyno
+          curl --fail-with-body \
+               --silent --show-error \
+               --max-time 600 \
+               -X POST "${APTLY_API_URL%/}/api/admin/ingest" \
+               -H "X-Admin-Token: ${APTLY_ADMIN_TOKEN}" \
+               -H "Content-Type: application/json" \
+               -o /tmp/ingest.json
+          echo "::group::Ingest stats"
+          cat /tmp/ingest.json
+          echo
+          echo "::endgroup::"
