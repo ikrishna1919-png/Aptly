@@ -1,71 +1,105 @@
+import Link from "next/link";
+
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
+import { CompanyMark } from "@/components/company-mark";
 import type { Job } from "@/lib/api";
+import { MANUAL_SOURCE } from "@/lib/api";
+import { cn, formatRelative } from "@/lib/utils";
 
-const RELATIVE = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-
-function relativeTime(iso: string | null): string {
-  if (!iso) return "—";
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "—";
-  const deltaSec = Math.round((then - Date.now()) / 1000);
-  const abs = Math.abs(deltaSec);
-  if (abs < 60) return RELATIVE.format(deltaSec, "second");
-  if (abs < 3600) return RELATIVE.format(Math.round(deltaSec / 60), "minute");
-  if (abs < 86400) return RELATIVE.format(Math.round(deltaSec / 3600), "hour");
-  return RELATIVE.format(Math.round(deltaSec / 86400), "day");
-}
+const MAX_SKILL_CHIPS = 6;
 
 export function JobCard({ job }: { job: Job }) {
   return (
-    <Card>
-      <CardHeader className="space-y-2">
-        <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-lg font-semibold leading-tight">
-              <a
-                href={job.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:underline"
-              >
-                {job.title}
-              </a>
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              {job.company}
-              {job.location ? ` · ${job.location}` : ""}
-            </p>
-          </div>
-          <span className="whitespace-nowrap text-xs text-muted-foreground">
-            {relativeTime(job.source_updated_at)}
-          </span>
-        </div>
+    <Card
+      className={cn(
+        "group relative flex flex-col gap-3 p-5 transition-shadow hover:shadow-card-hover",
+      )}
+    >
+      <Link
+        href={`/jobs/${job.id}`}
+        className="absolute inset-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        aria-label={`${job.title} at ${job.company}`}
+      />
 
-        <div className="flex flex-wrap gap-1.5">
-          {job.remote === true && <Badge variant="secondary">Remote</Badge>}
-          {job.remote === false && <Badge variant="outline">On-site</Badge>}
-          {job.employment_type && (
-            <Badge variant="outline">{job.employment_type}</Badge>
-          )}
-          {job.sponsors_visa === true && <Badge>Sponsors visa</Badge>}
-          <Badge variant="outline" className="opacity-70">
-            via {job.source}
-          </Badge>
+      <div className="flex items-start gap-3">
+        <CompanyMark name={job.company} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            {job.company}
+          </p>
+          <h3 className="mt-0.5 truncate text-base font-semibold leading-tight text-foreground">
+            {job.title}
+          </h3>
         </div>
-      </CardHeader>
+        <time
+          dateTime={job.source_updated_at ?? undefined}
+          className="shrink-0 whitespace-nowrap text-xs text-muted-foreground"
+        >
+          {formatRelative(job.source_updated_at)}
+        </time>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        {job.location && (
+          <Badge variant="secondary">
+            <LocationIcon />
+            <span className="truncate max-w-[16ch]">{job.location}</span>
+          </Badge>
+        )}
+        {job.remote === true && <Badge variant="default">Remote</Badge>}
+        {job.remote === false && <Badge variant="outline">On-site</Badge>}
+        {job.employment_type && (
+          <Badge variant="outline">{job.employment_type}</Badge>
+        )}
+        {job.salary && <Badge variant="highlight">{job.salary}</Badge>}
+        {job.sponsors_visa === true && (
+          <Badge variant="highlight">Sponsors visa</Badge>
+        )}
+        {job.source === MANUAL_SOURCE && (
+          <Badge variant="muted" title="Added manually by an admin">
+            Curated
+          </Badge>
+        )}
+      </div>
 
       {job.skills.length > 0 && (
-        <CardContent className="pt-0">
-          <div className="flex flex-wrap gap-1.5">
-            {job.skills.slice(0, 12).map((s) => (
-              <Badge key={s} variant="secondary" className="font-normal">
-                {s}
-              </Badge>
-            ))}
-          </div>
-        </CardContent>
+        <div className="flex flex-wrap gap-1">
+          {job.skills.slice(0, MAX_SKILL_CHIPS).map((s) => (
+            <span
+              key={s}
+              className="rounded-md bg-secondary/70 px-1.5 py-0.5 text-[11px] font-medium text-secondary-foreground"
+            >
+              {s}
+            </span>
+          ))}
+          {job.skills.length > MAX_SKILL_CHIPS && (
+            <span className="text-[11px] text-muted-foreground">
+              +{job.skills.length - MAX_SKILL_CHIPS}
+            </span>
+          )}
+        </div>
       )}
     </Card>
+  );
+}
+
+function LocationIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="11"
+      height="11"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="opacity-70"
+    >
+      <path d="M12 21s-7-7.5-7-12a7 7 0 1 1 14 0c0 4.5-7 12-7 12Z" />
+      <circle cx="12" cy="9" r="2.5" />
+    </svg>
   );
 }

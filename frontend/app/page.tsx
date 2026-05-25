@@ -1,9 +1,9 @@
-import Link from "next/link";
+import { Suspense } from "react";
 
-import { Badge } from "@/components/ui/badge";
-import { JobCard } from "@/components/job-card";
+import { JobFeedSkeleton } from "@/components/job-feed-skeleton";
 import { JobFilters } from "@/components/job-filters";
-import { fetchHealth, fetchJobs, type JobsQuery } from "@/lib/api";
+import { JobsFeed } from "@/components/job-feed";
+import type { JobsQuery } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
@@ -33,73 +33,45 @@ function buildQuery(sp: SearchParams): JobsQuery {
   return q;
 }
 
-export default async function Page({
-  searchParams,
-}: {
-  searchParams: SearchParams;
-}) {
-  const query = buildQuery(searchParams);
-  const [health, jobsResult] = await Promise.all([
-    fetchHealth(),
-    fetchJobs(query).catch((e: unknown) => ({
-      error: e instanceof Error ? e.message : "Unknown error",
-    })),
-  ]);
+// Keys for the Suspense reset — when query params change, we want a fresh
+// fallback (skeleton) while the new feed loads.
+function suspenseKey(q: JobsQuery) {
+  return JSON.stringify(q);
+}
 
-  const errored = "error" in jobsResult;
-  const data = errored ? null : jobsResult;
+export default function Page({ searchParams }: { searchParams: SearchParams }) {
+  const query = buildQuery(searchParams);
 
   return (
-    <main className="container mx-auto max-w-4xl space-y-8 py-10">
-      <header className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Badge variant="secondary">Phase 1 — Real jobs</Badge>
-          {health ? (
-            <Badge variant="outline" className="text-xs">
-              API: {health.status} · DB: {health.database}
-            </Badge>
-          ) : (
-            <Badge variant="destructive" className="text-xs">
-              API offline
-            </Badge>
-          )}
-          <Link
-            href="/admin"
-            className="ml-auto text-xs text-muted-foreground hover:underline"
-          >
-            admin →
-          </Link>
-        </div>
-        <h1 className="text-4xl font-bold tracking-tight">Aptly</h1>
-        <p className="text-muted-foreground">
-          Real, fresh job postings from public ATS boards. The feed is a
-          strict {data?.window_hours ?? 48}-hour rolling window — anything
-          older is removed.
-        </p>
-      </header>
-
-      <JobFilters />
-
-      {errored && (
-        <p className="text-sm text-destructive">
-          Could not load jobs: {(jobsResult as { error: string }).error}
-        </p>
-      )}
-
-      {data && (
-        <>
-          <p className="text-sm text-muted-foreground">
-            {data.total === 0
-              ? "No jobs match these filters in the current window."
-              : `${data.total} job${data.total === 1 ? "" : "s"} in the last ${data.window_hours} hours.`}
-          </p>
-          <div className="space-y-4">
-            {data.jobs.map((job) => (
-              <JobCard key={job.id} job={job} />
-            ))}
+    <>
+      <section className="hero-glow relative">
+        <div className="container py-12 sm:py-16">
+          <div className="max-w-2xl space-y-4">
+            <p className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-card/70 px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+              Live · 48h rolling window
+            </p>
+            <h1 className="text-balance text-4xl font-semibold leading-[1.05] tracking-tight sm:text-5xl">
+              Jobs that{" "}
+              <span className="bg-gradient-to-br from-primary to-primary/70 bg-clip-text text-transparent">
+                move.
+              </span>
+            </h1>
+            <p className="max-w-xl text-base text-muted-foreground sm:text-lg">
+              Fresh postings from real ATS boards (Greenhouse, Lever), filtered
+              for what matters: visa sponsorship, location, skills. Updated every
+              six hours — stale roles age out automatically.
+            </p>
           </div>
-        </>
-      )}
-    </main>
+        </div>
+      </section>
+
+      <section className="container space-y-6 pb-16">
+        <JobFilters />
+        <Suspense key={suspenseKey(query)} fallback={<JobFeedSkeleton />}>
+          <JobsFeed query={query} />
+        </Suspense>
+      </section>
+    </>
   );
 }

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -100,3 +100,16 @@ def list_jobs(
         offset=offset,
         window_hours=settings.hours_window,
     )
+
+
+@router.get("/jobs/{job_id}", response_model=JobOut)
+def get_job(
+    job_id: int = Path(..., ge=1),
+    db: Session = Depends(get_db),
+) -> Job:
+    """Fetch one job by id. 404 if not found (which includes the case where
+    the row has aged out of the rolling window since the link was issued)."""
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    return job

@@ -5,9 +5,12 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import { CompanyMark } from "@/components/company-mark";
+import { EmptyState, ErrorState } from "@/components/empty-state";
 import {
   MANUAL_SOURCE,
   createManualJob,
@@ -39,10 +42,10 @@ export default function AdminPage() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [manualJobs, setManualJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // Load saved token on mount.
   useEffect(() => {
     setToken(localStorage.getItem(TOKEN_KEY) ?? "");
     setTokenLoaded(true);
@@ -52,8 +55,6 @@ export default function AdminPage() {
     setLoading(true);
     setError(null);
     try {
-      // Pull a wide slice and filter to manual rows client-side. The public
-      // feed already includes manual jobs regardless of the rolling window.
       const data = await fetchJobs({ limit: 200 });
       setManualJobs(data.jobs.filter((j) => j.source === MANUAL_SOURCE));
     } catch (e) {
@@ -81,11 +82,7 @@ export default function AdminPage() {
     e.preventDefault();
     setError(null);
     setInfo(null);
-
-    if (!token) {
-      setError("Admin token required");
-      return;
-    }
+    if (!token) return setError("Admin token required");
 
     const payload: ManualJobInput = {
       title: form.title.trim(),
@@ -99,33 +96,30 @@ export default function AdminPage() {
     if (form.remote === "true") payload.remote = true;
     else if (form.remote === "false") payload.remote = false;
     if (form.skills.trim()) {
-      payload.skills = form.skills
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
+      payload.skills = form.skills.split(",").map((s) => s.trim()).filter(Boolean);
     }
 
+    setSubmitting(true);
     try {
       await createManualJob(payload, token);
       setForm(EMPTY_FORM);
-      setInfo(`Added "${payload.title}"`);
+      setInfo(`Added “${payload.title}”`);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+    } finally {
+      setSubmitting(false);
     }
   }
 
   async function onDelete(job: Job) {
-    if (!token) {
-      setError("Admin token required");
-      return;
-    }
+    if (!token) return setError("Admin token required");
     if (!confirm(`Delete "${job.title}"?`)) return;
     setError(null);
     setInfo(null);
     try {
       await deleteManualJob(job.id, token);
-      setInfo(`Deleted "${job.title}"`);
+      setInfo(`Deleted “${job.title}”`);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
@@ -133,86 +127,101 @@ export default function AdminPage() {
   }
 
   return (
-    <main className="container mx-auto max-w-3xl space-y-8 py-10">
+    <div className="container max-w-3xl space-y-8 py-10">
       <header className="space-y-3">
         <div className="flex items-center gap-2">
-          <Badge variant="secondary">Admin</Badge>
-          <Link href="/" className="text-sm text-muted-foreground hover:underline">
+          <Badge variant="default">Admin</Badge>
+          <Link
+            href="/"
+            className="text-sm text-muted-foreground hover:text-foreground"
+          >
             ← back to feed
           </Link>
         </div>
-        <h1 className="text-3xl font-bold tracking-tight">Manual jobs</h1>
-        <p className="text-muted-foreground">
+        <h1 className="text-3xl font-semibold tracking-tight">Manual jobs</h1>
+        <p className="max-w-xl text-sm text-muted-foreground">
           Jobs added here are stored with{" "}
-          <code className="rounded bg-muted px-1">source=&quot;manual&quot;</code>{" "}
+          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[12px]">
+            source=&quot;manual&quot;
+          </code>{" "}
           and persist until you delete them — the 48-hour rolling cleanup
-          skips them.
+          skips them. They appear in the public feed alongside ATS-ingested
+          postings.
         </p>
       </header>
 
       <Card>
         <CardHeader>
           <CardTitle>Admin token</CardTitle>
+          <CardDescription>
+            Stored in this browser only (localStorage). Must match{" "}
+            <code className="rounded bg-muted px-1 font-mono text-[12px]">
+              ADMIN_TOKEN
+            </code>{" "}
+            on the backend.
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
+        <CardContent>
           <Input
             type="password"
             placeholder="X-Admin-Token"
             value={token}
             onChange={(e) => saveToken(e.target.value)}
             autoComplete="off"
+            spellCheck={false}
           />
-          <p className="text-xs text-muted-foreground">
-            Stored in localStorage. Must match the backend&apos;s{" "}
-            <code className="rounded bg-muted px-1">ADMIN_TOKEN</code> env var.
-          </p>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
           <CardTitle>Add a job</CardTitle>
+          <CardDescription>
+            Required fields marked with <span className="text-primary">*</span>.
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={onSubmit} className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Title *">
+          <form onSubmit={onSubmit} className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Title" required>
                 <Input
                   required
                   value={form.title}
                   onChange={(e) => update("title", e.target.value)}
                 />
               </Field>
-              <Field label="Company *">
+              <Field label="Company" required>
                 <Input
                   required
                   value={form.company}
                   onChange={(e) => update("company", e.target.value)}
                 />
               </Field>
-              <Field label="Apply URL *">
+              <Field label="Apply URL" required className="sm:col-span-2">
                 <Input
                   required
                   type="url"
+                  placeholder="https://example.com/apply/…"
                   value={form.apply_url}
                   onChange={(e) => update("apply_url", e.target.value)}
                 />
               </Field>
               <Field label="Location">
                 <Input
+                  placeholder="San Francisco / Remote / …"
                   value={form.location}
                   onChange={(e) => update("location", e.target.value)}
                 />
               </Field>
-              <Field label="Remote?">
+              <Field label="Workplace">
                 <select
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                   value={form.remote}
                   onChange={(e) => update("remote", e.target.value)}
                 >
                   <option value="">(unknown)</option>
-                  <option value="true">Yes</option>
-                  <option value="false">No</option>
+                  <option value="true">Remote</option>
+                  <option value="false">On-site</option>
                 </select>
               </Field>
               <Field label="Employment type">
@@ -229,7 +238,7 @@ export default function AdminPage() {
                   onChange={(e) => update("salary", e.target.value)}
                 />
               </Field>
-              <Field label="Skills (comma-separated)">
+              <Field label="Skills (comma-separated)" className="sm:col-span-2">
                 <Input
                   placeholder="Python, React, Postgres"
                   value={form.skills}
@@ -246,10 +255,16 @@ export default function AdminPage() {
               />
             </Field>
 
-            <div className="flex items-center gap-3">
-              <Button type="submit">Add job</Button>
-              {info && <span className="text-sm text-muted-foreground">{info}</span>}
-              {error && <span className="text-sm text-destructive">{error}</span>}
+            <Separator />
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm">
+                {info && <span className="text-muted-foreground">{info}</span>}
+                {error && <span className="text-destructive">{error}</span>}
+              </div>
+              <Button type="submit" disabled={submitting}>
+                {submitting ? "Adding…" : "Add job"}
+              </Button>
             </div>
           </form>
         </CardContent>
@@ -257,61 +272,84 @@ export default function AdminPage() {
 
       <section className="space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold">
-            Manual jobs ({manualJobs.length})
+          <h2 className="text-xl font-semibold tracking-tight">
+            Manual jobs{" "}
+            <span className="text-muted-foreground">({manualJobs.length})</span>
           </h2>
-          <Button variant="outline" size="sm" onClick={() => void refresh()}>
-            Refresh
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void refresh()}
+            disabled={loading}
+          >
+            {loading ? "Refreshing…" : "Refresh"}
           </Button>
         </div>
 
-        {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
-        {!loading && manualJobs.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No manual jobs yet. Add one above.
-          </p>
+        {!loading && error && <ErrorState description={error} />}
+
+        {!loading && !error && manualJobs.length === 0 && (
+          <EmptyState
+            title="No manual jobs yet"
+            description="Use the form above to add your first one."
+          />
         )}
 
-        <ul className="space-y-2">
-          {manualJobs.map((job) => (
-            <li
-              key={job.id}
-              className="flex items-start justify-between gap-4 rounded-md border p-3"
-            >
-              <div className="space-y-1">
-                <a
-                  href={job.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="font-medium hover:underline"
-                >
-                  {job.title}
-                </a>
-                <p className="text-xs text-muted-foreground">
-                  {job.company}
-                  {job.location ? ` · ${job.location}` : ""}
-                  {job.salary ? ` · ${job.salary}` : ""}
-                </p>
-              </div>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => void onDelete(job)}
-              >
-                Delete
-              </Button>
-            </li>
-          ))}
-        </ul>
+        {manualJobs.length > 0 && (
+          <ul className="grid gap-2">
+            {manualJobs.map((job) => (
+              <li key={job.id}>
+                <Card className="flex items-start gap-4 p-4">
+                  <CompanyMark name={job.company} size="sm" />
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <Link
+                      href={`/jobs/${job.id}`}
+                      className="block truncate font-medium hover:underline"
+                    >
+                      {job.title}
+                    </Link>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {job.company}
+                      {job.location ? ` · ${job.location}` : ""}
+                      {job.salary ? ` · ${job.salary}` : ""}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void onDelete(job)}
+                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    aria-label={`Delete ${job.title}`}
+                  >
+                    Delete
+                  </Button>
+                </Card>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
-    </main>
+    </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  required,
+  className,
+  children,
+}: {
+  label: string;
+  required?: boolean;
+  className?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <label className="block space-y-1">
-      <span className="text-sm font-medium">{label}</span>
+    <label className={`block space-y-1.5 ${className ?? ""}`}>
+      <span className="text-sm font-medium">
+        {label}
+        {required && <span className="ml-0.5 text-primary">*</span>}
+      </span>
       {children}
     </label>
   );
