@@ -170,6 +170,23 @@ key is unset the endpoints return deterministic mock data clearly labeled
 Phase 2 will replace the hardcoded candidate with user accounts + resume
 parsing.
 
+## Profile editor
+
+The candidate profile that tailoring runs against is editable via
+`/profile` (gated by the same `ADMIN_TOKEN` as `/admin`). Three
+operations on the backend:
+
+| Endpoint                          | What it does                                                |
+| --------------------------------- | ----------------------------------------------------------- |
+| `GET  /api/admin/profile`         | Load the saved profile (seeds from the in-code default on first call). |
+| `PUT  /api/admin/profile`         | Save the profile (full replacement). Editing here invalidates the analyze cache automatically — the cache key is the candidate fingerprint. |
+| `POST /api/admin/profile/parse`   | Send pasted resume text to Claude Sonnet 4.6 for **truthful-only** parsing into the structured form. Returns the parsed profile; does **not** save. Returns 503 if `ANTHROPIC_API_KEY` is unset. |
+
+On the frontend, `/profile` shows a "Paste resume to autofill" textarea
++ a form for every field; parse populates the form for review, then
+Save commits to the DB. The tailoring service reads from the same row,
+so changes take effect immediately on the next analyze/generate.
+
 ## CI
 
 `.github/workflows/ci.yml` lints and tests both apps on every push and

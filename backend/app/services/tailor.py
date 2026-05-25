@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.models.job import Job
 from app.models.job_analysis import JobAnalysis
+from app.services._anthropic_schema import prepare_schema
 from app.services.demo_candidate import candidate_fingerprint, get_candidate
 from app.sources._text import strip_html
 
@@ -115,128 +116,12 @@ class TailoredResume(BaseModel):
     )
 
 
-# ─── Schema preparation ─────────────────────────────────────────────────────
-#
-# Anthropic's structured-output validator requires every object node in the
-# JSON schema to set `additionalProperties: false` explicitly — otherwise the
-# request 400s with "For 'object' type, 'additionalProperties' must be
-# explicitly set to false". Pydantic's `model_json_schema()` doesn't add it,
-# so we walk the rendered schema (root + every nested object in $defs,
-# properties, items, and combinator branches) and inject it everywhere.
-
-
-def _strictify_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Recursively set `additionalProperties: false` on every object node.
-
-    Walks: the root, `$defs`/`definitions`, `properties` values, `items` (and
-    its sub-schemas when it's a list), and `anyOf` / `oneOf` / `allOf` branches.
-    Pydantic-generated `$ref` chains are followed via the resolved `$defs` —
-    we don't dereference, we just set the flag on the definition itself.
-    """
-
-    def walk(node: Any) -> None:
-        if isinstance(node, list):
-            for item in node:
-                walk(item)
-            return
-        if not isinstance(node, dict):
-            return
-
-        # Treat as object schema if the node declares "object" OR carries
-        # properties — both are common in Pydantic output.
-        node_type = node.get("type")
-        is_object = node_type == "object" or "properties" in node
-        if is_object and "additionalProperties" not in node:
-            node["additionalProperties"] = False
-
-        for key in ("properties", "patternProperties", "$defs", "definitions"):
-            if key in node and isinstance(node[key], dict):
-                for sub in node[key].values():
-                    walk(sub)
-
-        if "items" in node:
-            walk(node["items"])
-        if "prefixItems" in node:
-            walk(node["prefixItems"])
-
-        for key in ("anyOf", "oneOf", "allOf"):
-            if key in node:
-                walk(node[key])
-
-    walk(schema)
-    return schema
-
-
-# Constraints Anthropic's structured-output validator rejects. The full
-# unsupported list (per the SDK reference): numeric range/multiple-of,
-# string length/pattern, and array length/uniqueness/contains keywords.
-# Strip them everywhere — keep their intent in the field `description`
-# and in the system prompt instead.
-_UNSUPPORTED_KEYS: tuple[str, ...] = (
-    # Numeric
-    "minimum",
-    "maximum",
-    "exclusiveMinimum",
-    "exclusiveMaximum",
-    "multipleOf",
-    # String
-    "minLength",
-    "maxLength",
-    "pattern",
-    # Array
-    "minItems",
-    "maxItems",
-    "uniqueItems",
-    "contains",
-    "minContains",
-    "maxContains",
-)
-
-
-def _drop_unsupported_constraints(schema: dict[str, Any]) -> dict[str, Any]:
-    """Recursively delete unsupported JSON-schema keywords (see above)
-    from every node — root, `$defs`, properties, items, and combinator
-    branches. Same traversal shape as `_strictify_object_schema`."""
-
-    def walk(node: Any) -> None:
-        if isinstance(node, list):
-            for item in node:
-                walk(item)
-            return
-        if not isinstance(node, dict):
-            return
-        for key in _UNSUPPORTED_KEYS:
-            node.pop(key, None)
-        for key in ("properties", "patternProperties", "$defs", "definitions"):
-            if key in node and isinstance(node[key], dict):
-                for sub in node[key].values():
-                    walk(sub)
-        if "items" in node:
-            walk(node["items"])
-        if "prefixItems" in node:
-            walk(node["prefixItems"])
-        for key in ("anyOf", "oneOf", "allOf"):
-            if key in node:
-                walk(node[key])
-
-    walk(schema)
-    return schema
-
-
-def _prepare_schema(model: type[BaseModel]) -> dict[str, Any]:
-    """Render a Pydantic model to a JSON schema Anthropic accepts: every
-    object node strict (`additionalProperties: false`) and no unsupported
-    range/length/pattern keywords."""
-    schema = model.model_json_schema()
-    _drop_unsupported_constraints(schema)
-    _strictify_object_schema(schema)
-    return schema
-
-
 # Precompute once at import time so the rendered request bytes are stable
-# (good for prompt caching too).
-ANALYSIS_SCHEMA: dict[str, Any] = _prepare_schema(Analysis)
-TAILORED_RESUME_SCHEMA: dict[str, Any] = _prepare_schema(TailoredResume)
+# (good for prompt caching too). The two schema-prep passes
+# (additionalProperties:false + dropping unsupported range keywords) live in
+# `app.services._anthropic_schema` and are shared with the profile parser.
+ANALYSIS_SCHEMA: dict[str, Any] = prepare_schema(Analysis)
+TAILORED_RESUME_SCHEMA: dict[str, Any] = prepare_schema(TailoredResume)
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
