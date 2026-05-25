@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { Badge } from "@/components/ui/badge";
 import { JobCard } from "@/components/job-card";
 import { JobFilters } from "@/components/job-filters";
@@ -61,6 +63,12 @@ export default async function Page({
               API offline
             </Badge>
           )}
+          <Link
+            href="/admin"
+            className="ml-auto text-xs text-muted-foreground hover:underline"
+          >
+            admin →
+          </Link>
         </div>
         <h1 className="text-4xl font-bold tracking-tight">Aptly</h1>
         <p className="text-muted-foreground">

@@ -5,13 +5,18 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
+# Source identifier for jobs created by the admin "Add Job" flow. These rows
+# survive the rolling-window cleanup — they only go away on explicit DELETE.
+MANUAL_SOURCE = "manual"
+
 
 class Job(Base):
     """A normalized job posting ingested from a public ATS board.
 
     The rolling-window guarantee lives on `source_updated_at`: anything older
-    than `HOURS_WINDOW` is deleted on each ingest pass. DB row timestamps
-    (`created_at` / `updated_at`) are bookkeeping only.
+    than `HOURS_WINDOW` is deleted on each ingest pass — *except* rows with
+    `source == MANUAL_SOURCE`, which persist until explicitly deleted.
+    DB row timestamps (`created_at` / `updated_at`) are bookkeeping only.
     """
 
     __tablename__ = "jobs"
@@ -25,6 +30,7 @@ class Job(Base):
     location: Mapped[str | None] = mapped_column(String(256), nullable=True)
     remote: Mapped[bool | None] = mapped_column(Boolean(), nullable=True)
     employment_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    salary: Mapped[str | None] = mapped_column(String(128), nullable=True)
     skills: Mapped[list[str]] = mapped_column(JSON(), nullable=False, default=list)
     sponsors_visa: Mapped[bool | None] = mapped_column(Boolean(), nullable=True)
     url: Mapped[str] = mapped_column(Text)
