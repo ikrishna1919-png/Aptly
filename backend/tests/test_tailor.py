@@ -285,7 +285,7 @@ def test_generate_uses_anthropic_when_key_present(factories, settings_with_key, 
     with factories() as s:
         job = _seed_job(s)
         resume = tailor_module.generate_resume(
-            job, {"q1": "5 yrs Kafka"}, settings=settings_with_key
+            s, job, {"q1": "5 yrs Kafka"}, settings=settings_with_key
         )
 
     assert resume.skills[:2] == ["Python", "Kafka"]
@@ -362,3 +362,204 @@ def test_tailored_resume_schema_is_strict_at_every_object_level():
         }
     )
     assert parsed.experience[0].company == "C"
+
+
+# ── HTML-residue and empty-description regression tests ────────────────────
+
+
+HTML_LADEN_DESCRIPTION = (
+    "<div><h2>About Us</h2>"
+    "<p>We&apos;re hiring a Backend Engineer.</p>"
+    "<h3>What you&apos;ll do</h3>"
+    "<ul>"
+    "<li>Build services in Python and Kafka.</li>"
+    "<li>Deploy on AWS.</li>"
+    "</ul></div>"
+)
+
+
+def _seed_html_job(session) -> Job:
+    """A job whose description is still raw HTML — simulates rows ingested
+    before the strip_html rewrite."""
+    job = Job(
+        source="greenhouse",
+        external_id="acme-html",
+        company="Acme",
+        title="Senior Backend Engineer",
+        url="https://example.com/apply",
+        description=HTML_LADEN_DESCRIPTION,
+        skills=["Python", "Kafka", "AWS"],
+        content_hash="hash-acme-html",
+        source_updated_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return job
+
+
+def test_tailor_sanitizes_html_in_jd_before_calling_anthropic(
+    factories, settings_with_key, monkeypatch
+):
+    """Safety net: even if the row was stored as raw HTML, the prompt sent
+    to the model is clean text — never `<p>About Us</p>`."""
+    payload = {
+        "match_score": 80,
+        "top_skills": ["Python", "Kafka"],
+        "matched": ["Python"],
+        "gaps": [],
+        "questions": ["q1?", "q2?", "q3?"],
+    }
+    mock = _MockAnthropicClient(payload)
+    monkeypatch.setattr(tailor_module, "_build_client", lambda s, c: mock)
+
+    with factories() as s:
+        job = _seed_html_job(s)
+        tailor_module.analyze_job(s, job, settings=settings_with_key)
+
+    assert len(mock.calls) == 1
+    user_content = mock.calls[0]["messages"][0]["content"]
+    # No raw HTML left in the prompt.
+    assert "<p>" not in user_content
+    assert "<ul>" not in user_content
+    assert "&apos;" not in user_content
+    # The cleaned structure survived.
+    assert "About Us" in user_content
+    assert "- Build services in Python and Kafka." in user_content
+
+
+def test_tailor_handles_empty_description_gracefully(client):
+    """A job with an empty description must not crash analyze or generate."""
+    test_client, Session = client
+    with Session() as s:
+        job = Job(
+            source="manual",
+            external_id="manual-empty",
+            company="Aptly",
+            title="Senior Engineer",
+            url="https://example.com/apply",
+            description=None,
+            skills=[],
+            source_updated_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+        job_id = job.id
+
+    res = test_client.post("/api/tailor/analyze", json={"job_id": job_id})
+    assert res.status_code == 200
+    assert len(res.json()["analysis"]["questions"]) == 3
+
+    res2 = test_client.post("/api/tailor/generate", json={"job_id": job_id, "answers": {}})
+    assert res2.status_code == 200
+    assert res2.json()["resume"]["summary"]
+
+
+def test_tailor_succeeds_on_previously_html_job(client):
+    """End-to-end: a job whose description is still raw HTML (i.e. ingested
+    before the strip_html rewrite) tailors successfully through the public
+    endpoint. Demo mode — no API key needed."""
+    test_client, Session = client
+    with Session() as s:
+        job = _seed_html_job(s)
+
+    res = test_client.post("/api/tailor/analyze", json={"job_id": job.id})
+    assert res.status_code == 200
+    res2 = test_client.post("/api/tailor/generate", json={"job_id": job.id, "answers": {}})
+    assert res2.status_code == 200
+
+
+# ── Backfill CLI ───────────────────────────────────────────────────────────
+
+
+def test_clean_descriptions_backfill_rewrites_html_in_place(monkeypatch, factories):
+    """`python -m app.cli clean-descriptions` should normalize html-laden
+    descriptions in place and leave clean ones alone."""
+    from app.cli import clean_descriptions as cmd
+
+    # Seed: one HTML row, one already-clean row, one None.
+    with factories() as s:
+        s.add(
+            Job(
+                source="greenhouse",
+                external_id="html-1",
+                company="Acme",
+                title="Eng",
+                url="https://x/1",
+                description=HTML_LADEN_DESCRIPTION,
+                skills=[],
+                source_updated_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+        s.add(
+            Job(
+                source="greenhouse",
+                external_id="clean-1",
+                company="Acme",
+                title="Eng",
+                url="https://x/2",
+                description="Already clean text.\n\nNo markup here.",
+                skills=[],
+                source_updated_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+        s.add(
+            Job(
+                source="manual",
+                external_id="empty-1",
+                company="Aptly",
+                title="Eng",
+                url="https://x/3",
+                description=None,
+                skills=[],
+                source_updated_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+        s.commit()
+
+    # Wire the CLI's SessionLocal to our in-memory engine for this test.
+    monkeypatch.setattr(cmd, "SessionLocal", factories)
+
+    report = cmd.run(dry_run=False)
+    assert report["scanned"] == 3
+    assert report["htmlish"] == 1
+    assert report["changed"] == 1
+
+    # Verify the row is actually rewritten.
+    with factories() as s:
+        rewritten = s.query(Job).filter(Job.external_id == "html-1").one().description or ""
+        assert "<p>" not in rewritten and "<ul>" not in rewritten
+        assert "- Build services in Python and Kafka." in rewritten
+
+    # Second run is a no-op.
+    report2 = cmd.run(dry_run=False)
+    assert report2["changed"] == 0
+
+
+def test_clean_descriptions_dry_run_makes_no_changes(monkeypatch, factories):
+    from app.cli import clean_descriptions as cmd
+
+    with factories() as s:
+        s.add(
+            Job(
+                source="greenhouse",
+                external_id="html-2",
+                company="Acme",
+                title="Eng",
+                url="https://x/4",
+                description=HTML_LADEN_DESCRIPTION,
+                skills=[],
+                source_updated_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+        s.commit()
+
+    monkeypatch.setattr(cmd, "SessionLocal", factories)
+    report = cmd.run(dry_run=True)
+    assert report["dry_run"] is True
+    assert report["changed"] == 1  # would-have-changed count
+
+    with factories() as s:
+        unchanged = s.query(Job).filter(Job.external_id == "html-2").one().description
+        assert "<p>" in unchanged  # the row is untouched

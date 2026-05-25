@@ -91,7 +91,7 @@ def tailor_generate(
     settings: Settings = Depends(get_settings),
 ) -> GenerateResponse:
     job = _load_job(db, payload.job_id)
-    resume = generate_resume(job, payload.answers, settings=settings)
+    resume = generate_resume(db, job, payload.answers, settings=settings)
     return GenerateResponse(
         job_id=job.id,
         demo_mode=not settings.has_anthropic_key,
@@ -110,14 +110,21 @@ class DocxRequest(BaseModel):
 
 
 @router.post("/tailor/docx")
-def tailor_docx(payload: DocxRequest) -> StreamingResponse:
+def tailor_docx(
+    payload: DocxRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
     """Stream the tailored resume as a DOCX file.
 
     Takes the already-generated `TailoredResume` rather than re-calling the
     LLM — the frontend already has the data, and we don't want to double-pay
-    for the same tailoring.
+    for the same tailoring. The candidate's header (name / email / phone /
+    location) is read from the canonical DB row so name changes to the
+    seed are reflected immediately.
     """
-    raw = render_docx(payload.resume)
+    from app.services.demo_candidate import get_candidate  # noqa: PLC0415
+
+    raw = render_docx(payload.resume, candidate=get_candidate(db))
     name = (payload.filename or "tailored-resume").strip() or "tailored-resume"
     if not name.lower().endswith(".docx"):
         name = f"{name}.docx"
