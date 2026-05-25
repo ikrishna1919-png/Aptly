@@ -1,16 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
 
 class Job(Base):
-    """A normalized job posting ingested from a source (Greenhouse, Lever, etc.).
+    """A normalized job posting ingested from a public ATS board.
 
-    Phase 0 keeps this minimal — just enough columns to prove the schema +
-    migration pipeline. Phase 1 will extend it with full ingestion fields.
+    The rolling-window guarantee lives on `source_updated_at`: anything older
+    than `HOURS_WINDOW` is deleted on each ingest pass. DB row timestamps
+    (`created_at` / `updated_at`) are bookkeeping only.
     """
 
     __tablename__ = "jobs"
@@ -22,9 +23,17 @@ class Job(Base):
     company: Mapped[str] = mapped_column(String(256), index=True)
     title: Mapped[str] = mapped_column(String(512))
     location: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    remote: Mapped[bool | None] = mapped_column(Boolean(), nullable=True)
+    employment_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    skills: Mapped[list[str]] = mapped_column(JSON(), nullable=False, default=list)
+    sponsors_visa: Mapped[bool | None] = mapped_column(Boolean(), nullable=True)
     url: Mapped[str] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
