@@ -1,18 +1,25 @@
 """The single-user demo candidate.
 
-Phase 4 is intentionally single-user — there are no accounts yet, so the
-tailoring endpoints all run against this hardcoded profile. Phase 2 will
-introduce real user profiles built from resume parsing.
+Phase 4 is intentionally single-user — there are no accounts yet. The
+canonical candidate now lives in the `candidates` table (seeded by Alembic
+migration 0005) so it's observable in the live DB. This module:
 
-Keep this representative: a real-looking 7-year senior software-engineer
-profile makes the analyze + generate prompts behave realistically end-to-end.
+  - holds DEMO_CANDIDATE: the seed payload (also imported by the migration)
+  - exposes get_candidate(db): the runtime accessor used by tailor service.
+    Reads from the DB; falls back to DEMO_CANDIDATE if the row is missing
+    (e.g. fresh test DBs that don't run migrations).
+
+Phase 2 will replace this with real user profiles built from resume parsing.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 DEMO_CANDIDATE: dict[str, Any] = {
     "name": "Alex Rivera",
@@ -116,3 +123,24 @@ def candidate_fingerprint(candidate: dict[str, Any] | None = None) -> str:
     means a different cache entry."""
     payload = json.dumps(candidate or DEMO_CANDIDATE, sort_keys=True).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def get_candidate(db: Session) -> dict[str, Any]:
+    """Return the canonical candidate profile.
+
+    Reads the `demo` row from the `candidates` table. Falls back to the
+    in-code DEMO_CANDIDATE only when the row doesn't exist — this happens
+    in test setups that create the schema via `Base.metadata.create_all`
+    without running the seed migration. In production the migration ensures
+    a row is always present.
+    """
+    # Local imports — keep this module importable from migrations without
+    # pulling the whole model tree.
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.models.candidate import DEMO_SLUG, Candidate  # noqa: PLC0415
+
+    row = db.execute(select(Candidate).where(Candidate.slug == DEMO_SLUG)).scalar_one_or_none()
+    if row is None:
+        return DEMO_CANDIDATE
+    return row.profile

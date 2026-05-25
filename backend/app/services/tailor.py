@@ -31,7 +31,14 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.models.job import Job
 from app.models.job_analysis import JobAnalysis
-from app.services.demo_candidate import DEMO_CANDIDATE, candidate_fingerprint
+from app.services.demo_candidate import candidate_fingerprint, get_candidate
+from app.sources._text import strip_html
+
+# Hard cap on the JD text we send to Claude — long descriptions waste tokens
+# and the marginal signal past ~6k chars is minimal. The truncation marker
+# is visible to the model so it knows the text was clipped.
+_MAX_JD_CHARS = 6000
+_TRUNCATION_NOTE = "\n[truncated]"
 
 if TYPE_CHECKING:
     from anthropic import Anthropic
@@ -154,7 +161,8 @@ def analyze_job(
     hash, so analyses are reused as long as both sides are unchanged.
     """
     settings = settings or get_settings()
-    candidate_fp = candidate_fingerprint()
+    candidate = get_candidate(db)
+    candidate_fp = candidate_fingerprint(candidate)
     job_fp = job.content_hash or _fallback_job_hash(job)
     input_hash = hashlib.sha256(f"{candidate_fp}:{job_fp}".encode()).hexdigest()
 
@@ -165,9 +173,9 @@ def analyze_job(
         return Analysis.model_validate(cached.analysis)
 
     if not settings.has_anthropic_key:
-        analysis = _demo_analysis(job)
+        analysis = _demo_analysis(job, candidate=candidate)
     else:
-        analysis = _llm_analyze(job, client=client, settings=settings)
+        analysis = _llm_analyze(job, candidate, client=client, settings=settings)
 
     # Upsert by job_id (unique).
     if cached is None:
@@ -186,6 +194,7 @@ def analyze_job(
 
 
 def generate_resume(
+    db: Session,
     job: Job,
     answers: dict[str, str],
     *,
@@ -195,9 +204,10 @@ def generate_resume(
     """Produce an ATS-optimized resume for `job`, incorporating the user's
     answers to the tailoring questions. Not cached — answers vary per call."""
     settings = settings or get_settings()
+    candidate = get_candidate(db)
     if not settings.has_anthropic_key:
-        return _demo_resume(job, answers)
-    return _llm_generate(job, answers, client=client, settings=settings)
+        return _demo_resume(job, answers, candidate=candidate)
+    return _llm_generate(job, answers, candidate, client=client, settings=settings)
 
 
 # ─── LLM paths ────────────────────────────────────────────────────────────────
@@ -223,8 +233,28 @@ _SYSTEM_GENERATE = (
 )
 
 
-def _candidate_block() -> str:
-    return "CANDIDATE PROFILE (do not modify these facts):\n" + json.dumps(DEMO_CANDIDATE, indent=2)
+def _candidate_block(candidate: dict[str, Any]) -> str:
+    return "CANDIDATE PROFILE (do not modify these facts):\n" + json.dumps(
+        candidate, indent=2, sort_keys=True
+    )
+
+
+def _clean_jd(job: Job) -> str:
+    """Sanitize + truncate the JD before it goes into the prompt.
+
+    Safety net: even if a job row was ingested before the strip_html
+    rewrite (or a future source forgets to clean its descriptions), we
+    re-run the cleaner here so the model never sees raw HTML. Empty / None
+    descriptions become a clear placeholder so the prompt is still
+    well-formed.
+    """
+    raw = job.description or ""
+    cleaned = strip_html(raw)
+    if not cleaned:
+        return "(no description provided)"
+    if len(cleaned) > _MAX_JD_CHARS:
+        cleaned = cleaned[: _MAX_JD_CHARS - len(_TRUNCATION_NOTE)] + _TRUNCATION_NOTE
+    return cleaned
 
 
 def _job_block(job: Job) -> str:
@@ -234,7 +264,7 @@ def _job_block(job: Job) -> str:
         f"Company: {job.company}\n"
         f"Location: {job.location or 'unspecified'}\n"
         f"Skills detected: {', '.join(job.skills) if job.skills else '(none detected)'}\n\n"
-        f"Job description:\n{job.description or '(no description provided)'}"
+        f"Job description:\n{_clean_jd(job)}"
     )
 
 
@@ -246,7 +276,13 @@ def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
     return Anthropic(api_key=settings.anthropic_api_key)
 
 
-def _llm_analyze(job: Job, *, client: Anthropic | None, settings: Settings) -> Analysis:
+def _llm_analyze(
+    job: Job,
+    candidate: dict[str, Any],
+    *,
+    client: Anthropic | None,
+    settings: Settings,
+) -> Analysis:
     api = _build_client(settings, client)
     response = api.messages.create(
         model=MODEL,
@@ -255,7 +291,7 @@ def _llm_analyze(job: Job, *, client: Anthropic | None, settings: Settings) -> A
             {"type": "text", "text": _SYSTEM_ANALYZE},
             {
                 "type": "text",
-                "text": _candidate_block(),
+                "text": _candidate_block(candidate),
                 "cache_control": {"type": "ephemeral"},
             },
         ],
@@ -277,6 +313,7 @@ def _llm_analyze(job: Job, *, client: Anthropic | None, settings: Settings) -> A
 def _llm_generate(
     job: Job,
     answers: dict[str, str],
+    candidate: dict[str, Any],
     *,
     client: Anthropic | None,
     settings: Settings,
@@ -289,7 +326,7 @@ def _llm_generate(
             {"type": "text", "text": _SYSTEM_GENERATE},
             {
                 "type": "text",
-                "text": _candidate_block(),
+                "text": _candidate_block(candidate),
                 "cache_control": {"type": "ephemeral"},
             },
         ],
@@ -327,13 +364,13 @@ def _first_text(response: Any) -> str:
 # ─── Demo-mode (no API key) ──────────────────────────────────────────────────
 
 
-def _demo_analysis(job: Job) -> Analysis:
+def _demo_analysis(job: Job, *, candidate: dict[str, Any]) -> Analysis:
     """Deterministic mock derived from the job's detected skills + candidate.
 
     Same job → same output every time. Clearly marked so it can't be mistaken
     for real model output, e.g. one of the questions explicitly says "[demo]".
     """
-    candidate_skills_lower = {s.lower() for s in DEMO_CANDIDATE["skills"]}
+    candidate_skills_lower = {s.lower() for s in candidate["skills"]}
     job_skills = list(job.skills or [])
     matched = [s for s in job_skills if s.lower() in candidate_skills_lower]
     gaps = [s for s in job_skills if s.lower() not in candidate_skills_lower]
@@ -342,7 +379,7 @@ def _demo_analysis(job: Job) -> Analysis:
     return Analysis(
         match_score=score,
         top_skills=job_skills[:5] or ["Communication", "Problem solving"],
-        matched=matched or DEMO_CANDIDATE["skills"][:5],
+        matched=matched or candidate["skills"][:5],
         gaps=gaps or ["(demo) no obvious gaps detected"],
         questions=[
             f"[demo] Which of your past projects best demonstrates fit for {job.title}?",
@@ -352,16 +389,16 @@ def _demo_analysis(job: Job) -> Analysis:
     )
 
 
-def _demo_resume(job: Job, answers: dict[str, str]) -> TailoredResume:
+def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]) -> TailoredResume:
     """Echo the canonical candidate back in the structured shape, with the
     user's answers folded into the summary so the round-trip still feels live."""
     answer_blob = " | ".join(v for v in answers.values() if v).strip()
-    summary = DEMO_CANDIDATE["summary"]
+    summary = candidate["summary"]
     if answer_blob:
         summary = f"{summary} (demo: incorporating — {answer_blob})"
     return TailoredResume(
         summary=summary,
-        skills=DEMO_CANDIDATE["skills"][:15],
+        skills=candidate["skills"][:15],
         experience=[
             ExperienceBullet(
                 company=e["company"],
@@ -370,11 +407,10 @@ def _demo_resume(job: Job, answers: dict[str, str]) -> TailoredResume:
                 dates=f"{e['start']} – {e['end']}",
                 bullets=list(e["bullets"]),
             )
-            for e in DEMO_CANDIDATE["experience"]
+            for e in candidate["experience"]
         ],
         education=[
-            f"{ed['degree']}, {ed['school']} ({ed['graduation']})"
-            for ed in DEMO_CANDIDATE["education"]
+            f"{ed['degree']}, {ed['school']} ({ed['graduation']})" for ed in candidate["education"]
         ],
         ats_notes=(
             "[demo mode] No ANTHROPIC_API_KEY is configured, so this resume is "
