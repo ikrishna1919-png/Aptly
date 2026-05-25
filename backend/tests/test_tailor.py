@@ -237,6 +237,11 @@ def test_analyze_uses_anthropic_when_key_present(factories, settings_with_key, m
         isinstance(b, dict) and b.get("cache_control", {}).get("type") == "ephemeral"
         for b in call["system"]
     )
+    # The schema sent to Anthropic must have additionalProperties:false on
+    # every object — otherwise the API 400s with
+    # "For 'object' type, 'additionalProperties' must be explicitly set to false".
+    schema = call["output_config"]["format"]["schema"]
+    assert _every_object_has_additional_properties_false(schema)
 
 
 def test_analyze_cache_hits_avoid_second_llm_call(factories, settings_with_key, monkeypatch):
@@ -286,3 +291,74 @@ def test_generate_uses_anthropic_when_key_present(factories, settings_with_key, 
     assert resume.skills[:2] == ["Python", "Kafka"]
     assert "Kafka" in resume.ats_notes or "Kafka" in resume.summary
     assert len(mock.calls) == 1
+    # Generate must send a strict schema too — the TailoredResume has a
+    # nested ExperienceBullet object, so this exercises the recursive walk
+    # into $defs / array items.
+    schema = mock.calls[0]["output_config"]["format"]["schema"]
+    assert _every_object_has_additional_properties_false(schema)
+
+
+# ── JSON-schema strictness regression tests ─────────────────────────────────
+
+
+def _every_object_has_additional_properties_false(schema: dict[str, Any]) -> bool:
+    """Walk every object node in the schema and confirm it sets
+    `additionalProperties: false`. Returns False with a useful repr in the
+    assertion if any object is missing the flag."""
+    missing: list[str] = []
+
+    def visit(node: Any, path: str) -> None:
+        if isinstance(node, list):
+            for i, item in enumerate(node):
+                visit(item, f"{path}[{i}]")
+            return
+        if not isinstance(node, dict):
+            return
+        is_object = node.get("type") == "object" or "properties" in node
+        if is_object and node.get("additionalProperties") is not False:
+            missing.append(path or "<root>")
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            if key in node and isinstance(node[key], dict):
+                for sub_key, sub in node[key].items():
+                    visit(sub, f"{path}.{key}.{sub_key}")
+        if "items" in node:
+            visit(node["items"], f"{path}.items")
+        if "prefixItems" in node:
+            visit(node["prefixItems"], f"{path}.prefixItems")
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in node:
+                visit(node[key], f"{path}.{key}")
+
+    visit(schema, "")
+    if missing:
+        # Surface the offending paths so a failure points at the exact node.
+        raise AssertionError(f"objects missing additionalProperties:false → {missing}")
+    return True
+
+
+def test_analysis_schema_is_strict_at_every_object_level():
+    assert _every_object_has_additional_properties_false(tailor_module.ANALYSIS_SCHEMA)
+
+
+def test_tailored_resume_schema_is_strict_at_every_object_level():
+    schema = tailor_module.TAILORED_RESUME_SCHEMA
+    assert _every_object_has_additional_properties_false(schema)
+    # Sanity: the nested ExperienceBullet definition is present and strict.
+    defs = schema.get("$defs") or schema.get("definitions") or {}
+    exp_def = defs.get("ExperienceBullet")
+    assert exp_def is not None, "ExperienceBullet $def should exist on TailoredResume"
+    assert exp_def["additionalProperties"] is False
+    # And the parser still accepts well-formed payloads — the strictification
+    # didn't drop required/properties.
+    parsed = tailor_module.TailoredResume.model_validate(
+        {
+            "summary": "s",
+            "skills": ["Python"],
+            "experience": [
+                {"company": "C", "title": "T", "dates": "2020 – 2022", "bullets": ["b"]}
+            ],
+            "education": ["edu"],
+            "ats_notes": "n",
+        }
+    )
+    assert parsed.experience[0].company == "C"
