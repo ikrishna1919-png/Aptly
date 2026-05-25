@@ -149,6 +149,27 @@ window, sorted newest-first. Supported query params:
 | `limit`           | int      | 1..200, default 50                      |
 | `offset`          | int      | default 0                               |
 
+## Resume tailoring (Phase 4)
+
+From any job detail page, the **Tailor my resume** panel runs the
+single-user demo candidate (hardcoded in `backend/app/services/demo_candidate.py`)
+against the live JD using **Claude Sonnet 4.6**:
+
+1. `POST /api/tailor/analyze {job_id}` — match score, top skills, gaps, and
+   three short tailoring questions. Cached per `(job, candidate)` so a
+   second click on the same role doesn't hit the API.
+2. `POST /api/tailor/generate {job_id, answers}` — ATS-optimized rewritten
+   resume (summary, skills, experience bullets, education, plus `atsNotes`
+   explaining the tailoring choices). Reframes only — never fabricates.
+3. `POST /api/tailor/docx {resume}` — streams a clean ATS-formatted `.docx`
+   file built with `python-docx`.
+
+Set `ANTHROPIC_API_KEY` on the backend to enable real Claude calls. If the
+key is unset the endpoints return deterministic mock data clearly labeled
+`demo mode` — the whole UI still works, you just don't get a real rewrite.
+Phase 2 will replace the hardcoded candidate with user accounts + resume
+parsing.
+
 ## CI
 
 `.github/workflows/ci.yml` lints and tests both apps on every push and
@@ -248,5 +269,6 @@ Render dashboard.
 
 ## Phase
 
-We are in **Phase 1 — Real data** (see `ROADMAP.md`). Do not jump ahead
-to later phases unless the user asks.
+We are in **Phase 4 — AI tailoring** (see `ROADMAP.md`). The Phase 2
+work (accounts + resume upload) is still pending; tailoring runs against
+a hardcoded demo candidate for now.

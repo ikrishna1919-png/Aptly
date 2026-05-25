@@ -22,9 +22,18 @@ class Settings(BaseSettings):
     # GitHub Actions workflow sends it in the X-Admin-Token header.
     admin_token: str = Field(default="", alias="ADMIN_TOKEN")
 
+    # Anthropic API key for resume tailoring (Phase 4). Empty string puts the
+    # tailoring endpoints into "demo mode" — they return deterministic mock
+    # data so nothing crashes when the key isn't configured.
+    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def has_anthropic_key(self) -> bool:
+        return bool(self.anthropic_api_key.strip())
 
 
 @lru_cache

@@ -1,0 +1,340 @@
+"""Resume tailoring against a job description, powered by Claude Sonnet 4.6.
+
+Two operations:
+    analyze(job) -> match score + gaps + 3 tailoring questions  (cached per job)
+    generate(job, answers) -> ATS-optimized rewritten resume
+
+When ANTHROPIC_API_KEY is unset the module enters "demo mode" — both
+operations return deterministic mock data derived from the job. This keeps
+the whole product functional in local dev and on a Render free plan
+without a key. Mocks are clearly labeled so they can't be mistaken for
+real model output.
+
+The prompts are structured so Claude's prompt cache reuses the stable
+prefix (system rules + candidate fingerprint) across requests:
+    [system, candidate]  ← cached
+    [job description, user answers]  ← volatile
+The `cache_control` breakpoint sits on the last cached block.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.config import Settings, get_settings
+from app.models.job import Job
+from app.models.job_analysis import JobAnalysis
+from app.services.demo_candidate import DEMO_CANDIDATE, candidate_fingerprint
+
+if TYPE_CHECKING:
+    from anthropic import Anthropic
+
+log = logging.getLogger(__name__)
+
+MODEL = "claude-sonnet-4-6"
+
+
+# ─── Output schemas ──────────────────────────────────────────────────────────
+
+
+class Analysis(BaseModel):
+    """The structured output of POST /api/tailor/analyze."""
+
+    match_score: int = Field(ge=0, le=100, description="Overall fit, 0-100")
+    top_skills: list[str] = Field(description="3-7 skills the JD emphasizes most")
+    matched: list[str] = Field(description="Candidate skills that align with the JD")
+    gaps: list[str] = Field(description="Skills/experience the JD wants that are weak or absent")
+    questions: list[str] = Field(
+        min_length=3,
+        max_length=3,
+        description="Three short questions whose answers would let us tailor the resume better.",
+    )
+
+
+class ExperienceBullet(BaseModel):
+    company: str
+    title: str
+    location: str | None = None
+    dates: str
+    bullets: list[str]
+
+
+class TailoredResume(BaseModel):
+    """The structured output of POST /api/tailor/generate."""
+
+    summary: str = Field(description="2-4 sentence ATS-optimized professional summary")
+    skills: list[str] = Field(description="Reordered + filtered skills relevant to this JD")
+    experience: list[ExperienceBullet]
+    education: list[str] = Field(description="One line per education entry")
+    ats_notes: str = Field(
+        description="Short note (2-4 sentences) explaining the tailoring choices."
+    )
+
+
+# ─── Public API ──────────────────────────────────────────────────────────────
+
+
+def analyze_job(
+    db: Session,
+    job: Job,
+    *,
+    settings: Settings | None = None,
+    client: Anthropic | None = None,
+) -> Analysis:
+    """Return the cached analysis for `job` or compute a fresh one.
+
+    The cache key combines the candidate fingerprint with the job's content
+    hash, so analyses are reused as long as both sides are unchanged.
+    """
+    settings = settings or get_settings()
+    candidate_fp = candidate_fingerprint()
+    job_fp = job.content_hash or _fallback_job_hash(job)
+    input_hash = hashlib.sha256(f"{candidate_fp}:{job_fp}".encode()).hexdigest()
+
+    cached = db.execute(
+        select(JobAnalysis).where(JobAnalysis.job_id == job.id)
+    ).scalar_one_or_none()
+    if cached is not None and cached.input_hash == input_hash:
+        return Analysis.model_validate(cached.analysis)
+
+    if not settings.has_anthropic_key:
+        analysis = _demo_analysis(job)
+    else:
+        analysis = _llm_analyze(job, client=client, settings=settings)
+
+    # Upsert by job_id (unique).
+    if cached is None:
+        db.add(
+            JobAnalysis(
+                job_id=job.id,
+                input_hash=input_hash,
+                analysis=analysis.model_dump(),
+            )
+        )
+    else:
+        cached.input_hash = input_hash
+        cached.analysis = analysis.model_dump()
+    db.commit()
+    return analysis
+
+
+def generate_resume(
+    job: Job,
+    answers: dict[str, str],
+    *,
+    settings: Settings | None = None,
+    client: Anthropic | None = None,
+) -> TailoredResume:
+    """Produce an ATS-optimized resume for `job`, incorporating the user's
+    answers to the tailoring questions. Not cached — answers vary per call."""
+    settings = settings or get_settings()
+    if not settings.has_anthropic_key:
+        return _demo_resume(job, answers)
+    return _llm_generate(job, answers, client=client, settings=settings)
+
+
+# ─── LLM paths ────────────────────────────────────────────────────────────────
+
+_SYSTEM_ANALYZE = (
+    "You are an expert resume reviewer and ATS coach. You will be shown a "
+    "candidate profile and a job description. Score the fit, identify matched "
+    "skills and gaps, and produce three short tailoring questions whose answers "
+    "would let us write a stronger, more targeted resume. Be honest about gaps; "
+    "do NOT invent experience the candidate doesn't have. Output strictly the "
+    "JSON schema requested — no prose."
+)
+
+_SYSTEM_GENERATE = (
+    "You are an ATS-aware resume writer. Rewrite the candidate's resume to "
+    "match the target job while staying STRICTLY truthful — you may reframe, "
+    "reorder, and emphasize, but you may NEVER fabricate experience, skills, "
+    "employers, or outcomes that aren't in the candidate profile. Use the "
+    "user's answers to add detail where the source material is thin. Optimize "
+    "for ATS: mirror keywords from the JD where the candidate genuinely has "
+    "them, use strong action verbs, keep bullets one line where possible, and "
+    "drop irrelevant skills. Output strictly the JSON schema requested."
+)
+
+
+def _candidate_block() -> str:
+    return "CANDIDATE PROFILE (do not modify these facts):\n" + json.dumps(DEMO_CANDIDATE, indent=2)
+
+
+def _job_block(job: Job) -> str:
+    return (
+        f"TARGET JOB:\n"
+        f"Title: {job.title}\n"
+        f"Company: {job.company}\n"
+        f"Location: {job.location or 'unspecified'}\n"
+        f"Skills detected: {', '.join(job.skills) if job.skills else '(none detected)'}\n\n"
+        f"Job description:\n{job.description or '(no description provided)'}"
+    )
+
+
+def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
+    if client is not None:
+        return client
+    from anthropic import Anthropic  # noqa: PLC0415 — lazy import
+
+    return Anthropic(api_key=settings.anthropic_api_key)
+
+
+def _llm_analyze(job: Job, *, client: Anthropic | None, settings: Settings) -> Analysis:
+    api = _build_client(settings, client)
+    response = api.messages.create(
+        model=MODEL,
+        max_tokens=1500,
+        system=[
+            {"type": "text", "text": _SYSTEM_ANALYZE},
+            {
+                "type": "text",
+                "text": _candidate_block(),
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    _job_block(job)
+                    + "\n\nReturn the analysis as JSON matching the provided schema."
+                ),
+            }
+        ],
+        output_config={"format": {"type": "json_schema", "schema": Analysis.model_json_schema()}},
+    )
+    text = _first_text(response)
+    return Analysis.model_validate_json(text)
+
+
+def _llm_generate(
+    job: Job,
+    answers: dict[str, str],
+    *,
+    client: Anthropic | None,
+    settings: Settings,
+) -> TailoredResume:
+    api = _build_client(settings, client)
+    response = api.messages.create(
+        model=MODEL,
+        max_tokens=3000,
+        system=[
+            {"type": "text", "text": _SYSTEM_GENERATE},
+            {
+                "type": "text",
+                "text": _candidate_block(),
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    _job_block(job)
+                    + "\n\nUser answers to tailoring questions (may be partial):\n"
+                    + json.dumps(answers, indent=2)
+                    + "\n\nReturn the tailored resume as JSON matching the provided schema. "
+                    "Never invent facts not present in the candidate profile."
+                ),
+            }
+        ],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": TailoredResume.model_json_schema(),
+            }
+        },
+    )
+    text = _first_text(response)
+    return TailoredResume.model_validate_json(text)
+
+
+def _first_text(response: Any) -> str:
+    """Pull the first text block out of a Messages API response."""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    raise RuntimeError("Anthropic response contained no text block")
+
+
+# ─── Demo-mode (no API key) ──────────────────────────────────────────────────
+
+
+def _demo_analysis(job: Job) -> Analysis:
+    """Deterministic mock derived from the job's detected skills + candidate.
+
+    Same job → same output every time. Clearly marked so it can't be mistaken
+    for real model output, e.g. one of the questions explicitly says "[demo]".
+    """
+    candidate_skills_lower = {s.lower() for s in DEMO_CANDIDATE["skills"]}
+    job_skills = list(job.skills or [])
+    matched = [s for s in job_skills if s.lower() in candidate_skills_lower]
+    gaps = [s for s in job_skills if s.lower() not in candidate_skills_lower]
+    score = 60 + min(35, len(matched) * 5) - min(15, len(gaps) * 2)
+    score = max(20, min(95, score))
+    return Analysis(
+        match_score=score,
+        top_skills=job_skills[:5] or ["Communication", "Problem solving"],
+        matched=matched or DEMO_CANDIDATE["skills"][:5],
+        gaps=gaps or ["(demo) no obvious gaps detected"],
+        questions=[
+            f"[demo] Which of your past projects best demonstrates fit for {job.title}?",
+            "[demo] What measurable impact (metric + number) are you most proud of?",
+            f"[demo] Why are you interested in {job.company} specifically?",
+        ],
+    )
+
+
+def _demo_resume(job: Job, answers: dict[str, str]) -> TailoredResume:
+    """Echo the canonical candidate back in the structured shape, with the
+    user's answers folded into the summary so the round-trip still feels live."""
+    answer_blob = " | ".join(v for v in answers.values() if v).strip()
+    summary = DEMO_CANDIDATE["summary"]
+    if answer_blob:
+        summary = f"{summary} (demo: incorporating — {answer_blob})"
+    return TailoredResume(
+        summary=summary,
+        skills=DEMO_CANDIDATE["skills"][:15],
+        experience=[
+            ExperienceBullet(
+                company=e["company"],
+                title=e["title"],
+                location=e.get("location"),
+                dates=f"{e['start']} – {e['end']}",
+                bullets=list(e["bullets"]),
+            )
+            for e in DEMO_CANDIDATE["experience"]
+        ],
+        education=[
+            f"{ed['degree']}, {ed['school']} ({ed['graduation']})"
+            for ed in DEMO_CANDIDATE["education"]
+        ],
+        ats_notes=(
+            "[demo mode] No ANTHROPIC_API_KEY is configured, so this resume is "
+            f"the canonical candidate profile tailored against “{job.title}” "
+            "using a deterministic mock. Set ANTHROPIC_API_KEY on the backend to "
+            "get a real Claude-generated rewrite."
+        ),
+    )
+
+
+def _fallback_job_hash(job: Job) -> str:
+    """If a job row has no content_hash (older rows), derive a deterministic
+    fingerprint from its visible fields."""
+    payload = json.dumps(
+        {
+            "title": job.title,
+            "company": job.company,
+            "description": job.description or "",
+            "skills": sorted(job.skills or []),
+        },
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
