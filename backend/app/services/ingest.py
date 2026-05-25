@@ -204,12 +204,19 @@ def _upsert(db: Session, nj: NormalizedJob, source_updated: datetime) -> tuple[b
 
 def _delete_expired(db: Session, window_start: datetime) -> int:
     """Delete any job whose source_updated_at is older than the window
-    (or NULL — those can't satisfy the freshness guarantee)."""
+    (or NULL — those can't satisfy the freshness guarantee).
+
+    Manual jobs (source == MANUAL_SOURCE) are exempt — they persist until
+    explicitly deleted via the admin DELETE endpoint.
+    """
     from sqlalchemy import or_
+
+    from app.models.job import MANUAL_SOURCE
 
     result = db.execute(
         delete(Job).where(
-            or_(Job.source_updated_at.is_(None), Job.source_updated_at < window_start)
+            Job.source != MANUAL_SOURCE,
+            or_(Job.source_updated_at.is_(None), Job.source_updated_at < window_start),
         )
     )
     return result.rowcount or 0

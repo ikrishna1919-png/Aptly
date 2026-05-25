@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.database import get_db
-from app.models.job import Job
+from app.models.job import MANUAL_SOURCE, Job
 
 router = APIRouter()
 
@@ -29,6 +29,7 @@ class JobOut(BaseModel):
     location: str | None
     remote: bool | None
     employment_type: str | None
+    salary: str | None
     skills: list[str]
     sponsors_visa: bool | None
     url: str
@@ -62,7 +63,13 @@ def list_jobs(
 ) -> JobsListResponse:
     window_start = datetime.now(UTC) - timedelta(hours=settings.hours_window)
 
-    base = select(Job).where(Job.source_updated_at >= window_start)
+    # Manual jobs always appear in the feed regardless of window — they're
+    # human-curated and explicitly persisted.
+    from sqlalchemy import or_
+
+    base = select(Job).where(
+        or_(Job.source_updated_at >= window_start, Job.source == MANUAL_SOURCE)
+    )
     if q:
         pattern = f"%{q.lower()}%"
         base = base.where(

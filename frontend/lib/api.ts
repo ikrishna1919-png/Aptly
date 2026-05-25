@@ -7,6 +7,7 @@ export type Job = {
   location: string | null;
   remote: boolean | null;
   employment_type: string | null;
+  salary: string | null;
   skills: string[];
   sponsors_visa: boolean | null;
   url: string;
@@ -14,6 +15,60 @@ export type Job = {
   posted_at: string | null;
   source_updated_at: string | null;
 };
+
+export const MANUAL_SOURCE = "manual";
+
+export type ManualJobInput = {
+  title: string;
+  company: string;
+  apply_url: string;
+  location?: string;
+  remote?: boolean | null;
+  employment_type?: string;
+  salary?: string;
+  skills?: string[];
+  sponsors_visa?: boolean | null;
+  description?: string;
+};
+
+export async function createManualJob(
+  input: ManualJobInput,
+  token: string,
+): Promise<Job> {
+  const res = await fetch(`${API_URL}/api/admin/jobs`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Token": token,
+    },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const detail = await safeDetail(res);
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
+  return (await res.json()) as Job;
+}
+
+export async function deleteManualJob(id: number, token: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/admin/jobs/${id}`, {
+    method: "DELETE",
+    headers: { "X-Admin-Token": token },
+  });
+  if (!res.ok) {
+    const detail = await safeDetail(res);
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
+}
+
+async function safeDetail(res: Response): Promise<string | null> {
+  try {
+    const body = (await res.json()) as { detail?: string };
+    return body.detail ?? null;
+  } catch {
+    return null;
+  }
+}
 
 export type JobsResponse = {
   jobs: Job[];
