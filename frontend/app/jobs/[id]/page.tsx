@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { CompanyMark } from "@/components/company-mark";
+import { TailorPanel } from "@/components/tailor-panel";
 import { fetchJob, MANUAL_SOURCE, type Job } from "@/lib/api";
 import { formatLongDate, formatRelative } from "@/lib/utils";
 
@@ -91,6 +92,13 @@ export default async function JobDetailPage({
       </header>
 
       <Separator className="my-8" />
+
+      <section className="mb-8" aria-labelledby="tailor-heading">
+        <h2 id="tailor-heading" className="sr-only">
+          Tailor my resume
+        </h2>
+        <TailorPanel job={job} />
+      </section>
 
       {job.skills.length > 0 && (
         <section className="mb-8" aria-labelledby="skills-heading">

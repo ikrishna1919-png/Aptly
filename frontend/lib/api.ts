@@ -128,3 +128,77 @@ async function safeDetail(res: Response): Promise<string | null> {
     return null;
   }
 }
+
+// ── Tailoring (Phase 4) ─────────────────────────────────────────────────────
+
+export type Analysis = {
+  match_score: number;
+  top_skills: string[];
+  matched: string[];
+  gaps: string[];
+  questions: string[];
+};
+
+export type ExperienceBullet = {
+  company: string;
+  title: string;
+  location: string | null;
+  dates: string;
+  bullets: string[];
+};
+
+export type TailoredResume = {
+  summary: string;
+  skills: string[];
+  experience: ExperienceBullet[];
+  education: string[];
+  ats_notes: string;
+};
+
+export type AnalyzeResponse = {
+  job_id: number;
+  demo_mode: boolean;
+  analysis: Analysis;
+};
+
+export type GenerateResponse = {
+  job_id: number;
+  demo_mode: boolean;
+  resume: TailoredResume;
+};
+
+export async function analyzeJob(jobId: number): Promise<AnalyzeResponse> {
+  const res = await fetch(`${API_URL}/api/tailor/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId }),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as AnalyzeResponse;
+}
+
+export async function generateTailoredResume(
+  jobId: number,
+  answers: Record<string, string>,
+): Promise<GenerateResponse> {
+  const res = await fetch(`${API_URL}/api/tailor/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId, answers }),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as GenerateResponse;
+}
+
+export async function downloadResumeDocx(
+  resume: TailoredResume,
+  filename: string,
+): Promise<Blob> {
+  const res = await fetch(`${API_URL}/api/tailor/docx`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resume, filename }),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return await res.blob();
+}
