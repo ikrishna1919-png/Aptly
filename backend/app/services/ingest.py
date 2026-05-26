@@ -3,12 +3,26 @@
 The rolling-window guarantee: after every run, the `jobs` table contains
 exactly the postings whose `source_updated_at` falls within the last
 `HOURS_WINDOW` hours. Anything older is deleted.
+
+Per-board failures (timeout, 404, malformed JSON) are caught + logged +
+counted but never abort the run — one slow board can't stall the rest.
+HTTP-level timeouts live on the source adapters' `httpx.Client`
+(`timeout=20.0` for both Greenhouse and Lever).
+
+Long ingests don't fit inside a typical HTTP request budget (Render's
+free tier kills connections at 100s), so `POST /api/admin/ingest` no
+longer awaits `run_ingest()` directly. It calls
+`start_background_ingest()`, which writes an `IngestRun` row and spawns
+a daemon thread to do the work, and returns the new `run_id` immediately
+so the caller can poll `GET /api/admin/ingest/{run_id}` for completion.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import threading
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -16,6 +30,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.database import SessionLocal
+from app.models.ingest_run import (
+    INGEST_STATUS_FAILED,
+    INGEST_STATUS_SUCCESS,
+    IngestRun,
+)
 from app.models.job import Job
 from app.sources import SOURCES, JobSource, NormalizedJob
 from app.sources.base import SourceUnavailable
@@ -220,3 +240,83 @@ def _delete_expired(db: Session, window_start: datetime) -> int:
         )
     )
     return result.rowcount or 0
+
+
+# ─── Background runner ─────────────────────────────────────────────────────
+
+
+def _launch_worker(target, args: tuple) -> None:
+    """Indirection so tests can monkey-patch to run inline.
+
+    Production: spawns a daemon thread. Tests: replace this with
+    `lambda t, a: t(*a)` to execute the worker synchronously."""
+    threading.Thread(target=target, args=args, daemon=True).start()
+
+
+def _finish_run(
+    db: Session,
+    run_id: str,
+    *,
+    status: str,
+    stats: dict,
+    error: str | None,
+) -> None:
+    """Write the terminal status onto an IngestRun row. Silent if the row
+    is missing (e.g. operator-deleted) — we'd rather log + move on than
+    crash the worker."""
+    run = db.execute(select(IngestRun).where(IngestRun.run_id == run_id)).scalar_one_or_none()
+    if run is None:
+        log.warning("ingest run %s row not found at finish", run_id)
+        return
+    run.status = status
+    run.stats = stats
+    run.error = error
+    run.finished_at = _utcnow()
+    db.commit()
+
+
+def _execute_ingest_run(run_id: str, settings: Settings) -> None:
+    """Worker entrypoint. Opens its own DB session(s); never raises out."""
+    try:
+        with SessionLocal() as db:
+            stats = run_ingest(db, settings)
+        with SessionLocal() as db:
+            _finish_run(
+                db,
+                run_id,
+                status=INGEST_STATUS_SUCCESS,
+                stats=stats.to_dict(),
+                error=None,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.exception("ingest run %s failed", run_id)
+        try:
+            with SessionLocal() as db:
+                _finish_run(
+                    db,
+                    run_id,
+                    status=INGEST_STATUS_FAILED,
+                    stats={},
+                    error=str(e),
+                )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "failed to record failure for ingest run %s — DB unreachable?",
+                run_id,
+            )
+
+
+def start_background_ingest(settings: Settings) -> str:
+    """Create an IngestRun row + spawn a worker. Returns the run_id so
+    the caller can hand it back to the client immediately.
+
+    The HTTP request that triggered this call is free to return 202 the
+    moment we return — the actual work continues in `_execute_ingest_run`
+    until it commits its terminal status onto the IngestRun row.
+    """
+    run_id = uuid.uuid4().hex
+    with SessionLocal() as db:
+        db.add(IngestRun(run_id=run_id, status="running", stats={}))
+        db.commit()
+    _launch_worker(_execute_ingest_run, (run_id, settings))
+    return run_id

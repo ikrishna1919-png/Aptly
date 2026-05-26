@@ -1,11 +1,17 @@
 """Admin endpoints — protected by a shared token.
 
-- POST /admin/ingest        — run the ATS ingest + rolling-window cleanup.
-- POST /admin/jobs          — add a manual job (persists indefinitely).
-- DELETE /admin/jobs/{id}   — remove a manual job.
+- POST /admin/ingest             — KICK OFF an ATS ingest + cleanup run.
+                                   Returns 202 + a `run_id` immediately;
+                                   the work continues in a background
+                                   thread.
+- GET  /admin/ingest             — Latest ingest run (running, success,
+                                   or failed) with its full stats.
+- GET  /admin/ingest/{run_id}    — That specific run.
+- POST /admin/jobs               — Add a manual job (persists indefinitely).
+- DELETE /admin/jobs/{id}        — Remove a manual job.
 
-The same scheduled GitHub Actions workflow calls /admin/ingest every 6h.
-The manual-jobs endpoints back the /admin frontend page.
+The scheduled GitHub Actions workflow POSTs /admin/ingest every 6h and
+treats the 202 as success — no more 502s on long runs.
 """
 
 from __future__ import annotations
@@ -14,15 +20,17 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.jobs import JobOut
 from app.config import Settings, get_settings
 from app.database import get_db
+from app.models.ingest_run import IngestRun
 from app.models.job import MANUAL_SOURCE, Job
-from app.services.ingest import run_ingest
+from app.services.ingest import start_background_ingest
 
 router = APIRouter()
 
@@ -40,15 +48,76 @@ def _require_admin(settings: Settings, token: str | None) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
 
 
-@router.post("/admin/ingest")
+class IngestStartResponse(BaseModel):
+    run_id: str
+    status: str = Field(default="running")
+    status_url: str = Field(description="Poll this for completion. Final status comes via GET.")
+
+
+class IngestRunOut(BaseModel):
+    run_id: str
+    status: str
+    stats: dict
+    error: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+@router.post(
+    "/admin/ingest",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=IngestStartResponse,
+)
 def admin_ingest(
+    response: Response,
+    settings: Settings = Depends(get_settings),
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> IngestStartResponse:
+    """Kick off an ingest pass and return immediately.
+
+    Ingestion can take 30s–several minutes depending on the number of
+    boards and how the upstream ATSes feel that day, well over the
+    Render free-tier 100-second request budget. So we run it in a
+    background thread and let the caller poll
+    `GET /api/admin/ingest/{run_id}` for completion.
+    """
+    _require_admin(settings, x_admin_token)
+    run_id = start_background_ingest(settings)
+    status_url = f"/api/admin/ingest/{run_id}"
+    response.headers["Location"] = status_url
+    return IngestStartResponse(run_id=run_id, status_url=status_url)
+
+
+@router.get("/admin/ingest", response_model=IngestRunOut)
+def latest_ingest_run(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
-) -> dict:
+) -> IngestRun:
+    """Return the most recently started ingest run (any status)."""
     _require_admin(settings, x_admin_token)
-    stats = run_ingest(db, settings)
-    return stats.to_dict()
+    run = db.execute(
+        select(IngestRun).order_by(IngestRun.started_at.desc()).limit(1)
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no ingest runs yet")
+    return run
+
+
+@router.get("/admin/ingest/{run_id}", response_model=IngestRunOut)
+def get_ingest_run(
+    run_id: str = Path(..., min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> IngestRun:
+    _require_admin(settings, x_admin_token)
+    run = db.execute(select(IngestRun).where(IngestRun.run_id == run_id)).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ingest run not found")
+    return run
 
 
 class ManualJobIn(BaseModel):
