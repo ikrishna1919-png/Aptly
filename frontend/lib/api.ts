@@ -132,14 +132,44 @@ export async function saveProfile(profile: Profile, token: string): Promise<Prof
   return (await res.json()) as Profile;
 }
 
+// Parsing a full resume against Claude is slow (~10–60s), so this fetch
+// runs with a client-side abort budget that's a couple seconds longer
+// than the backend's 90-second SDK timeout. Without an explicit budget
+// here, an upstream hiccup that doesn't close the TCP connection would
+// leave the spinner running forever.
+const PARSE_TIMEOUT_MS = 95_000;
+
+export class ParseTimeoutError extends Error {
+  constructor() {
+    super(
+      "Parse took too long. The resume may be too long, or the AI service is slow right now — try a shorter resume and retry.",
+    );
+    this.name = "ParseTimeoutError";
+  }
+}
+
 export async function parseProfileText(text: string, token: string): Promise<Profile> {
-  const res = await fetch(`${API_URL}/api/admin/profile/parse`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Admin-Token": token },
-    body: JSON.stringify({ text }),
-  });
-  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
-  return (await res.json()) as Profile;
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_URL}/api/admin/profile/parse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+    }
+    return (await res.json()) as Profile;
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new ParseTimeoutError();
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 export type ManualJobInput = {

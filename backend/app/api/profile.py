@@ -23,7 +23,14 @@ from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.candidate import DEMO_SLUG, Candidate
 from app.services.demo_candidate import DEMO_CANDIDATE
-from app.services.profile_parser import Profile, ResumeParseError, parse_resume
+from app.services.profile_parser import (
+    Profile,
+    ResumeParseConfigError,
+    ResumeParseConnectionError,
+    ResumeParseError,
+    ResumeParseTimeoutError,
+    parse_resume,
+)
 
 router = APIRouter()
 
@@ -92,7 +99,17 @@ def parse_profile_text(
     _require_admin(settings, x_admin_token)
     try:
         return parse_resume(payload.text, settings=settings)
-    except ResumeParseError as e:
-        # 503 keeps parity with the rest of /admin — "this endpoint exists
-        # but a dependency isn't configured / available".
+    except ResumeParseConfigError as e:
+        # Missing API key, empty input — caller-fixable config issue.
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
+    except ResumeParseTimeoutError as e:
+        # We bailed before the upstream proxy could 502 us. Surfaces a
+        # readable message instead of a generic 504.
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)) from e
+    except ResumeParseConnectionError as e:
+        # We never got bytes from Anthropic — DNS / TLS / dropped conn.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    except ResumeParseError as e:
+        # Catch-all (bad JSON, generic API error). 502 is the right shape
+        # — it's an upstream failure, not ours.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
