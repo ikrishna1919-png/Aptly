@@ -1,8 +1,10 @@
 name: Scheduled Ingest
 
-# Calls the deployed backend's protected ingest endpoint every 6 hours.
-# The backend handles fetch → dedupe → upsert → expiry of jobs older
-# than HOURS_WINDOW (default 48h), so the feed is always last-48h fresh.
+# Kicks off the backend's protected ingest endpoint every 6 hours.
+# The backend now runs the actual ingest in a background thread and
+# returns 202 immediately with a run_id, so this workflow never has to
+# wait for the long ATS-fetch loop to finish — that used to time out
+# against Render's 100s request budget.
 #
 # Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
 #   APTLY_API_URL       — base URL of the deployed backend, e.g.
@@ -22,7 +24,9 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 10 minutes is plenty — the POST returns in ~1s; the only thing
+    # that takes time here is the optional status poll below.
+    timeout-minutes: 10
     steps:
       - name: Trigger ingest
         env:
@@ -34,17 +38,66 @@ jobs:
             echo "::error::APTLY_API_URL and APTLY_ADMIN_TOKEN secrets must be set."
             exit 1
           fi
-          echo "POST ${APTLY_API_URL}/api/admin/ingest"
-          # --fail-with-body: non-2xx → exit non-zero AND print the body
-          # --max-time 600: 10-minute cap, generous for a cold-started free dyno
-          curl --fail-with-body \
+          base="${APTLY_API_URL%/}"
+          echo "POST ${base}/api/admin/ingest"
+
+          # --fail-with-body: non-2xx → non-zero exit AND prints the body.
+          # 202 Accepted is success here — the run continues in the
+          # background on the server.
+          # --max-time 30: more than enough for the kick-off, since the
+          # endpoint returns immediately.
+          http_status=$(curl --fail-with-body \
                --silent --show-error \
-               --max-time 600 \
-               -X POST "${APTLY_API_URL%/}/api/admin/ingest" \
+               --max-time 30 \
+               -X POST "${base}/api/admin/ingest" \
                -H "X-Admin-Token: ${APTLY_ADMIN_TOKEN}" \
                -H "Content-Type: application/json" \
-               -o /tmp/ingest.json
-          echo "::group::Ingest stats"
-          cat /tmp/ingest.json
+               -w "%{http_code}" \
+               -o /tmp/ingest_start.json)
+          echo "Kick-off HTTP ${http_status}"
+          echo "::group::Kick-off response"
+          cat /tmp/ingest_start.json
           echo
           echo "::endgroup::"
+
+          run_id=$(python3 -c "import json,sys;d=json.load(open('/tmp/ingest_start.json'));print(d['run_id'])")
+          echo "Run ID: ${run_id}"
+          echo "RUN_ID=${run_id}" >> "$GITHUB_ENV"
+
+      - name: Poll run status (best effort)
+        env:
+          APTLY_API_URL: ${{ secrets.APTLY_API_URL }}
+          APTLY_ADMIN_TOKEN: ${{ secrets.APTLY_ADMIN_TOKEN }}
+          RUN_ID: ${{ env.RUN_ID }}
+        # `continue-on-error: true` keeps the workflow green even if the
+        # poll fails or the run is still in progress when we stop polling.
+        # The kick-off above is the source of truth for "did we trigger
+        # the ingest"; the poll is purely for observability.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          base="${APTLY_API_URL%/}"
+          status_url="${base}/api/admin/ingest/${RUN_ID}"
+          echo "Polling ${status_url}"
+          # Poll every 15s for up to 4 minutes. Most runs finish faster;
+          # we don't FAIL the workflow if not — the run keeps going on
+          # the server and the next workflow run will see its result.
+          for i in $(seq 1 16); do
+            sleep 15
+            body=$(curl --silent --show-error \
+                 --max-time 15 \
+                 "${status_url}" \
+                 -H "X-Admin-Token: ${APTLY_ADMIN_TOKEN}")
+            current=$(echo "$body" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('status','unknown'))")
+            echo "[$i] status=${current}"
+            if [ "$current" = "success" ] || [ "$current" = "failed" ]; then
+              echo "::group::Final ingest stats"
+              echo "$body" | python3 -m json.tool
+              echo "::endgroup::"
+              if [ "$current" = "failed" ]; then
+                echo "::warning::ingest run reported failed status"
+              fi
+              exit 0
+            fi
+          done
+          echo "::notice::run ${RUN_ID} still in progress after polling window; check the dashboard."
