@@ -5,9 +5,14 @@ raw resume text to `POST /api/admin/profile/parse`, which routes through
 this module. We call Claude Sonnet 4.6 with strict structured output and
 a TRUTHFUL-ONLY prompt — anything the source doesn't say stays empty.
 
-Cost is bounded: caller is the single admin user; we cap the input at
-20K chars and don't cache (each paste is unique, and the result is
-reviewed before saving anyway).
+Cost & latency are bounded:
+  * Caller is the single admin user → no rate-limit concerns.
+  * Input is capped at `_MAX_RESUME_CHARS` chars (12K, ~3K tokens).
+  * `max_tokens=3000` keeps the response size predictable.
+  * The Anthropic SDK call has an explicit `_REQUEST_TIMEOUT_SECONDS`
+    deadline so we always return a clean 5xx instead of hanging — the
+    SDK default is 10 minutes which is way longer than any upstream
+    proxy will hold the connection open.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import anthropic
 from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
@@ -26,7 +32,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
-_MAX_RESUME_CHARS = 20_000
+
+# Tuned for the Render free-tier 100-second request timeout: we want OUR
+# timeout to fire first so the user gets a readable 504 rather than a
+# Render-issued 502 with an empty body.
+_REQUEST_TIMEOUT_SECONDS = 90.0
+_MAX_RESUME_CHARS = 12_000
+_MAX_OUTPUT_TOKENS = 3000
 
 
 # ─── Schema (mirrors the Candidate.profile shape used by the tailor service) ─
@@ -101,12 +113,26 @@ _SYSTEM_PARSE = (
 )
 
 
-# ─── Public API ─────────────────────────────────────────────────────────────
+# ─── Typed errors so the API layer can map cleanly to HTTP statuses ─────────
 
 
 class ResumeParseError(RuntimeError):
-    """Raised when parsing can't proceed (no API key) or the model output
-    doesn't validate against the Profile schema."""
+    """Base class for any failure during resume parsing."""
+
+
+class ResumeParseConfigError(ResumeParseError):
+    """ANTHROPIC_API_KEY is missing, empty input, etc. — caller error."""
+
+
+class ResumeParseTimeoutError(ResumeParseError):
+    """The Anthropic call didn't complete within `_REQUEST_TIMEOUT_SECONDS`."""
+
+
+class ResumeParseConnectionError(ResumeParseError):
+    """Couldn't reach Anthropic at all (DNS, TLS, dropped connection)."""
+
+
+# ─── Public API ─────────────────────────────────────────────────────────────
 
 
 def parse_resume(
@@ -117,48 +143,79 @@ def parse_resume(
 ) -> Profile:
     """Send `text` to Claude Sonnet 4.6 and return the parsed Profile.
 
-    Raises ResumeParseError when ANTHROPIC_API_KEY isn't configured —
-    parsing is an LLM-only operation and there's no meaningful demo
-    fallback (unlike tailoring, which can deterministically mock from
-    the job's detected skills).
+    Always returns within `_REQUEST_TIMEOUT_SECONDS` + a small overhead:
+    raises one of the typed `ResumeParseError` subclasses on any path
+    that can't produce a Profile. Never hangs.
     """
     settings = settings or get_settings()
     if not settings.has_anthropic_key:
-        raise ResumeParseError(
+        raise ResumeParseConfigError(
             "Resume parsing requires ANTHROPIC_API_KEY to be configured on the backend."
         )
     if not text or not text.strip():
-        raise ResumeParseError("Resume text is empty.")
+        raise ResumeParseConfigError("Resume text is empty.")
 
     api = _build_client(settings, client)
     clipped = text[:_MAX_RESUME_CHARS]
     truncated = len(text) > _MAX_RESUME_CHARS
 
-    response = api.messages.create(
-        model=MODEL,
-        max_tokens=4000,
-        system=[
-            {
-                "type": "text",
-                "text": _SYSTEM_PARSE,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Parse the resume below into the schema. Remember: "
-                    "never invent facts; leave fields blank when the source "
-                    "is silent.\n\n"
-                    "--- RESUME TEXT ---\n" + clipped + ("\n[truncated]" if truncated else "")
-                ),
-            }
-        ],
-        output_config={"format": {"type": "json_schema", "schema": PROFILE_SCHEMA}},
-    )
+    try:
+        response = api.messages.create(
+            model=MODEL,
+            max_tokens=_MAX_OUTPUT_TOKENS,
+            # Per-request override of the SDK's 10-minute default. The user
+            # waits in the browser for this — we want a fast, clean 5xx if
+            # Anthropic is slow, not an indefinite spin.
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            system=[
+                {
+                    "type": "text",
+                    "text": _SYSTEM_PARSE,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Parse the resume below into the schema. Remember: "
+                        "never invent facts; leave fields blank when the source "
+                        "is silent.\n\n"
+                        "--- RESUME TEXT ---\n" + clipped + ("\n[truncated]" if truncated else "")
+                    ),
+                }
+            ],
+            output_config={"format": {"type": "json_schema", "schema": PROFILE_SCHEMA}},
+        )
+    except anthropic.APITimeoutError as e:
+        log.warning("resume parse timed out after %ss", _REQUEST_TIMEOUT_SECONDS)
+        raise ResumeParseTimeoutError(
+            f"Claude didn't respond within {int(_REQUEST_TIMEOUT_SECONDS)}s. "
+            "Try a shorter resume, or retry — the API may be momentarily slow."
+        ) from e
+    except anthropic.APIConnectionError as e:
+        log.warning("resume parse connection error: %s", e)
+        raise ResumeParseConnectionError(
+            f"Couldn't reach Claude: {e}. Check the backend's network egress and retry."
+        ) from e
+    except anthropic.APIStatusError as e:
+        # 4xx/5xx from Anthropic itself (rate limit, overloaded, refusal,
+        # bad request from a malformed schema, etc.). Surface a readable
+        # message rather than letting the raw exception bubble.
+        log.warning("resume parse API error %s: %s", e.status_code, e)
+        raise ResumeParseError(
+            f"Anthropic returned an error ({e.status_code}). Retry, or shorten the resume."
+        ) from e
+
     body = _first_text(response)
-    return Profile.model_validate_json(body)
+    try:
+        return Profile.model_validate_json(body)
+    except Exception as e:  # noqa: BLE001 — pydantic.ValidationError + JSONDecodeError
+        log.warning("resume parse: model returned invalid JSON: %s", e)
+        raise ResumeParseError(
+            "Claude's response didn't match the expected profile shape. Retry — "
+            "this usually goes away on the next try."
+        ) from e
 
 
 # ─── Internals ──────────────────────────────────────────────────────────────
@@ -169,7 +226,12 @@ def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
         return client
     from anthropic import Anthropic  # noqa: PLC0415 — lazy import
 
-    return Anthropic(api_key=settings.anthropic_api_key)
+    # Top-level timeout matches the per-call override — defence in depth in
+    # case a caller forgets to pass it.
+    return Anthropic(
+        api_key=settings.anthropic_api_key,
+        timeout=_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 def _first_text(response: Any) -> str:

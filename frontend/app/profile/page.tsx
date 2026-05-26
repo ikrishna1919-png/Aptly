@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ParseTimeoutError,
   fetchProfile,
   parseProfileText,
   saveProfile,
@@ -109,7 +110,12 @@ export default function ProfilePage() {
       setProfile(normaliseProfile(parsed));
       setInfo("Parsed — review and edit, then click Save.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Parse failed");
+      if (e instanceof ParseTimeoutError) {
+        // Timeout has its own message already; show it verbatim.
+        setError(e.message);
+      } else {
+        setError(e instanceof Error ? e.message : "Parse failed");
+      }
     } finally {
       setParsing(false);
     }
@@ -242,6 +248,16 @@ export default function ProfilePage() {
             placeholder="Paste your resume as plain text — copy-paste from PDF or DOCX is fine."
           />
           <div className="flex items-center justify-end gap-3">
+            {parsing && (
+              <span
+                className="text-xs text-muted-foreground"
+                role="status"
+                aria-live="polite"
+              >
+                Parsing with Claude — usually 10–30s, up to 90s on a busy
+                day…
+              </span>
+            )}
             <Button
               type="button"
               onClick={() => void onParse()}

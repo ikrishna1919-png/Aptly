@@ -355,3 +355,165 @@ def test_parse_does_not_save(client_with_key, monkeypatch):
     # created one earlier in the test fixture, it's not the parsed name.
     if row is not None:
         assert row.profile.get("name") != "Parsed Name (NOT saved)"
+
+
+# ── Timeout / connection-error handling (the "hang forever" regression) ────
+
+
+class _RaisingAnthropicClient:
+    """Mock that ALWAYS raises a specific exception from messages.create.
+
+    Used to simulate Anthropic SDK errors without making a real network
+    call — the test wants to assert our error-mapping returns a clean
+    HTTP response instead of hanging.
+    """
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+        self.calls: list[dict] = []
+        self.messages = SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        raise self.exc
+
+
+def test_parse_returns_504_on_anthropic_timeout(client_with_key, monkeypatch):
+    """SDK raises APITimeoutError → endpoint returns 504 with a readable
+    message; never hangs."""
+    import anthropic
+
+    # APITimeoutError requires a request — pass a minimal sentinel.
+    timeout_exc = anthropic.APITimeoutError(request=SimpleNamespace())
+    monkeypatch.setattr(
+        parser_module,
+        "_build_client",
+        lambda s, c: _RaisingAnthropicClient(timeout_exc),
+    )
+
+    test_client, _ = client_with_key
+    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert res.status_code == 504
+    detail = res.json()["detail"].lower()
+    assert "didn't respond" in detail or "timed out" in detail or "timeout" in detail
+    # Number of seconds is mentioned so the user knows how long we waited.
+    assert "90" in res.json()["detail"]
+
+
+def test_parse_returns_502_on_anthropic_connection_error(client_with_key, monkeypatch):
+    """SDK raises APIConnectionError → endpoint returns 502 with the
+    underlying error message."""
+    import anthropic
+
+    conn_exc = anthropic.APIConnectionError(request=SimpleNamespace())
+    monkeypatch.setattr(
+        parser_module,
+        "_build_client",
+        lambda s, c: _RaisingAnthropicClient(conn_exc),
+    )
+
+    test_client, _ = client_with_key
+    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert res.status_code == 502
+    assert "claude" in res.json()["detail"].lower()
+
+
+def test_parse_returns_502_on_anthropic_api_status_error(client_with_key, monkeypatch):
+    """SDK raises APIStatusError (rate limit, overloaded, etc.) → 502
+    with an unambiguous error message rather than a 500 / hang."""
+    import anthropic
+    import httpx
+
+    rate_limit_exc = anthropic.RateLimitError(
+        "rate limited",
+        response=httpx.Response(
+            status_code=429,
+            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+        ),
+        body={"type": "error", "error": {"type": "rate_limit_error", "message": "x"}},
+    )
+    monkeypatch.setattr(
+        parser_module,
+        "_build_client",
+        lambda s, c: _RaisingAnthropicClient(rate_limit_exc),
+    )
+
+    test_client, _ = client_with_key
+    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert res.status_code == 502
+    # The user should see *something* — empty/None detail would defeat
+    # the whole point of the regression fix.
+    assert res.json()["detail"]
+
+
+def test_parse_returns_502_on_invalid_json_response(client_with_key, monkeypatch):
+    """If Claude returns text that doesn't validate against the Profile
+    schema, we surface a 502 rather than letting a Pydantic error bubble
+    as a 500."""
+
+    class _BadJSONClient:
+        def __init__(self):
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs):
+            block = SimpleNamespace(type="text", text="not even json {")
+            return SimpleNamespace(content=[block])
+
+    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: _BadJSONClient())
+
+    test_client, _ = client_with_key
+    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert res.status_code == 502
+    assert "retry" in res.json()["detail"].lower()
+
+
+def test_parse_passes_explicit_timeout_to_sdk(client_with_key, monkeypatch):
+    """Defence-in-depth check: the request to Anthropic carries an
+    explicit `timeout=` kwarg matching `_REQUEST_TIMEOUT_SECONDS`.
+    Without this, the SDK falls back to its 10-minute default and the
+    user sees an indefinite hang."""
+    canned = {
+        "name": "X",
+        "summary": "",
+        "skills": [],
+        "experience": [],
+        "education": [],
+    }
+    mock = _MockAnthropicClient(canned)
+    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
+
+    test_client, _ = client_with_key
+    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert res.status_code == 200
+
+    assert len(mock.calls) == 1
+    call_kwargs = mock.calls[0]
+    assert call_kwargs.get("timeout") == parser_module._REQUEST_TIMEOUT_SECONDS
+    assert call_kwargs["max_tokens"] == parser_module._MAX_OUTPUT_TOKENS
+
+
+def test_parse_clips_oversized_resume(client_with_key, monkeypatch):
+    """A pasted resume longer than `_MAX_RESUME_CHARS` is clipped before
+    we send it to Claude — protects both latency and token cost."""
+    canned = {
+        "name": "X",
+        "summary": "",
+        "skills": [],
+        "experience": [],
+        "education": [],
+    }
+    mock = _MockAnthropicClient(canned)
+    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
+
+    # 30K of A's, much larger than the 12K limit.
+    huge = "A" * 30_000
+
+    test_client, _ = client_with_key
+    res = test_client.post("/api/admin/profile/parse", json={"text": huge}, headers=AUTH)
+    assert res.status_code == 200
+
+    user_text = mock.calls[0]["messages"][0]["content"]
+    # The text payload includes prompt scaffolding + clipped body + the
+    # [truncated] marker. Must be substantially shorter than the input.
+    assert len(user_text) < parser_module._MAX_RESUME_CHARS + 500
+    assert "[truncated]" in user_text
