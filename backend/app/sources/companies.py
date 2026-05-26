@@ -1,45 +1,59 @@
 """Editable seed list of company board tokens.
 
-The ingest pipeline calls `fetch()` for each entry and **skips any token
-that doesn't resolve** (404 / network error / malformed payload), so it's
-safe to keep aspirational entries here — they get auto-filtered.
-
-Run `python -m app.cli validate-companies` to check the current state of
-the list against the live endpoints before relying on it.
-
-Format: list of (source_name, board_token). `source_name` MUST be a key
-in `app.sources.SOURCES`.
+╭──────────────────────────────────────────────────────────────────────╮
+│ HOW TO ADD A COMPANY                                                 │
+│   1. Find its public board on Greenhouse or Lever:                   │
+│       Greenhouse:  https://boards-api.greenhouse.io/v1/boards/<TOKEN>/jobs  │
+│       Lever:       https://api.lever.co/v0/postings/<TOKEN>?mode=json      │
+│   2. Drop the `<TOKEN>` into the matching list below — one per line. │
+│   3. Save. The next ingest pass picks it up; unreachable tokens are  │
+│      auto-skipped, so it's safe to commit aspirational entries.      │
+│   4. (Optional) `python -m app.cli validate-companies` reports which │
+│      tokens resolved vs were skipped, with posting counts.           │
+╰──────────────────────────────────────────────────────────────────────╯
 """
 
 from __future__ import annotations
 
-# Tuples of (source, token). Edit freely; unknown sources or stale tokens
-# are dropped at ingest time.
-COMPANIES: list[tuple[str, str]] = [
-    # ── Greenhouse ──
-    ("greenhouse", "stripe"),
-    ("greenhouse", "airbnb"),
-    ("greenhouse", "reddit"),
-    ("greenhouse", "dropbox"),
-    ("greenhouse", "mongodb"),
-    ("greenhouse", "instacart"),
-    ("greenhouse", "doordash"),
-    ("greenhouse", "gitlab"),
-    ("greenhouse", "asana"),
-    ("greenhouse", "segment"),
-    ("greenhouse", "palantir"),
-    ("greenhouse", "twilio"),
-    ("greenhouse", "robinhood"),
-    ("greenhouse", "brex"),
-    ("greenhouse", "plaid"),
-    ("greenhouse", "datadog"),
-    ("greenhouse", "coinbase"),
-    ("greenhouse", "lyft"),
-    ("greenhouse", "retool"),
-    ("greenhouse", "snowflake"),
-    # ── Lever ──
-    ("lever", "netflix"),
-    ("lever", "github"),
-    ("lever", "ramp"),
-    ("lever", "mixpanel"),
+# ── Greenhouse board tokens ────────────────────────────────────────────────
+# Paste a new token on its own line below. Trailing comma is required by
+# Black; the format helps `git diff` show one row per change.
+GREENHOUSE_TOKENS: list[str] = [
+    "stripe",
+    "airbnb",
+    "reddit",
+    "dropbox",
+    "mongodb",
+    "instacart",
+    "doordash",
+    "gitlab",
+    "asana",
+    "segment",
+    "palantir",
+    "twilio",
+    "robinhood",
+    "brex",
+    "plaid",
+    "datadog",
+    "coinbase",
+    "lyft",
+    "retool",
+    "snowflake",
+    "vulcanelements",
+    "sigmacomputing",
+]
+
+# ── Lever board tokens ─────────────────────────────────────────────────────
+LEVER_TOKENS: list[str] = [
+    "netflix",
+    "github",
+    "ramp",
+    "mixpanel",
+]
+
+
+# Compose the (source, token) list ingest + validation consume. Don't add
+# entries here directly — extend GREENHOUSE_TOKENS or LEVER_TOKENS above.
+COMPANIES: list[tuple[str, str]] = [("greenhouse", token) for token in GREENHOUSE_TOKENS] + [
+    ("lever", token) for token in LEVER_TOKENS
 ]
