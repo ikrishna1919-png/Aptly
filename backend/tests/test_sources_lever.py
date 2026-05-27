@@ -60,7 +60,15 @@ def test_parses_array_payload_and_uses_apply_url():
     j2 = jobs[1]
     assert j2.url == "https://jobs.lever.co/acme/xyz-999"  # falls back to hostedUrl
     assert j2.remote is False  # workplaceType=onsite
-    assert "<p>" not in (j2.description or "")
+    # The rich HTML `description` field is preferred for storage and
+    # arrives at the frontend (after sanitization) with tags intact.
+    assert "<p>" in (j2.description or "")
+    assert "Lead our sales team" in (j2.description or "")
+
+    # The heuristics still get plain text — j1 used `descriptionPlain`
+    # and was wrapped in a paragraph for uniform HTML rendering.
+    assert j1.description and j1.description.startswith("<p>")
+    assert "<p><p>" not in j1.description  # no double-wrap
 
 
 def test_404_raises_source_unavailable():

@@ -482,11 +482,13 @@ def test_analysis_schema_has_no_unsupported_range_constraints():
     match_score = tailor_module.ANALYSIS_SCHEMA["properties"]["match_score"]
     assert "minimum" not in match_score and "maximum" not in match_score
     assert "0-100" in match_score["description"]
-    # Questions: no schema-level count constraint, but the system prompt
-    # carries the new spec ("one per gap").
+    # Questions: no schema-level count constraint (minItems/maxItems
+    # trigger Anthropic 400s). The cap (≤ 6) is enforced by the prompt
+    # AND a code-side truncation in `analyze_job`.
     questions = tailor_module.ANALYSIS_SCHEMA["properties"]["questions"]
     assert "minItems" not in questions and "maxItems" not in questions
-    assert "one per gap" in tailor_module._SYSTEM_ANALYZE.lower()
+    prompt = tailor_module._SYSTEM_ANALYZE.lower()
+    assert "max" in prompt and "6" in prompt
     # New field: genuine_lacks (the analyze spec's step 5).
     assert "genuine_lacks" in tailor_module.ANALYSIS_SCHEMA["properties"]
 
@@ -510,7 +512,9 @@ def test_analyze_prompt_embodies_the_ats_spec():
     # Step 3 — gap-only questions
     assert "gap-only" in p
     assert "do not ask about anything in `matched`" in p
-    assert "one per gap" in p
+    # MAX 6 questions, prioritised by impact — the prompt must state both.
+    assert "max" in p and "6" in p
+    assert "prioritis" in p or "prioritiz" in p
     # Step 5 — genuine lacks
     assert "genuine lacks" in p
     # Truthfulness reminder
@@ -767,3 +771,96 @@ def test_clean_descriptions_dry_run_makes_no_changes(monkeypatch, factories):
     with factories() as s:
         unchanged = s.query(Job).filter(Job.external_id == "html-2").one().description
         assert "<p>" in unchanged  # the row is untouched
+
+
+# ── 6-question cap (spec: tailor never surfaces more than 6) ───────────────
+
+
+def test_analyze_truncates_model_response_to_max_six_questions(
+    factories, settings_with_key, monkeypatch
+):
+    """Even if the model returns more than 6 questions (e.g. it
+    ignored the prompt cap), `analyze_job` truncates so the user
+    never sees more than 6. This is the hard guarantee — prompt
+    instruction is best-effort, the code-side truncation is the
+    contract."""
+    payload = {
+        "match_score": 60,
+        "top_skills": [f"skill-{i}" for i in range(12)],
+        "matched": [],
+        "gaps": [f"skill-{i}" for i in range(12)],
+        "questions": [f"Have you used skill-{i}?" for i in range(12)],
+    }
+    mock = _MockAnthropicClient(payload)
+    monkeypatch.setattr(tailor_module, "_build_client", lambda s, c: mock)
+
+    with factories() as s:
+        job = _seed_job(s)
+        result = tailor_module.analyze_job(s, job, settings=settings_with_key)
+
+    assert len(result.questions) == 6
+    # Truncation preserves order — the first 6 questions the model
+    # returned, which the prompt asked to be the highest-impact ones.
+    assert result.questions[0] == "Have you used skill-0?"
+    assert result.questions[5] == "Have you used skill-5?"
+
+
+def test_cached_analysis_with_too_many_questions_is_truncated_on_read(factories, settings_with_key):
+    """A row cached BEFORE the cap was introduced may still have more
+    than 6 questions on disk. Reading it back through `analyze_job`
+    must trim — we never want the user to suddenly see 12 questions
+    just because the cache wasn't invalidated."""
+    from app.models.job_analysis import JobAnalysis
+
+    with factories() as s:
+        job = _seed_job(s)
+        # Hand-write a cached analysis with 9 questions, and a matching
+        # input_hash so `analyze_job` takes the cache path.
+        candidate = tailor_module.get_candidate(s)
+        candidate_fp = tailor_module.candidate_fingerprint(candidate)
+        job_fp = job.content_hash or tailor_module._fallback_job_hash(job)
+        import hashlib
+
+        input_hash = hashlib.sha256(f"{candidate_fp}:{job_fp}".encode()).hexdigest()
+
+        s.add(
+            JobAnalysis(
+                job_id=job.id,
+                input_hash=input_hash,
+                analysis={
+                    "match_score": 70,
+                    "top_skills": [f"s{i}" for i in range(9)],
+                    "matched": [],
+                    "gaps": [f"s{i}" for i in range(9)],
+                    "questions": [f"q{i}?" for i in range(9)],
+                    "genuine_lacks": [],
+                },
+            )
+        )
+        s.commit()
+
+        result = tailor_module.analyze_job(s, job, settings=settings_with_key)
+    assert len(result.questions) == 6
+
+
+def test_demo_analyze_also_capped_at_six_questions(factories):
+    """Demo mode (no API key) must respect the same ceiling so local
+    dev sees the same UX as production."""
+    from app.config import Settings
+
+    settings = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        ANTHROPIC_API_KEY="",  # demo mode
+    )
+
+    with factories() as s:
+        job = _seed_job(s)
+        # Inject many skills onto the job so the demo path produces
+        # a long gap list.
+        job.skills = [f"skill-{i}" for i in range(12)]
+        s.add(job)
+        s.commit()
+        result = tailor_module.analyze_job(s, job, settings=settings)
+
+    assert len(result.questions) <= 6

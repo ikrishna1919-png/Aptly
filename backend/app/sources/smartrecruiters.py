@@ -23,6 +23,7 @@ No auth needed for published postings.
 
 from __future__ import annotations
 
+import html as html_module
 import logging
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
@@ -30,7 +31,7 @@ from datetime import UTC, datetime
 import httpx
 
 from app.services.skills import extract_skills
-from app.sources._text import infer_remote, infer_sponsorship, strip_html
+from app.sources._text import clean_html, infer_remote, infer_sponsorship, strip_html
 from app.sources.base import JobSource, NormalizedJob, SourceUnavailable
 
 log = logging.getLogger(__name__)
@@ -177,12 +178,15 @@ class SmartRecruitersSource(JobSource):
         location, remote_hint = _extract_location(raw)
 
         employment_type = _extract_employment_type(raw)
-        description = _extract_description(raw)
+        description_html = _extract_description(raw)
+        # Plain-text view drives the heuristics so they don't trip on
+        # the HTML tags we now keep in the stored description.
+        description_text = strip_html(description_html or "")
 
         # Prefer explicit remote signal from the API's location.remote
         # field; otherwise fall back to the shared inference helper.
         if remote_hint is None:
-            remote = infer_remote(location, description)
+            remote = infer_remote(location, description_text)
         else:
             remote = remote_hint
 
@@ -202,11 +206,11 @@ class SmartRecruitersSource(JobSource):
             location=location,
             remote=remote,
             employment_type=employment_type,
-            description=description,
+            description=description_html,
             posted_at=posted_at,
             source_updated_at=updated_at or posted_at or datetime.now(UTC),
-            sponsors_visa=infer_sponsorship(description),
-            skills=extract_skills(description),
+            sponsors_visa=infer_sponsorship(description_text),
+            skills=extract_skills(description_text),
         )
 
 
@@ -256,6 +260,14 @@ _KNOWN_SECTIONS = (
 
 
 def _extract_description(raw: dict) -> str | None:
+    """Assemble the JD sections into one HTML blob.
+
+    Each section becomes an `<h3>{title}</h3>` + the section's HTML
+    body (entity-decoded, tags preserved). The frontend sanitizes +
+    renders the result with prose styling, so the headings and any
+    list / emphasis structure SmartRecruiters provides show through
+    cleanly.
+    """
     job_ad = raw.get("jobAd")
     if not isinstance(job_ad, dict):
         return None
@@ -270,9 +282,9 @@ def _extract_description(raw: dict) -> str | None:
         if not text:
             return
         title = (section.get("title") if isinstance(section, dict) else None) or section_key
-        clean = strip_html(str(text))
-        if clean:
-            blocks.append(f"## {title}\n{clean}")
+        body = clean_html(str(text))
+        if body:
+            blocks.append(f"<h3>{html_module.escape(str(title))}</h3>\n{body}")
 
     # Known sections first, in a stable order.
     for key in _KNOWN_SECTIONS:

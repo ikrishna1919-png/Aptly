@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 import httpx
 
 from app.services.skills import extract_skills
-from app.sources._text import infer_remote, infer_sponsorship, strip_html
+from app.sources._text import clean_html, infer_remote, infer_sponsorship, strip_html
 from app.sources.base import JobSource, NormalizedJob, SourceUnavailable
 
 BASE_URL = "https://api.lever.co/v0/postings/{company}"
@@ -111,9 +111,23 @@ class LeverSource(JobSource):
         location = categories.get("location") if isinstance(categories, dict) else None
         employment_type = categories.get("commitment") if isinstance(categories, dict) else None
 
-        description = (
-            strip_html(raw.get("descriptionPlain")) or strip_html(raw.get("description")) or None
-        )
+        # Prefer the rich HTML `description` for storage — the frontend
+        # renders it (sanitized) with paragraphs, lists, and emphasis
+        # intact. Fall back to the plain-text `descriptionPlain` field
+        # wrapped in a paragraph when HTML isn't provided, so the
+        # frontend's render path always sees HTML.
+        raw_html = raw.get("description")
+        raw_plain = raw.get("descriptionPlain")
+        if raw_html:
+            description_html: str | None = clean_html(raw_html) or None
+        elif raw_plain:
+            cleaned_plain = clean_html(raw_plain)
+            description_html = f"<p>{cleaned_plain}</p>" if cleaned_plain else None
+        else:
+            description_html = None
+        # Heuristics see plain text regardless of which field carried
+        # the JD.
+        description_text = strip_html(raw_html or raw_plain or "")
 
         # Lever ships timestamps as ms epoch. updatedAt isn't always present;
         # fall back to createdAt.
@@ -126,7 +140,7 @@ class LeverSource(JobSource):
         elif workplace == "on-site" or workplace == "onsite":
             remote = False
         else:
-            remote = infer_remote(location, description)
+            remote = infer_remote(location, description_text)
 
         return NormalizedJob(
             source=self.name,
@@ -137,11 +151,11 @@ class LeverSource(JobSource):
             location=location,
             remote=remote,
             employment_type=employment_type,
-            description=description,
+            description=description_html,
             posted_at=posted_at,
             source_updated_at=updated_at or posted_at or datetime.now(UTC),
-            sponsors_visa=infer_sponsorship(description),
-            skills=extract_skills(description),
+            sponsors_visa=infer_sponsorship(description_text),
+            skills=extract_skills(description_text),
         )
 
 

@@ -25,32 +25,63 @@ _MANY_NEWLINES_RE = re.compile(r"\n{3,}")
 _HTML_SIGNAL_RE = re.compile(r"<[a-z!/][^>]*>|&[a-z#0-9]{2,8};", re.IGNORECASE)
 
 
+def clean_html(s: str | None) -> str:
+    """Decode HTML entities, normalize whitespace; *keep* tags.
+
+    Many ATSes serve job descriptions as double-encoded HTML — the
+    response body contains literal `&lt;p&gt;…&lt;/p&gt;` text. Storing
+    that as-is gives the frontend a wall of escaped markup to render.
+    `html.unescape` rewrites the entities back to the tags they
+    represent, leaving the markup as real HTML the frontend can then
+    sanitize + render.
+
+    The result is intended for storage on `Job.description` and for
+    rendering (after DOMPurify) in the UI. The heuristics + the AI
+    prompt path want plain text instead — use `strip_html` for those.
+    """
+    if not s:
+        return ""
+    # html.unescape is idempotent; calling it on already-decoded HTML
+    # is a no-op. Whitespace is collapsed conservatively so the stored
+    # HTML stays compact without breaking <pre>/<code> blocks
+    # noticeably — runs of horizontal whitespace become one space,
+    # consecutive blank lines become at most two newlines.
+    text = html.unescape(s)
+    text = _HSPACE_RE.sub(" ", text)
+    text = _MANY_NEWLINES_RE.sub("\n\n", text)
+    return text.strip()
+
+
 def strip_html(s: str | None) -> str:
     """Decode entities, strip tags, normalize whitespace — *preserving*
     paragraph and list structure. Empty input returns "".
 
-    The previous implementation collapsed every whitespace run to a single
-    space, which turned a 2000-character JD into one wall of text. This
-    version converts block-level tags (`<p>`, `<br>`, `<li>`, …) into
-    newlines first so paragraphs and bullets survive into the cleaned form.
+    Decodes entities BEFORE stripping tags so double-encoded HTML
+    (`&lt;p&gt;…&lt;/p&gt;`, common in Greenhouse / Lever responses)
+    is handled correctly. The previous order left those tags intact in
+    the output because the entity-decode pass ran last, after the tag
+    stripper had already passed over the raw text.
+
+    Block-level tags (`<p>`, `<br>`, `<li>`, …) become newlines first
+    so paragraphs and bullets survive into the cleaned form, instead
+    of collapsing into a single wall of text.
     """
     if not s:
         return ""
 
-    # Important: convert tags FIRST, then decode entities. The reverse order
-    # would turn `&lt;Tag&gt;` (literal text the author meant to show) into
-    # `<Tag>` and then strip it as a phantom tag.
-
+    # Decode first — any `&lt;` etc. in the input is rewritten to its
+    # literal tag form before the tag stripper runs. For job postings,
+    # the rare downside (a literal `&lt;Tag&gt;` someone wrote as
+    # displayable text gets stripped) is far less common than the
+    # actual upside (double-encoded JD HTML cleans correctly).
+    text = html.unescape(s)
     # Bullets: open <li> becomes "\n- "; close </li> is just stripped along
     # with the rest of the tags below.
-    text = _LI_OPEN_RE.sub("\n- ", s)
+    text = _LI_OPEN_RE.sub("\n- ", text)
     # Other block tags become a single newline.
     text = _BLOCK_TAG_RE.sub("\n", text)
     # Strip every remaining tag.
     text = _TAG_RE.sub("", text)
-    # Now safe to decode entities — anything decoded here is meant as literal
-    # text, not markup.
-    text = html.unescape(text)
 
     # Collapse horizontal whitespace runs but keep newlines as structure.
     text = _HSPACE_RE.sub(" ", text)

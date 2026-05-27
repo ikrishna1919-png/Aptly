@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import DOMPurify from "isomorphic-dompurify";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { CompanyMark } from "@/components/company-mark";
+import { JobDescription } from "@/components/job-description";
 import { TailorPanel } from "@/components/tailor-panel";
 import { fetchJob, MANUAL_SOURCE, type Job } from "@/lib/api";
 import { formatLongDate, formatRelative } from "@/lib/utils";
@@ -21,9 +23,18 @@ export async function generateMetadata({
   if (!Number.isFinite(id)) return { title: "Job not found" };
   const job = await fetchJob(id).catch(() => null);
   if (!job) return { title: "Job not found" };
+  // The stored description is HTML; strip every tag for the meta
+  // description so search engines / link previews see clean text
+  // rather than a half-truncated `<p>` fragment.
+  const plainDescription = job.description
+    ? DOMPurify.sanitize(job.description, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] })
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 200)
+    : undefined;
   return {
     title: `${job.title} at ${job.company}`,
-    description: job.description?.slice(0, 200) ?? undefined,
+    description: plainDescription || undefined,
   };
 }
 
@@ -123,9 +134,7 @@ export default async function JobDetailPage({
           Description
         </h2>
         {job.description ? (
-          <div className="whitespace-pre-wrap text-[15px] leading-relaxed text-foreground/90">
-            {job.description}
-          </div>
+          <JobDescription html={job.description} />
         ) : (
           <p className="text-sm text-muted-foreground">
             No description provided.
