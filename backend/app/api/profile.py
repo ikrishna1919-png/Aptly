@@ -11,10 +11,14 @@ service reads from this same row via `get_candidate(db)`, so any save
 here changes the candidate fingerprint and invalidates the analyze cache
 naturally.
 
-Parse runs in the background because Anthropic can take longer than
-Render's free-tier 100s request budget — same pattern the ingest
-admin endpoint uses. The frontend kicks off, then polls until the
-row settles at `success` or `failed`.
+Parse is a deterministic Python pass — regex + heuristics, no AI call.
+It runs in milliseconds but stays behind the background-job + polling
+shape so the frontend code path is unchanged (and so any future heavy
+parsing, e.g. PDF upload, can slot in without revisiting the API
+contract). The frontend kicks off, then polls until the row settles
+at `success` (always — the parser never reports `failed` for input;
+empty input just yields an empty profile and the frontend prompts the
+user to fill in manually).
 """
 
 from __future__ import annotations
@@ -32,11 +36,7 @@ from app.database import get_db
 from app.models.candidate import DEMO_SLUG, Candidate
 from app.models.parse_run import ParseRun
 from app.services.demo_candidate import DEMO_CANDIDATE
-from app.services.profile_parser import (
-    Profile,
-    ResumeParseConfigError,
-    start_background_parse,
-)
+from app.services.profile_parser import Profile, start_background_parse
 
 router = APIRouter()
 
@@ -121,22 +121,14 @@ def parse_profile_text(
 ) -> ParseStartResponse:
     """Kick off a resume parse and return immediately with a `run_id`.
 
-    The actual Claude call runs in a background thread; the frontend
-    polls `GET /admin/profile/parse/{run_id}` until the row settles
-    at `status='success'` (with `profile`) or `status='failed'` (with
-    `error`). Same pattern as the admin ingest endpoint — the
-    long-running call can't time out the HTTP request anymore because
-    the HTTP request doesn't wait for it.
+    The parser is now a deterministic Python pass — milliseconds — but
+    the background-job + polling shape stays so the frontend code
+    path is unchanged. The frontend polls `GET /admin/profile/parse/
+    {run_id}` until the row settles at `status='success'` with the
+    extracted (or empty) profile.
     """
     _require_admin(settings, x_admin_token)
-    try:
-        run_id = start_background_parse(payload.text, settings)
-    except ResumeParseConfigError as e:
-        # Caller-fixable: missing API key, empty input. Surface
-        # synchronously — no point creating a ParseRun row for an
-        # input we can reject upfront.
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
-
+    run_id = start_background_parse(payload.text, settings)
     status_url = f"/api/admin/profile/parse/{run_id}"
     response.headers["Location"] = status_url
     return ParseStartResponse(run_id=run_id, status_url=status_url)

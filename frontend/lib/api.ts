@@ -136,17 +136,19 @@ export async function saveProfile(profile: Profile, token: string): Promise<Prof
 //   POST /api/admin/profile/parse  → 202 { run_id, status_url }
 //   GET  /api/admin/profile/parse/{run_id}  → { status, profile?, error? }
 //
-// The kick-off POST returns immediately (the long Anthropic call no
-// longer blocks the HTTP request, which is why this fix exists). The
-// frontend polls the status URL until the row settles at
-// `success` (with `profile`) or `failed` (with `error`).
+// The parser is now a deterministic Python pass — milliseconds. The
+// background-job + polling shape stays so this client code path is
+// unchanged from when the backend used Anthropic, and so any future
+// heavy parsing (e.g. PDF upload) can slot in without revisiting the
+// API contract.
 
 export const PARSE_POLL_INTERVAL_MS = 2_000;
-// Anthropic's own deadline is 90s; we wait a touch longer on the
-// client so a row that genuinely finished doesn't get cut off by the
-// polling cap. If `parseProfileText` hits this without seeing a
-// terminal state, it throws `ParseTimeoutError`.
-export const PARSE_MAX_WAIT_MS = 120_000;
+// Worst-case wait. The parser itself takes milliseconds; this ceiling
+// only fires if the worker thread is genuinely stuck (DB down, etc.),
+// in which case showing the user a "still working…" message
+// indefinitely is worse than surfacing `ParseTimeoutError` and letting
+// them retry.
+export const PARSE_MAX_WAIT_MS = 30_000;
 
 export type ParseRunStatus = "pending" | "running" | "success" | "failed";
 
@@ -162,9 +164,22 @@ export type ParseRun = {
 export class ParseTimeoutError extends Error {
   constructor() {
     super(
-      "Parse took too long. The resume may be too long, or the AI service is slow right now — try a shorter resume and retry.",
+      "Parse is taking longer than expected. Reload and try again.",
     );
     this.name = "ParseTimeoutError";
+  }
+}
+
+/** Throws when the parse completed but didn't extract anything we
+ * could use — the frontend distinguishes this from a hard error and
+ * shows a "couldn't extract details, please fill in manually"
+ * message instead of an error toast. */
+export class ParseEmptyResultError extends Error {
+  constructor() {
+    super(
+      "We couldn't extract details from that text — please fill the form below manually.",
+    );
+    this.name = "ParseEmptyResultError";
   }
 }
 
@@ -199,10 +214,18 @@ export async function fetchParseRun(run_id: string, token: string): Promise<Pars
 
 /**
  * Kick off a parse and poll until it lands at `success` or `failed`.
- * Returns the parsed Profile on success; throws on failure or timeout.
- * `onProgress` (if supplied) fires once with `"running"` after the
- * kick-off so callers can flip a UI spinner; it doesn't fire again
- * because nothing else changes until the terminal state.
+ * Returns the parsed Profile on success.
+ *
+ * Throws:
+ *   * `ParseEmptyResultError` when the parser ran successfully but
+ *     extracted no usable fields (random text, blank input). Callers
+ *     should treat this as a soft case — show a friendly "please fill
+ *     in manually" message rather than a red error.
+ *   * `ParseTimeoutError` if the polling loop hits the ceiling (only
+ *     fires when the worker is genuinely stuck — milliseconds in the
+ *     happy case).
+ *   * Plain `Error` on any other failure (HTTP error, backend `status
+ *     === 'failed'`).
  */
 export async function parseProfileText(
   text: string,
@@ -226,6 +249,9 @@ export async function parseProfileText(
         // surface a generic message.
         throw new Error("Parse succeeded but no profile was returned. Retry.");
       }
+      if (isEmptyProfile(run.profile)) {
+        throw new ParseEmptyResultError();
+      }
       return run.profile;
     }
     if (run.status === "failed") {
@@ -234,6 +260,23 @@ export async function parseProfileText(
     await sleep(PARSE_POLL_INTERVAL_MS);
   }
   throw new ParseTimeoutError();
+}
+
+/** A Profile counts as "empty" when the deterministic parser couldn't
+ * recover ANY meaningful field — no name, no email, no experience, no
+ * education, no skills. This is the signal the caller uses to switch
+ * from "show the autofilled form" to "show 'please fill in manually'
+ * messaging". An empty Profile is NOT an error case — the user just
+ * pasted text that didn't look like a resume. */
+function isEmptyProfile(p: Profile): boolean {
+  return (
+    !p.name.trim() &&
+    !p.email &&
+    !p.phone &&
+    (p.skills?.length ?? 0) === 0 &&
+    (p.experience?.length ?? 0) === 0 &&
+    (p.education?.length ?? 0) === 0
+  );
 }
 
 function sleep(ms: number): Promise<void> {

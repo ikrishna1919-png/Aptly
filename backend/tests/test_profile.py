@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -271,126 +270,138 @@ def test_saving_profile_invalidates_analyze_cache(client_no_key):
     )
 
 
-# ── POST /parse (mocked Anthropic) ──────────────────────────────────────────
+# ── POST /parse — deterministic Python parser ──────────────────────────────
 
 
-class _MockAnthropicClient:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-        self.calls: list[dict] = []
-        self.messages = SimpleNamespace(create=self._create)
+# A reasonably realistic resume that covers every field the parser
+# tries to extract. Used both for the end-to-end run-ingest tests and
+# for the per-field unit tests below.
+_FULL_RESUME = """\
+Alex Rivera
+Senior Software Engineer
+San Francisco, CA  ·  alex.rivera@example.com  ·  (555) 123-4567
+linkedin.com/in/alex-rivera  ·  github.com/alexr
 
-    def _create(self, **kwargs):
-        self.calls.append(kwargs)
-        block = SimpleNamespace(type="text", text=json.dumps(self.payload))
-        return SimpleNamespace(content=[block])
+Summary
+Backend engineer with seven years building distributed systems in
+Python and Go. Most recently led the migration of a 50-service
+monolith onto event-driven Kafka with Postgres CDC.
+
+Experience
+
+Senior Software Engineer — Acme Corp · San Francisco, CA
+Jan 2022 – Present
+- Led the migration to event-driven Kafka services (12 services, 0 downtime)
+- Cut p95 latency 480ms → 110ms by introducing Redis cache layer
+- Mentored 4 junior engineers; ran the weekly architecture review
+
+Software Engineer — Beta Labs · Remote
+Mar 2019 – Dec 2021
+- Built the billing pipeline (Stripe, Postgres) handling $30M ARR
+- Owned on-call rotations for the platform team
+
+Education
+
+State University, Berkeley, CA
+B.S. Computer Science  2014 – 2018
+
+Skills
+Python, Go, Kafka, AWS, PostgreSQL, Docker, Kubernetes, Redis, Terraform
+"""
 
 
-def test_parse_returns_503_when_anthropic_key_missing(client_no_key):
-    test_client, _ = client_no_key
-    # No API key → caller-fixable; surfaces synchronously as 503,
-    # no ParseRun row created.
-    res = test_client.post(
-        "/api/admin/profile/parse",
-        json={"text": "John Doe\nSoftware Engineer"},
-        headers=AUTH,
-    )
-    assert res.status_code == 503
-    assert "anthropic_api_key" in res.json()["detail"].lower()
-
-
-def test_parse_returns_structured_profile_via_background_run(client_with_key, monkeypatch):
-    """The new shape: POST returns 202 + run_id; GET the run when
-    polled returns the parsed Profile."""
+def test_parse_end_to_end_extracts_every_field(client_with_key):
+    """The happy path: POST returns 202, GET returns success +
+    extracted profile populated with every field the parser handles."""
     test_client, _ = client_with_key
 
-    canned = {
-        "name": "John Doe",
-        "headline": "Software Engineer",
-        "email": "john@example.com",
-        "summary": "Pragmatic engineer focused on backend infrastructure.",
-        "skills": ["Python", "Postgres", "Kafka"],
-        "experience": [
-            {
-                "company": "ExampleCo",
-                "title": "Senior Engineer",
-                "location": "Remote",
-                "start": "2021-03",
-                "end": "Present",
-                "bullets": ["Owned the data ingestion pipeline."],
-            }
-        ],
-        "education": [
-            {
-                "school": "State University",
-                "degree": "B.S. Computer Science",
-                "graduation": "2018",
-            }
-        ],
-    }
-    mock = _MockAnthropicClient(canned)
-    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
-
-    # POST kicks off — 202 + run_id, no Profile in the body.
     start = test_client.post(
         "/api/admin/profile/parse",
-        json={"text": "long pasted resume text"},
+        json={"text": _FULL_RESUME},
         headers=AUTH,
     )
     assert start.status_code == 202
     run_id = start.json()["run_id"]
     assert start.json()["status_url"] == f"/api/admin/profile/parse/{run_id}"
-    assert start.headers.get("Location") == start.json()["status_url"]
 
-    # Poll the run — worker has already finished (inline) so the
-    # response carries the parsed Profile.
-    res = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
-    assert res.status_code == 200
-    body = res.json()
+    poll = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
+    assert poll.status_code == 200
+    body = poll.json()
     assert body["status"] == "success"
     assert body["error"] is None
     assert body["finished_at"] is not None
+
     profile = body["profile"]
-    assert profile["name"] == "John Doe"
-    assert profile["skills"] == ["Python", "Postgres", "Kafka"]
-    assert profile["experience"][0]["company"] == "ExampleCo"
+    assert profile["name"] == "Alex Rivera"
+    assert profile["email"] == "alex.rivera@example.com"
+    assert profile["phone"] == "(555) 123-4567"
+    assert profile["location"] == "San Francisco, CA"
+    assert profile["links"]["linkedin"] == "linkedin.com/in/alex-rivera"
+    assert profile["links"]["github"] == "github.com/alexr"
+    assert "distributed systems" in profile["summary"].lower()
 
-    # One call, on Sonnet 4.6, with the system prompt cached and the
-    # truthful-only rule asserted.
-    assert len(mock.calls) == 1
-    call = mock.calls[0]
-    assert call["model"] == "claude-sonnet-4-6"
-    assert any(
-        isinstance(b, dict) and b.get("cache_control", {}).get("type") == "ephemeral"
-        for b in call["system"]
-    )
-    system_blob = " ".join(b["text"].lower() for b in call["system"] if isinstance(b, dict))
-    assert "truthful" in system_blob and "never invent" in system_blob
-    assert "leave it empty" in system_blob or "leave fields blank" in system_blob
+    assert "Python" in profile["skills"]
+    assert "Kafka" in profile["skills"]
+    assert "PostgreSQL" in profile["skills"]
+    # Skills are deduplicated and capped to readable items.
+    assert len(profile["skills"]) == len(set(s.lower() for s in profile["skills"]))
+
+    assert len(profile["experience"]) == 2
+    acme = profile["experience"][0]
+    assert acme["title"] == "Senior Software Engineer"
+    assert acme["company"] == "Acme Corp"
+    assert acme["location"] == "San Francisco, CA"
+    assert acme["start"] == "2022-01"
+    assert acme["end"] == "Present"
+    assert any("Kafka" in b for b in acme["bullets"])
+
+    beta = profile["experience"][1]
+    assert beta["company"] == "Beta Labs"
+    assert beta["start"] == "2019-03"
+    assert beta["end"] == "2021-12"
+
+    assert len(profile["education"]) == 1
+    edu = profile["education"][0]
+    assert edu["school"] == "State University"
+    assert "Computer Science" in edu["degree"] or "Bachelor" in edu["degree"]
+    assert edu["graduation"] == "2018"
 
 
-def test_parse_rejects_empty_input(client_with_key):
+def test_parse_post_returns_202_immediately_with_run_id(client_with_key):
+    """The kick-off response shape is unchanged from the previous
+    AI-backed implementation — frontend code path keeps working."""
     test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": ""}, headers=AUTH)
-    # Pydantic validation catches the empty string before we hit the parser.
-    assert res.status_code == 422
-
-
-def test_parse_post_returns_202_immediately_with_run_id(client_with_key, monkeypatch):
-    """POST never blocks on the Anthropic call — even with a slow
-    underlying client, the HTTP response carries `run_id` + `running`
-    status. (The inline worker patch means the worker actually
-    finishes synchronously here; in production it'd run on a daemon
-    thread.)"""
-    test_client, _ = client_with_key
-    monkeypatch.setattr(
-        parser_module, "_build_client", lambda s, c: _MockAnthropicClient({"name": "x"})
-    )
-    res = test_client.post("/api/admin/profile/parse", json={"text": "x"}, headers=AUTH)
+    res = test_client.post("/api/admin/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
     assert res.status_code == 202
     body = res.json()
     assert "run_id" in body
     assert body["status"] == "running"
+    assert res.headers.get("Location") == body["status_url"]
+
+
+def test_parse_rejects_empty_input(client_with_key):
+    """Pydantic-level validation still catches the empty-string case
+    before we hit the parser — caller error, 422."""
+    test_client, _ = client_with_key
+    res = test_client.post("/api/admin/profile/parse", json={"text": ""}, headers=AUTH)
+    assert res.status_code == 422
+
+
+def test_parse_does_not_save(client_with_key):
+    """Parse extracts; saving still requires PUT — a noisy paste must
+    not clobber the real profile silently."""
+    test_client, Session = client_with_key
+
+    # Seed an existing saved profile so the assertion below is
+    # meaningful (the parse_resume output for `_FULL_RESUME` does NOT
+    # share the same name).
+    test_client.put("/api/admin/profile", json=VALID_PROFILE_BODY, headers=AUTH)
+    test_client.post("/api/admin/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+
+    with Session() as s:
+        row = s.query(Candidate).filter(Candidate.slug == DEMO_SLUG).one()
+    # The saved row is still the one PUT placed, not the parsed one.
+    assert row.profile["name"] == "Alex Custom"
 
 
 def test_parse_get_unknown_run_id_returns_404(client_with_key):
@@ -405,294 +416,228 @@ def test_parse_status_endpoint_requires_admin_token(client_with_key):
     assert res.status_code == 403
 
 
-def test_parse_does_not_save(client_with_key, monkeypatch):
-    """Parse RETURNS the structured profile via the polling endpoint;
-    saving still requires PUT. Otherwise a noisy paste would clobber
-    the real profile silently."""
-    test_client, Session = client_with_key
-    canned = {
-        "name": "Parsed Name (NOT saved)",
-        "summary": "",
-        "skills": [],
-        "experience": [],
-        "education": [],
-    }
-    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: _MockAnthropicClient(canned))
+def test_parse_works_without_anthropic_key(factories, monkeypatch):
+    """The deterministic parser doesn't need ANTHROPIC_API_KEY at all
+    — pasting a resume must work even on an environment that has the
+    key unset."""
+    settings = _settings(key="")
 
-    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    def override_db():
+        with factories() as s:
+            yield s
+
+    _wire_parse_worker(monkeypatch, factories)
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_settings] = lambda: settings
+    config_module.get_settings.cache_clear()
+    try:
+        test_client = TestClient(app)
+        start = test_client.post(
+            "/api/admin/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH
+        )
+        assert start.status_code == 202
+        poll = test_client.get(f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH)
+        body = poll.json()
+        assert body["status"] == "success"
+        assert body["profile"]["name"] == "Alex Rivera"
+    finally:
+        app.dependency_overrides.clear()
+        config_module.get_settings.cache_clear()
+
+
+def test_parse_random_text_returns_empty_profile_not_failure(client_with_key):
+    """If the input doesn't look like a resume at all, the parser
+    returns an empty Profile with `status='success'`. The frontend
+    interprets the empty result as "fill in the form manually" —
+    NEVER `status='failed'` for non-resume input."""
+    test_client, _ = client_with_key
+    junk = "lorem ipsum dolor sit amet"
+    start = test_client.post("/api/admin/profile/parse", json={"text": junk}, headers=AUTH)
     assert start.status_code == 202
-
-    # The DB row must NOT have been updated.
-    with Session() as s:
-        row = s.query(Candidate).filter(Candidate.slug == DEMO_SLUG).one_or_none()
-    if row is not None:
-        assert row.profile.get("name") != "Parsed Name (NOT saved)"
-
-
-# ── Timeout / connection-error handling (the "hang forever" regression) ────
-
-
-class _RaisingAnthropicClient:
-    """Mock that ALWAYS raises a specific exception from messages.create.
-
-    Used to simulate Anthropic SDK errors without making a real network
-    call — the test wants to assert our error-mapping returns a clean
-    HTTP response instead of hanging.
-    """
-
-    def __init__(self, exc: BaseException) -> None:
-        self.exc = exc
-        self.calls: list[dict] = []
-        self.messages = SimpleNamespace(create=self._create)
-
-    def _create(self, **kwargs):
-        self.calls.append(kwargs)
-        raise self.exc
+    body = test_client.get(
+        f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH
+    ).json()
+    assert body["status"] == "success"
+    assert body["error"] is None
+    profile = body["profile"]
+    # Empty result — name is "", experience/education/skills empty.
+    assert profile["name"] == ""
+    assert profile["experience"] == []
+    assert profile["education"] == []
+    assert profile["skills"] == []
 
 
-def _poll_run(test_client, run_id: str) -> dict:
-    r = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
-    assert r.status_code == 200, r.text
-    return r.json()
+def test_parse_truncates_oversized_input(client_with_key):
+    """The parser caps input at 200K chars. 300K of garbage must not
+    explode the worker; it just gets truncated and returns an empty
+    profile."""
+    test_client, _ = client_with_key
+    huge = "x" * 300_000
+    start = test_client.post("/api/admin/profile/parse", json={"text": huge}, headers=AUTH)
+    assert start.status_code == 202
+    body = test_client.get(
+        f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH
+    ).json()
+    assert body["status"] == "success"
 
 
-def test_parse_records_timeout_as_failed_run(client_with_key, monkeypatch):
-    """SDK raises APITimeoutError inside the worker → the ParseRun
-    row lands at `status='failed'` with the readable timeout message.
-    POST still returns 202 — the failure shows up via the polling
-    endpoint, not as an HTTP error on the kick-off call."""
-    import anthropic
+# ── parse_resume unit coverage (no HTTP layer) ──────────────────────────────
 
-    timeout_exc = anthropic.APITimeoutError(request=SimpleNamespace())
-    monkeypatch.setattr(
-        parser_module,
-        "_build_client",
-        lambda s, c: _RaisingAnthropicClient(timeout_exc),
+
+def test_parse_resume_extracts_contact_block():
+    from app.services.profile_parser import parse_resume
+
+    p = parse_resume(
+        "Jordan Singh\n"
+        "Software Engineer\n"
+        "Brooklyn, NY  ·  jsingh@example.com  ·  +1 (415) 555-2233\n"
+        "https://linkedin.com/in/jsingh  ·  github.com/jsingh\n"
     )
-
-    test_client, _ = client_with_key
-    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert start.status_code == 202
-    body = _poll_run(test_client, start.json()["run_id"])
-    assert body["status"] == "failed"
-    assert body["profile"] is None
-    err = body["error"].lower()
-    assert "didn't respond" in err or "timed out" in err or "timeout" in err
-    # Surface how long we waited so the user knows.
-    assert "90" in body["error"]
+    assert p.name == "Jordan Singh"
+    assert p.email == "jsingh@example.com"
+    assert "415" in p.phone
+    assert p.location == "Brooklyn, NY"
+    assert "linkedin.com/in/jsingh" in p.links.linkedin
+    assert "github.com/jsingh" in p.links.github
 
 
-def test_parse_records_connection_error_as_failed_run(client_with_key, monkeypatch):
-    """SDK raises APIConnectionError → run lands at `failed` with the
-    underlying error message."""
-    import anthropic
+def test_parse_resume_handles_only_name_block():
+    """An input that has nothing but a name still returns successfully
+    with the name populated — never throws."""
+    from app.services.profile_parser import parse_resume
 
-    conn_exc = anthropic.APIConnectionError(request=SimpleNamespace())
-    monkeypatch.setattr(
-        parser_module,
-        "_build_client",
-        lambda s, c: _RaisingAnthropicClient(conn_exc),
+    p = parse_resume("Alex Custom\n")
+    assert p.name == "Alex Custom"
+    assert p.email is None
+    assert p.experience == []
+
+
+def test_parse_resume_returns_empty_profile_for_empty_string():
+    from app.services.profile_parser import parse_resume
+
+    p = parse_resume("")
+    assert p.name == ""
+    assert p.experience == []
+    assert p.education == []
+
+
+def test_parse_resume_handles_only_section_with_dates():
+    """Just an experience-shaped block — parser extracts the role
+    without crashing on the missing surrounding sections."""
+    from app.services.profile_parser import parse_resume
+
+    p = parse_resume(
+        "Experience\n"
+        "Engineer — Foo Co\n"
+        "2020 - Present\n"
+        "- Did a thing\n"
+        "- Did another thing\n"
     )
+    assert len(p.experience) == 1
+    exp = p.experience[0]
+    assert exp.title == "Engineer"
+    assert exp.company == "Foo Co"
+    assert exp.start == "2020"
+    assert exp.end == "Present"
+    assert exp.bullets == ["Did a thing", "Did another thing"]
 
-    test_client, _ = client_with_key
-    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert start.status_code == 202
-    body = _poll_run(test_client, start.json()["run_id"])
-    assert body["status"] == "failed"
-    assert "claude" in (body["error"] or "").lower()
+
+def test_parse_resume_date_normalisation_variants():
+    """Month names full / abbreviated / case variants normalise to
+    YYYY-MM consistently."""
+    from app.services.profile_parser import parse_resume
+
+    text = "Experience\n" "A — X\nJanuary 2020 - Mar 2022\n" "\n" "B — Y\nMay 2018 to Dec 2019\n"
+    p = parse_resume(text)
+    starts = [(e.start, e.end) for e in p.experience]
+    assert ("2020-01", "2022-03") in starts
+    assert ("2018-05", "2019-12") in starts
 
 
-def test_parse_records_api_status_error_as_failed_run(client_with_key, monkeypatch):
-    """SDK raises APIStatusError (rate limit, overloaded, etc.) → run
-    lands at `failed` with a non-empty user-facing message."""
-    import anthropic
-    import httpx
+def test_parse_resume_education_with_year_range():
+    from app.services.profile_parser import parse_resume
 
-    rate_limit_exc = anthropic.RateLimitError(
-        "rate limited",
-        response=httpx.Response(
-            status_code=429,
-            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-        ),
-        body={"type": "error", "error": {"type": "rate_limit_error", "message": "x"}},
+    p = parse_resume(
+        "Education\n"
+        "Massachusetts Institute of Technology\n"
+        "Cambridge, MA\n"
+        "B.S. Computer Science  2014 – 2018\n"
     )
-    monkeypatch.setattr(
-        parser_module,
-        "_build_client",
-        lambda s, c: _RaisingAnthropicClient(rate_limit_exc),
-    )
-
-    test_client, _ = client_with_key
-    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert start.status_code == 202
-    body = _poll_run(test_client, start.json()["run_id"])
-    assert body["status"] == "failed"
-    assert body["error"]
+    assert len(p.education) == 1
+    edu = p.education[0]
+    assert "Massachusetts Institute of Technology" in edu.school
+    assert "Computer Science" in edu.degree
+    assert edu.graduation == "2018"
+    assert edu.location == "Cambridge, MA"
 
 
-def test_parse_records_invalid_json_as_failed_run(client_with_key, monkeypatch):
-    """If Claude returns text that doesn't validate against the Profile
-    schema, the run lands at `failed` with a retry-suggesting message."""
+def test_parse_resume_skills_dedupes_case_insensitively():
+    from app.services.profile_parser import parse_resume
 
-    class _BadJSONClient:
-        def __init__(self):
-            self.messages = SimpleNamespace(create=self._create)
-
-        def _create(self, **kwargs):
-            block = SimpleNamespace(type="text", text="not even json {")
-            return SimpleNamespace(content=[block])
-
-    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: _BadJSONClient())
-
-    test_client, _ = client_with_key
-    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert start.status_code == 202
-    body = _poll_run(test_client, start.json()["run_id"])
-    assert body["status"] == "failed"
-    assert "retry" in (body["error"] or "").lower()
+    p = parse_resume("Skills\nPython, python, PYTHON, Go, Go, Kafka, AWS, AWS\n")
+    lower = [s.lower() for s in p.skills]
+    assert lower == sorted(set(lower), key=lower.index)
+    assert "python" in lower
+    assert "go" in lower
 
 
-def test_parse_passes_explicit_timeout_to_sdk(client_with_key, monkeypatch):
-    """Defence-in-depth check: the request to Anthropic carries an
-    explicit `timeout=` kwarg matching `_REQUEST_TIMEOUT_SECONDS`.
-    Without this, the SDK falls back to its 10-minute default and the
-    user sees an indefinite hang."""
-    canned = {
-        "name": "X",
-        "summary": "",
-        "skills": [],
-        "experience": [],
-        "education": [],
-    }
-    mock = _MockAnthropicClient(canned)
-    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
+def test_parse_resume_skills_bullet_layout():
+    from app.services.profile_parser import parse_resume
 
-    test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert res.status_code == 202
-
-    assert len(mock.calls) == 1
-    call_kwargs = mock.calls[0]
-    assert call_kwargs.get("timeout") == parser_module._REQUEST_TIMEOUT_SECONDS
-    assert call_kwargs["max_tokens"] == parser_module._MAX_OUTPUT_TOKENS
+    p = parse_resume("Skills\n" "• Python\n" "• Go\n" "• Kafka\n")
+    assert "Python" in p.skills
+    assert "Go" in p.skills
+    assert "Kafka" in p.skills
 
 
-def test_parse_clips_oversized_resume(client_with_key, monkeypatch):
-    """A pasted resume longer than `_MAX_RESUME_CHARS` is clipped before
-    we send it to Claude — protects both latency and token cost."""
-    canned = {
-        "name": "X",
-        "summary": "",
-        "skills": [],
-        "experience": [],
-        "education": [],
-    }
-    mock = _MockAnthropicClient(canned)
-    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
+def test_parse_resume_phone_separator_variants():
+    """Common phone formats all extract — `555.123.4567`, `(555)
+    123-4567`, `+1 555-123-4567`, `5551234567` (no separators)."""
+    from app.services.profile_parser import parse_resume
 
-    # 30K of A's, much larger than the 12K limit.
-    huge = "A" * 30_000
-
-    test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": huge}, headers=AUTH)
-    assert res.status_code == 202
-
-    user_text = mock.calls[0]["messages"][0]["content"]
-    # The text payload includes prompt scaffolding + clipped body + the
-    # [truncated] marker. Must be substantially shorter than the input.
-    assert len(user_text) < parser_module._MAX_RESUME_CHARS + 500
-    assert "[truncated]" in user_text
-
-
-# ── Schema regression — Anthropic 400 on `default` keyword ────────────────
-
-
-def _scan_annotation_keys(node, path="", hits=None):
-    """Yield `(path, key)` for every annotation keyword on a schema
-    node — but NOT for field names inside `properties` (a field
-    literally called `title` is fine; an annotation `"title": "Foo"`
-    on a node is the thing Anthropic rejects). Walks the same way the
-    production stripper does: through `properties.{*}` values,
-    `items`, `prefixItems`, `anyOf` / `oneOf` / `allOf`, and `$defs`."""
-    if hits is None:
-        hits = []
-    if isinstance(node, list):
-        for i, item in enumerate(node):
-            _scan_annotation_keys(item, f"{path}[{i}]", hits)
-        return hits
-    if not isinstance(node, dict):
-        return hits
-    # Annotation keys live on THIS node — collect them, then descend
-    # into structural children.
-    for k in node.keys():
-        hits.append((path or "<root>", k))
-    for container in ("properties", "patternProperties", "$defs", "definitions"):
-        if container in node and isinstance(node[container], dict):
-            for sub_key, sub in node[container].items():
-                _scan_annotation_keys(sub, f"{path}.{container}.{sub_key}", hits)
-    if "items" in node:
-        _scan_annotation_keys(node["items"], f"{path}.items", hits)
-    if "prefixItems" in node:
-        _scan_annotation_keys(node["prefixItems"], f"{path}.prefixItems", hits)
-    for branch in ("anyOf", "oneOf", "allOf"):
-        if branch in node:
-            _scan_annotation_keys(node[branch], f"{path}.{branch}", hits)
-    return hits
-
-
-def test_profile_schema_strips_default_and_other_annotations():
-    """The live 400 from Anthropic was triggered by `"default": null` in
-    the PROFILE_SCHEMA — Pydantic emits it for every `field: T | None
-    = None` and Anthropic's structured-output validator rejects the
-    keyword. Pin that the prepared schema has none of the annotation
-    keywords Anthropic rejects, anywhere."""
-    forbidden = {"default", "title", "examples", "readOnly", "writeOnly", "deprecated"}
-    hits = [
-        (path, key)
-        for path, key in _scan_annotation_keys(parser_module.PROFILE_SCHEMA)
-        if key in forbidden
+    cases = [
+        ("Name Here\n555.123.4567\n", "555.123.4567"),
+        ("Name Here\n(555) 123-4567\n", "(555) 123-4567"),
+        ("Name Here\n+1 555-123-4567\n", "+1 555-123-4567"),
     ]
-    assert not hits, "PROFILE_SCHEMA still carries forbidden annotation keywords: " f"{hits[:5]}"
+    for text, expected in cases:
+        p = parse_resume(text)
+        assert expected in (p.phone or ""), f"input={text!r}"
 
 
-def test_anthropic_400_records_actionable_error_message(client_with_key, monkeypatch):
-    """A 400 from Anthropic must surface the actual API message (and the
-    misleading "shorten the resume" string from the old code is gone) so
-    the operator can diagnose without grepping logs. Length is almost
-    never the actual cause of a 400 — schema issues are."""
-    import anthropic
-    import httpx
+def test_parse_resume_never_throws_on_garbage():
+    """A randomised dump must not crash the parser. Pin the
+    no-throws contract — the worker can't write `status='failed'`
+    just because someone pasted a poem."""
+    from app.services.profile_parser import parse_resume
 
-    bad_request = anthropic.BadRequestError(
-        "400 bad",
-        response=httpx.Response(
-            status_code=400,
-            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-        ),
-        body={
-            "type": "error",
-            "error": {
-                "type": "invalid_request_error",
-                "message": "For 'object' type, property 'default' is not supported.",
-            },
-        },
-    )
-    monkeypatch.setattr(
-        parser_module,
-        "_build_client",
-        lambda s, c: _RaisingAnthropicClient(bad_request),
-    )
+    inputs = [
+        "",
+        "   \n\t\n   ",
+        "@@@@",
+        "x" * 50_000,
+        "Education\n\n\n\n",  # empty section
+        "<<>><<>>",  # nonsense
+    ]
+    for raw in inputs:
+        p = parse_resume(raw)
+        # The Pydantic model validated successfully — that's the
+        # whole contract here.
+        assert p.name == "" or isinstance(p.name, str)
+        assert isinstance(p.experience, list)
 
-    test_client, _ = client_with_key
-    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert start.status_code == 202
-    poll = test_client.get(f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH)
-    body = poll.json()
-    assert body["status"] == "failed"
-    err = body["error"]
-    # Carries the actual API message — not the legacy "shorten the
-    # resume" string.
-    assert "default" in err
-    assert "not supported" in err
-    assert "400" in err
-    assert "shorten the resume" not in err.lower()
+
+def test_parser_module_does_not_import_anthropic():
+    """The whole point of this PR: the resume-parse code path no
+    longer touches Anthropic. The tailor module still does."""
+    import sys
+
+    # Force a fresh import to verify the static dependency graph.
+    sys.modules.pop("app.services.profile_parser", None)
+    import app.services.profile_parser as fresh  # noqa: PLC0415
+
+    assert not hasattr(fresh, "anthropic")
+    # And no Anthropic-flavoured symbols escaped from the refactor.
+    assert not hasattr(fresh, "MODEL")
+    assert not hasattr(fresh, "PROFILE_SCHEMA")
+    assert not hasattr(fresh, "_build_client")
