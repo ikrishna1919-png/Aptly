@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ParseEmptyResultError,
   ParseTimeoutError,
   fetchProfile,
   parseProfileText,
@@ -114,12 +115,15 @@ export default function ProfilePage() {
     parseAbortRef.current = controller;
 
     setError(null);
-    setInfo("Kicking off parse…");
+    setInfo("Parsing your resume…");
     setParsing(true);
     try {
       const parsed = await parseProfileText(pasted, token, {
         signal: controller.signal,
-        onProgress: () => setInfo("Parsing your resume with Claude — this can take up to ~90s."),
+        // The deterministic parser is fast — the `onProgress` callback
+        // exists for parity with the previous AI-backed flow but in
+        // practice we never see more than a single poll loop.
+        onProgress: () => setInfo("Parsing your resume…"),
       });
       setProfile(normaliseProfile(parsed));
       setInfo("Parsed — review and edit, then click Save.");
@@ -127,6 +131,11 @@ export default function ProfilePage() {
       if (e instanceof DOMException && e.name === "AbortError") {
         // Caller-initiated cancel — silent.
         setInfo(null);
+      } else if (e instanceof ParseEmptyResultError) {
+        // Soft case: parser ran successfully but couldn't extract
+        // anything. Render in the muted info channel, not the red
+        // error channel — the user just fills the form below.
+        setInfo(e.message);
       } else if (e instanceof ParseTimeoutError) {
         setError(e.message);
       } else {
@@ -261,9 +270,10 @@ export default function ProfilePage() {
         <CardHeader>
           <CardTitle>Paste resume to autofill</CardTitle>
           <CardDescription>
-            We send the text to Claude Sonnet 4.6 with strict
-            truthful-only parsing. The result populates the form below for
-            review; nothing saves until you click Save.
+            Pull contact info, work history, education, and skills out
+            of pasted resume text. Pure pattern extraction — no AI in
+            this step. The result populates the form below for review;
+            nothing saves until you click Save.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -280,7 +290,7 @@ export default function ProfilePage() {
                 role="status"
                 aria-live="polite"
               >
-                <Spinner /> Parsing your resume — usually 10–30s, up to ~90s.
+                <Spinner /> Parsing your resume…
               </span>
             )}
             <Button
@@ -288,7 +298,7 @@ export default function ProfilePage() {
               onClick={() => void onParse()}
               disabled={parsing || !token || !pasted.trim()}
             >
-              {parsing ? "Parsing…" : error ? "Retry parse" : "Parse with Claude"}
+              {parsing ? "Parsing…" : error ? "Retry parse" : "Parse resume"}
             </Button>
           </div>
         </CardContent>
