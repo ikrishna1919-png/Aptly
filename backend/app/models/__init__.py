@@ -4,5 +4,6 @@ from app.models.job import Job
 from app.models.job_analysis import JobAnalysis
 from app.models.parse_run import ParseRun
 from app.models.source import Source
+from app.models.user import User
 
-__all__ = ["Candidate", "IngestRun", "Job", "JobAnalysis", "ParseRun", "Source"]
+__all__ = ["Candidate", "IngestRun", "Job", "JobAnalysis", "ParseRun", "Source", "User"]

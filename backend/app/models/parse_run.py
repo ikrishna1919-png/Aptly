@@ -15,7 +15,7 @@ Mirrors the `IngestRun` table — same lifecycle (`pending` → `running`
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -25,6 +25,12 @@ class ParseRun(Base):
     __tablename__ = "parse_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Per-user ownership. The GET-status endpoint filters by
+    # `user_id == current.id` AND `run_id` so one user can't poll
+    # another user's parse-run by guessing the UUID.
+    user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     status: Mapped[str] = mapped_column(
         String(16),

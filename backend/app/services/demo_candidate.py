@@ -125,21 +125,26 @@ def candidate_fingerprint(candidate: dict[str, Any] | None = None) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def get_candidate(db: Session) -> dict[str, Any]:
-    """Return the canonical candidate profile.
+def get_candidate(db: Session, *, user_id: int | None = None) -> dict[str, Any]:
+    """Return the candidate profile for `user_id`.
 
-    Reads the `demo` row from the `candidates` table. Falls back to the
-    in-code DEMO_CANDIDATE only when the row doesn't exist — this happens
-    in test setups that create the schema via `Base.metadata.create_all`
-    without running the seed migration. In production the migration ensures
-    a row is always present.
+    Phase 5: each user has their own Candidate row. Looks up by
+    `user_id`; falls back to the legacy slug='demo' lookup when no
+    `user_id` is supplied (test paths that don't model multi-user)
+    and to the in-code `DEMO_CANDIDATE` when no row exists at all.
     """
-    # Local imports — keep this module importable from migrations without
-    # pulling the whole model tree.
+    # Local imports — keep this module importable from migrations
+    # without pulling the whole model tree.
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.models.candidate import DEMO_SLUG, Candidate  # noqa: PLC0415
 
+    if user_id is not None:
+        row = db.execute(select(Candidate).where(Candidate.user_id == user_id)).scalar_one_or_none()
+        if row is not None:
+            return row.profile
+        # Fall through to the legacy lookup so a freshly-signed-up
+        # user still gets the demo profile as the first-render shape.
     row = db.execute(select(Candidate).where(Candidate.slug == DEMO_SLUG)).scalar_one_or_none()
     if row is None:
         return DEMO_CANDIDATE

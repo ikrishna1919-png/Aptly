@@ -86,14 +86,33 @@ def settings_with_key():
     )
 
 
+def _make_user(factories):
+    from app.models.user import User
+
+    with factories() as s:
+        u = User(google_subject_id="google-test", email="test@example.com", name="Test User")
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        s.expunge(u)
+    return u
+
+
 @pytest.fixture
 def client(factories, settings_no_key):
+    """Standard tailor-test client — overrides DB, settings, AND
+    `get_current_user` so the tailor endpoints' new auth gate is
+    satisfied by a fresh test user."""
+    from app.api.auth import get_current_user
+
     def override_db():
         with factories() as s:
             yield s
 
+    user = _make_user(factories)
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_settings] = lambda: settings_no_key
+    app.dependency_overrides[get_current_user] = lambda: user
     config_module.get_settings.cache_clear()
     try:
         yield TestClient(app), factories

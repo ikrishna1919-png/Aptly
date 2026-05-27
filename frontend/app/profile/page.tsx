@@ -25,8 +25,7 @@ import {
   type ProfileEducation,
   type ProfileExperience,
 } from "@/lib/api";
-
-const TOKEN_KEY = "aptly.adminToken";
+import { RequireAuth } from "@/lib/auth-context";
 
 const EMPTY_PROFILE: Profile = {
   name: "",
@@ -58,8 +57,17 @@ const EMPTY_EDUCATION: ProfileEducation = {
 };
 
 export default function ProfilePage() {
-  const [token, setToken] = useState("");
-  const [tokenLoaded, setTokenLoaded] = useState(false);
+  // The page itself is one big controlled form; gate the whole
+  // tree behind RequireAuth so the in-flight fetch doesn't 401
+  // before the redirect lands.
+  return (
+    <RequireAuth>
+      <ProfileEditor />
+    </RequireAuth>
+  );
+}
+
+function ProfileEditor() {
   const [profile, setProfile] = useState<Profile>(EMPTY_PROFILE);
   const [pasted, setPasted] = useState("");
   const [loading, setLoading] = useState(false);
@@ -72,40 +80,24 @@ export default function ProfilePage() {
   // background.
   const parseAbortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    setToken(localStorage.getItem(TOKEN_KEY) ?? "");
-    setTokenLoaded(true);
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchProfile();
+      setProfile(normaliseProfile(data));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load profile");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const refresh = useCallback(
-    async (tok: string) => {
-      if (!tok) return;
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await fetchProfile(tok);
-        setProfile(normaliseProfile(data));
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load profile");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
-
   useEffect(() => {
-    if (tokenLoaded && token) void refresh(token);
-  }, [tokenLoaded, token, refresh]);
-
-  function saveToken(value: string) {
-    setToken(value);
-    if (value) localStorage.setItem(TOKEN_KEY, value);
-    else localStorage.removeItem(TOKEN_KEY);
-  }
+    void refresh();
+  }, [refresh]);
 
   async function onParse() {
-    if (!token) return setError("Admin token required");
     if (!pasted.trim()) return setError("Paste your resume text first");
     // Cancel any prior in-flight parse before starting a new one —
     // protects against a "retry" double-click triggering two polling
@@ -118,7 +110,7 @@ export default function ProfilePage() {
     setInfo("Parsing your resume…");
     setParsing(true);
     try {
-      const parsed = await parseProfileText(pasted, token, {
+      const parsed = await parseProfileText(pasted, {
         signal: controller.signal,
         // The deterministic parser is fast — the `onProgress` callback
         // exists for parity with the previous AI-backed flow but in
@@ -158,12 +150,11 @@ export default function ProfilePage() {
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
-    if (!token) return setError("Admin token required");
     setError(null);
     setInfo(null);
     setSaving(true);
     try {
-      const saved = await saveProfile(cleanForSave(profile), token);
+      const saved = await saveProfile(cleanForSave(profile));
       setProfile(normaliseProfile(saved));
       setInfo("Saved. The tailor flow will use this profile from now on.");
     } catch (e) {
@@ -249,25 +240,6 @@ export default function ProfilePage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Admin token</CardTitle>
-          <CardDescription>
-            Stored in this browser only. Same token as <code>/admin</code>.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Input
-            type="password"
-            placeholder="X-Admin-Token"
-            value={token}
-            onChange={(e) => saveToken(e.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
           <CardTitle>Paste resume to autofill</CardTitle>
           <CardDescription>
             Pull contact info, work history, education, and skills out
@@ -296,7 +268,7 @@ export default function ProfilePage() {
             <Button
               type="button"
               onClick={() => void onParse()}
-              disabled={parsing || !token || !pasted.trim()}
+              disabled={parsing || !pasted.trim()}
             >
               {parsing ? "Parsing…" : error ? "Retry parse" : "Parse resume"}
             </Button>
@@ -538,7 +510,7 @@ export default function ProfilePage() {
                 {info && <span className="text-muted-foreground">{info}</span>}
                 {error && <span className="text-destructive">{error}</span>}
               </div>
-              <Button type="submit" disabled={saving || !token}>
+              <Button type="submit" disabled={saving}>
                 {saving ? "Saving…" : "Save profile"}
               </Button>
             </div>

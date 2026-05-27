@@ -113,19 +113,25 @@ export type Profile = {
   education: ProfileEducation[];
 };
 
-export async function fetchProfile(token: string): Promise<Profile> {
-  const res = await fetch(`${API_URL}/api/admin/profile`, {
-    headers: { "X-Admin-Token": token },
+// All user-facing endpoints carry the session cookie via
+// `credentials: 'include'`. The backend's SessionMiddleware reads
+// `user_id` from the signed cookie; no admin-token header is sent
+// from these helpers anymore.
+
+export async function fetchProfile(): Promise<Profile> {
+  const res = await fetch(`${API_URL}/api/profile`, {
+    credentials: "include",
     cache: "no-store",
   });
   if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   return (await res.json()) as Profile;
 }
 
-export async function saveProfile(profile: Profile, token: string): Promise<Profile> {
-  const res = await fetch(`${API_URL}/api/admin/profile`, {
+export async function saveProfile(profile: Profile): Promise<Profile> {
+  const res = await fetch(`${API_URL}/api/profile`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(profile),
   });
   if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
@@ -184,13 +190,11 @@ export class ParseEmptyResultError extends Error {
 }
 
 /** Kick off the parse. Returns the run_id the caller can poll. */
-export async function startParse(
-  text: string,
-  token: string,
-): Promise<{ run_id: string }> {
-  const res = await fetch(`${API_URL}/api/admin/profile/parse`, {
+export async function startParse(text: string): Promise<{ run_id: string }> {
+  const res = await fetch(`${API_URL}/api/profile/parse`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
   if (!res.ok) {
@@ -201,10 +205,10 @@ export async function startParse(
 }
 
 /** Fetch the current state of a parse run. */
-export async function fetchParseRun(run_id: string, token: string): Promise<ParseRun> {
+export async function fetchParseRun(run_id: string): Promise<ParseRun> {
   const res = await fetch(
-    `${API_URL}/api/admin/profile/parse/${encodeURIComponent(run_id)}`,
-    { headers: { "X-Admin-Token": token } },
+    `${API_URL}/api/profile/parse/${encodeURIComponent(run_id)}`,
+    { credentials: "include" },
   );
   if (!res.ok) {
     throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
@@ -229,11 +233,10 @@ export async function fetchParseRun(run_id: string, token: string): Promise<Pars
  */
 export async function parseProfileText(
   text: string,
-  token: string,
   opts: { signal?: AbortSignal; onProgress?: (status: ParseRunStatus) => void } = {},
 ): Promise<Profile> {
   const { signal, onProgress } = opts;
-  const { run_id } = await startParse(text, token);
+  const { run_id } = await startParse(text);
   onProgress?.("running");
 
   const deadline = Date.now() + PARSE_MAX_WAIT_MS;
@@ -241,7 +244,7 @@ export async function parseProfileText(
     if (signal?.aborted) {
       throw new DOMException("Parse polling aborted", "AbortError");
     }
-    const run = await fetchParseRun(run_id, token);
+    const run = await fetchParseRun(run_id);
     if (run.status === "success") {
       if (!run.profile) {
         // Defence-in-depth: a `success` row without a profile means
@@ -382,6 +385,7 @@ export type GenerateResponse = {
 export async function analyzeJob(jobId: number): Promise<AnalyzeResponse> {
   const res = await fetch(`${API_URL}/api/tailor/analyze`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ job_id: jobId }),
   });
@@ -395,6 +399,7 @@ export async function generateTailoredResume(
 ): Promise<GenerateResponse> {
   const res = await fetch(`${API_URL}/api/tailor/generate`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ job_id: jobId, answers }),
   });
@@ -408,9 +413,50 @@ export async function downloadResumeDocx(
 ): Promise<Blob> {
   const res = await fetch(`${API_URL}/api/tailor/docx`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ resume, filename }),
   });
   if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   return await res.blob();
+}
+
+
+// ── Auth (Google sign-in) ────────────────────────────────────────────────
+
+export type CurrentUser = {
+  id: number;
+  email: string;
+  name: string | null;
+};
+
+/** Fetch the current user, or null when not signed in. Never
+ * throws on the 401 path — we treat "no session" as a normal,
+ * expected state for the public job list / sign-in page. */
+export async function fetchCurrentUser(): Promise<CurrentUser | null> {
+  const res = await fetch(`${API_URL}/api/auth/me`, {
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (res.status === 401) return null;
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as CurrentUser;
+}
+
+/** Server-side endpoint URL the sign-in button can link to. Encoded
+ * with the post-login bounce path so the user comes back to where
+ * they clicked sign-in from. */
+export function googleSignInUrl(next: string = "/"): string {
+  const params = new URLSearchParams({ next });
+  return `${API_URL}/api/auth/google/login?${params.toString()}`;
+}
+
+export async function signOut(): Promise<void> {
+  const res = await fetch(`${API_URL}/api/auth/logout`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  }
 }

@@ -1,12 +1,14 @@
-"""AI resume tailoring endpoints (Phase 4, single-user).
+"""AI resume tailoring endpoints — Phase 5, per-user.
 
   POST /api/tailor/analyze   { job_id }                  -> Analysis
   POST /api/tailor/generate  { job_id, answers }         -> TailoredResume
   POST /api/tailor/docx      { resume }                  -> streamed DOCX
 
-All endpoints fall through to deterministic demo-mode data when
-ANTHROPIC_API_KEY isn't configured — see `app.services.tailor` for the
-fallback shape.
+All endpoints require a signed-in user (`get_current_user`). The
+candidate profile + the per-job analysis cache are now scoped per
+user — two people tailoring against the same job get independent
+results. The endpoints fall through to deterministic demo-mode data
+when ANTHROPIC_API_KEY isn't configured.
 """
 
 from __future__ import annotations
@@ -18,9 +20,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.auth import get_current_user
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.job import Job
+from app.models.user import User
 from app.services.docx_export import render_docx
 from app.services.tailor import (
     Analysis,
@@ -55,11 +59,12 @@ class AnalyzeResponse(BaseModel):
 @router.post("/tailor/analyze", response_model=AnalyzeResponse)
 def tailor_analyze(
     payload: AnalyzeRequest,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AnalyzeResponse:
     job = _load_job(db, payload.job_id)
-    analysis = analyze_job(db, job, settings=settings)
+    analysis = analyze_job(db, job, user_id=user.id, settings=settings)
     return AnalyzeResponse(
         job_id=job.id,
         demo_mode=not settings.has_anthropic_key,
@@ -87,11 +92,12 @@ class GenerateResponse(BaseModel):
 @router.post("/tailor/generate", response_model=GenerateResponse)
 def tailor_generate(
     payload: GenerateRequest,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> GenerateResponse:
     job = _load_job(db, payload.job_id)
-    resume = generate_resume(db, job, payload.answers, settings=settings)
+    resume = generate_resume(db, job, payload.answers, user_id=user.id, settings=settings)
     return GenerateResponse(
         job_id=job.id,
         demo_mode=not settings.has_anthropic_key,
@@ -112,19 +118,16 @@ class DocxRequest(BaseModel):
 @router.post("/tailor/docx")
 def tailor_docx(
     payload: DocxRequest,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    """Stream the tailored resume as a DOCX file.
-
-    Takes the already-generated `TailoredResume` rather than re-calling the
-    LLM — the frontend already has the data, and we don't want to double-pay
-    for the same tailoring. The candidate's header (name / email / phone /
-    location) is read from the canonical DB row so name changes to the
-    seed are reflected immediately.
-    """
+    """Stream the tailored resume as a DOCX file. The candidate's
+    header (name / email / phone / location) is read from the
+    signed-in user's profile row so a recent edit shows up in the
+    download without re-running the LLM."""
     from app.services.demo_candidate import get_candidate  # noqa: PLC0415
 
-    raw = render_docx(payload.resume, candidate=get_candidate(db))
+    raw = render_docx(payload.resume, candidate=get_candidate(db, user_id=user.id))
     name = (payload.filename or "tailored-resume").strip() or "tailored-resume"
     if not name.lower().endswith(".docx"):
         name = f"{name}.docx"
