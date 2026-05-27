@@ -18,12 +18,23 @@ Cost & latency are bounded:
 from __future__ import annotations
 
 import logging
+import threading
+import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import anthropic
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.config import Settings, get_settings
+from app.database import SessionLocal
+from app.models.parse_run import (
+    PARSE_STATUS_FAILED,
+    PARSE_STATUS_RUNNING,
+    PARSE_STATUS_SUCCESS,
+    ParseRun,
+)
 from app.services._anthropic_schema import prepare_schema
 
 if TYPE_CHECKING:
@@ -239,3 +250,99 @@ def _first_text(response: Any) -> str:
         if getattr(block, "type", None) == "text":
             return block.text
     raise ResumeParseError("Anthropic response contained no text block")
+
+
+# ─── Background runner ──────────────────────────────────────────────────────
+
+
+def _launch_worker(target, args: tuple) -> None:
+    """Indirection so tests can monkey-patch to run the worker inline.
+
+    Production: daemon thread. Tests: replace with `lambda t, a: t(*a)`
+    to drive the worker synchronously and assert the terminal state."""
+    threading.Thread(target=target, args=args, daemon=True).start()
+
+
+def _finish_parse(
+    run_id: str,
+    *,
+    status: str,
+    profile: dict[str, Any] | None,
+    error: str | None,
+) -> None:
+    """Write the terminal status onto a ParseRun row. Silent if the row
+    is missing (e.g. operator-deleted) — log + move on rather than
+    crash the worker."""
+    with SessionLocal() as db:
+        run = db.execute(select(ParseRun).where(ParseRun.run_id == run_id)).scalar_one_or_none()
+        if run is None:
+            log.warning("parse run %s row not found at finish", run_id)
+            return
+        run.status = status
+        run.profile = profile
+        run.error = error
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+
+
+def _execute_parse_run(run_id: str, text: str, settings: Settings) -> None:
+    """Worker entrypoint. Calls `parse_resume` and writes the result —
+    success or failure — onto the row. Never raises out: any exception
+    after the typed-error catches lands as `status='failed'` with a
+    generic error message, never an unhandled crash on the worker
+    thread."""
+    try:
+        profile = parse_resume(text, settings=settings)
+        _finish_parse(
+            run_id,
+            status=PARSE_STATUS_SUCCESS,
+            profile=profile.model_dump(mode="json"),
+            error=None,
+        )
+    except ResumeParseError as e:
+        # Typed parse errors carry a user-friendly message — surface
+        # verbatim so the frontend can show it.
+        log.warning("parse run %s failed: %s", run_id, e)
+        _finish_parse(
+            run_id,
+            status=PARSE_STATUS_FAILED,
+            profile=None,
+            error=str(e),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("parse run %s unexpected failure", run_id)
+        try:
+            _finish_parse(
+                run_id,
+                status=PARSE_STATUS_FAILED,
+                profile=None,
+                error=f"Unexpected parse failure: {e}",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to record parse-run %s failure — DB unreachable?", run_id)
+
+
+def start_background_parse(text: str, settings: Settings) -> str:
+    """Create a ParseRun row + spawn a worker. Returns the run_id so
+    the HTTP handler can hand it back to the client immediately (202)
+    and let the frontend poll for completion.
+
+    Raises `ResumeParseConfigError` synchronously for caller-fixable
+    issues (missing key, empty input) — those would otherwise just
+    show up as `failed` rows for inputs the caller could have caught
+    upfront. Everything else (network, timeout, bad JSON) is handled
+    asynchronously inside `_execute_parse_run`.
+    """
+    if not settings.has_anthropic_key:
+        raise ResumeParseConfigError(
+            "Resume parsing requires ANTHROPIC_API_KEY to be configured on the backend."
+        )
+    if not text or not text.strip():
+        raise ResumeParseConfigError("Resume text is empty.")
+
+    run_id = uuid.uuid4().hex
+    with SessionLocal() as db:
+        db.add(ParseRun(run_id=run_id, status=PARSE_STATUS_RUNNING))
+        db.commit()
+    _launch_worker(_execute_parse_run, (run_id, text, settings))
+    return run_id

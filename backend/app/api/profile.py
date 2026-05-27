@@ -1,35 +1,41 @@
 """Profile editor endpoints (single-user, admin-token gated).
 
-  GET  /api/admin/profile          → load the current profile
-  PUT  /api/admin/profile          → save the profile (full replacement)
-  POST /api/admin/profile/parse    → parse pasted resume text into the
-                                     profile shape (does NOT save — the
-                                     UI shows the result for review first)
+  GET  /api/admin/profile                  → load the current profile
+  PUT  /api/admin/profile                  → save the profile (full replacement)
+  POST /api/admin/profile/parse            → kick off a background parse,
+                                             return 202 + a `run_id`
+  GET  /api/admin/profile/parse/{run_id}   → poll the parse run's status
 
 The profile lives in `candidates.profile` (slug='demo'). The tailoring
 service reads from this same row via `get_candidate(db)`, so any save
 here changes the candidate fingerprint and invalidates the analyze cache
 naturally.
+
+Parse runs in the background because Anthropic can take longer than
+Render's free-tier 100s request budget — same pattern the ingest
+admin endpoint uses. The frontend kicks off, then polls until the
+row settles at `success` or `failed`.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.admin import _require_admin
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.candidate import DEMO_SLUG, Candidate
+from app.models.parse_run import ParseRun
 from app.services.demo_candidate import DEMO_CANDIDATE
 from app.services.profile_parser import (
     Profile,
     ResumeParseConfigError,
-    ResumeParseConnectionError,
-    ResumeParseError,
-    ResumeParseTimeoutError,
-    parse_resume,
+    start_background_parse,
 )
 
 router = APIRouter()
@@ -78,38 +84,101 @@ def update_profile(
     return Profile.model_validate(row.profile)
 
 
-# ── Parse ───────────────────────────────────────────────────────────────────
+# ── Parse (background job) ──────────────────────────────────────────────────
 
 
 class ParseRequest(BaseModel):
     text: str = Field(min_length=1, description="Raw resume text to parse.")
 
 
-@router.post("/admin/profile/parse", response_model=Profile)
+class ParseStartResponse(BaseModel):
+    run_id: str
+    status: str = Field(default="running")
+    status_url: str = Field(description="Poll this for completion.")
+
+
+class ParseRunOut(BaseModel):
+    run_id: str
+    status: str = Field(description="running | success | failed")
+    profile: Profile | None = None
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.post(
+    "/admin/profile/parse",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ParseStartResponse,
+)
 def parse_profile_text(
     payload: ParseRequest,
+    response: Response,
     settings: Settings = Depends(get_settings),
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
-) -> Profile:
-    """Send the pasted text to Claude and return the parsed Profile shape.
+) -> ParseStartResponse:
+    """Kick off a resume parse and return immediately with a `run_id`.
 
-    Does NOT save — the UI shows the result for the user to review and
-    edit before they hit Save (which is the PUT above).
+    The actual Claude call runs in a background thread; the frontend
+    polls `GET /admin/profile/parse/{run_id}` until the row settles
+    at `status='success'` (with `profile`) or `status='failed'` (with
+    `error`). Same pattern as the admin ingest endpoint — the
+    long-running call can't time out the HTTP request anymore because
+    the HTTP request doesn't wait for it.
     """
     _require_admin(settings, x_admin_token)
     try:
-        return parse_resume(payload.text, settings=settings)
+        run_id = start_background_parse(payload.text, settings)
     except ResumeParseConfigError as e:
-        # Missing API key, empty input — caller-fixable config issue.
+        # Caller-fixable: missing API key, empty input. Surface
+        # synchronously — no point creating a ParseRun row for an
+        # input we can reject upfront.
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
-    except ResumeParseTimeoutError as e:
-        # We bailed before the upstream proxy could 502 us. Surfaces a
-        # readable message instead of a generic 504.
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(e)) from e
-    except ResumeParseConnectionError as e:
-        # We never got bytes from Anthropic — DNS / TLS / dropped conn.
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
-    except ResumeParseError as e:
-        # Catch-all (bad JSON, generic API error). 502 is the right shape
-        # — it's an upstream failure, not ours.
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+
+    status_url = f"/api/admin/profile/parse/{run_id}"
+    response.headers["Location"] = status_url
+    return ParseStartResponse(run_id=run_id, status_url=status_url)
+
+
+@router.get("/admin/profile/parse/{run_id}", response_model=ParseRunOut)
+def get_parse_run(
+    run_id: str = Path(..., min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> ParseRunOut:
+    """Return the current state of the parse run. The frontend polls
+    this until `status` is `success` or `failed`."""
+    _require_admin(settings, x_admin_token)
+    run = db.execute(select(ParseRun).where(ParseRun.run_id == run_id)).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="parse run not found")
+    # Validate the stored JSON back into a Profile so the response
+    # carries the typed shape (and any missing-field defaults the
+    # Pydantic model fills in).
+    profile: Profile | None = None
+    if run.profile is not None:
+        try:
+            profile = Profile.model_validate(run.profile)
+        except Exception:  # noqa: BLE001
+            # A row whose stored JSON doesn't validate is treated as a
+            # bug, not a 500 — surface as `failed` with a clear message
+            # so the frontend can prompt the user to retry.
+            return ParseRunOut(
+                run_id=run.run_id,
+                status="failed",
+                profile=None,
+                error="Parsed profile failed validation — retry the parse.",
+                started_at=run.started_at,
+                finished_at=run.finished_at,
+            )
+    return ParseRunOut(
+        run_id=run.run_id,
+        status=run.status,
+        profile=profile,
+        error=run.error,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+    )
