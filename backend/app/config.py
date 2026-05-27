@@ -59,6 +59,32 @@ class Settings(BaseSettings):
     # starts so a mid-run timeout never wipes the whole pass.
     ingest_batch_size: int = Field(default=25, alias="INGEST_BATCH_SIZE")
 
+    # ── Google sign-in (Phase 5 multi-user auth) ───────────────────────
+    # Client credentials issued in the Google Cloud console. Without
+    # these the auth router still loads but the OAuth start endpoint
+    # returns a 503 — the rest of the app keeps working for local
+    # dev.
+    google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")
+    google_client_secret: str = Field(default="", alias="GOOGLE_CLIENT_SECRET")
+    # The full callback URL Google should redirect to after the
+    # consent screen — must match the URI you registered in the
+    # Google Cloud console exactly (scheme + host + path).
+    # Example: `https://api.aptly.app/api/auth/google/callback`.
+    google_redirect_uri: str = Field(default="", alias="GOOGLE_REDIRECT_URI")
+    # Signing key for the session cookie. MUST be set to a long
+    # random string in production — without it the cookie is signed
+    # with a constant default and anyone can forge a session.
+    session_secret: str = Field(default="dev-insecure-session-secret", alias="SESSION_SECRET")
+    # Where to send the user after a successful OAuth callback. In
+    # production this is the deployed frontend (Vercel); in local
+    # dev it's the Next.js dev server.
+    frontend_url: str = Field(default="http://localhost:3000", alias="FRONTEND_URL")
+    # Email of the operator who should inherit the existing
+    # pre-multi-user data on first Google sign-in. The migration
+    # writes this same value into `users.email` for the bootstrap
+    # row. Match this to the Google address you'll sign in with.
+    initial_user_email: str = Field(default="owner@example.com", alias="INITIAL_USER_EMAIL")
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -66,6 +92,12 @@ class Settings(BaseSettings):
     @property
     def has_anthropic_key(self) -> bool:
         return bool(self.anthropic_api_key.strip())
+
+    @property
+    def has_google_oauth(self) -> bool:
+        return bool(
+            self.google_client_id and self.google_client_secret and self.google_redirect_uri
+        )
 
 
 @lru_cache

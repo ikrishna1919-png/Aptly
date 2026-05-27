@@ -65,8 +65,68 @@ def _wire_parse_worker(monkeypatch, factories):
     monkeypatch.setattr(parser_module, "_launch_worker", lambda target, args: target(*args))
 
 
+def _make_user(factories):
+    """Create a fresh User row in the test DB so the dependency
+    override has something concrete to return."""
+    from app.models.user import User
+
+    with factories() as s:
+        u = User(google_subject_id="google-test", email="test@example.com", name="Test User")
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        # Detach so the User instance is safe to return after the
+        # session closes.
+        s.expunge(u)
+    return u
+
+
+def _client_for(factories, monkeypatch, *, key: str = ""):
+    """Standard test wiring: override `get_db` to the test engine,
+    inject Settings, drive the parse worker inline, and stub
+    `get_current_user` to return a fresh User. Returns the client +
+    that User."""
+    from app.api.auth import get_current_user
+
+    settings = _settings(key=key)
+    user = _make_user(factories)
+
+    def override_db():
+        with factories() as s:
+            yield s
+
+    _wire_parse_worker(monkeypatch, factories)
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_current_user] = lambda: user
+    config_module.get_settings.cache_clear()
+    return TestClient(app), user
+
+
 @pytest.fixture
 def client_no_key(factories, monkeypatch):
+    test_client, _user = _client_for(factories, monkeypatch, key="")
+    try:
+        yield test_client, factories
+    finally:
+        app.dependency_overrides.clear()
+        config_module.get_settings.cache_clear()
+
+
+@pytest.fixture
+def client_with_key(factories, monkeypatch):
+    test_client, _user = _client_for(factories, monkeypatch, key="sk-test-fake")
+    try:
+        yield test_client, factories
+    finally:
+        app.dependency_overrides.clear()
+        config_module.get_settings.cache_clear()
+
+
+@pytest.fixture
+def client_anon(factories, monkeypatch):
+    """A client with NO `get_current_user` override — for tests that
+    pin the 401 surface."""
     settings = _settings(key="")
 
     def override_db():
@@ -84,41 +144,10 @@ def client_no_key(factories, monkeypatch):
         config_module.get_settings.cache_clear()
 
 
-@pytest.fixture
-def client_with_key(factories, monkeypatch):
-    settings = _settings(key="sk-test-fake")
-
-    def override_db():
-        with factories() as s:
-            yield s
-
-    _wire_parse_worker(monkeypatch, factories)
-    app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_settings] = lambda: settings
-    config_module.get_settings.cache_clear()
-    try:
-        yield TestClient(app), factories
-    finally:
-        app.dependency_overrides.clear()
-        config_module.get_settings.cache_clear()
-
-
-def _post_parse_and_poll(test_client, body: dict, *, expected_status: int = 200) -> dict:
-    """Kick off a parse, then GET the status. With the inline worker
-    patched in, the GET happens AFTER the worker has finished — so the
-    returned row carries the terminal state."""
-    res = test_client.post("/api/admin/profile/parse", json=body, headers=AUTH)
-    if res.status_code != 202:
-        # Synchronous failure path (e.g. 503 for missing key) — return
-        # the response as-is so the test can assert on it.
-        return {"_response": res}
-    run_id = res.json()["run_id"]
-    poll = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
-    assert poll.status_code == 200, poll.text
-    return poll.json()
-
-
-AUTH = {"X-Admin-Token": "t"}
+# Empty placeholder — tests that used to send admin headers now rely
+# on the `get_current_user` dependency override instead. Kept as `{}`
+# so the existing `headers=AUTH` call sites keep compiling.
+AUTH: dict[str, str] = {}
 
 
 VALID_PROFILE_BODY = {
@@ -149,17 +178,14 @@ VALID_PROFILE_BODY = {
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 
-def test_all_endpoints_require_admin_token(client_no_key):
-    test_client, _ = client_no_key
-    assert test_client.get("/api/admin/profile").status_code == 403
-    assert test_client.put("/api/admin/profile", json=VALID_PROFILE_BODY).status_code == 403
-    assert test_client.post("/api/admin/profile/parse", json={"text": "..."}).status_code == 403
-
-
-def test_wrong_admin_token_rejected(client_no_key):
-    test_client, _ = client_no_key
-    res = test_client.get("/api/admin/profile", headers={"X-Admin-Token": "nope"})
-    assert res.status_code == 403
+def test_all_endpoints_require_signed_in_user(client_anon):
+    """Profile endpoints 401 without a signed-in user. Admin token
+    is no longer the gate for the user-facing surface — only Google
+    sign-in is."""
+    test_client, _ = client_anon
+    assert test_client.get("/api/profile").status_code == 401
+    assert test_client.put("/api/profile", json=VALID_PROFILE_BODY).status_code == 401
+    assert test_client.post("/api/profile/parse", json={"text": "..."}).status_code == 401
 
 
 # ── GET / PUT ───────────────────────────────────────────────────────────────
@@ -171,20 +197,23 @@ def test_get_profile_seeds_from_demo_candidate_when_row_missing(client_no_key):
     with Session() as s:
         assert s.query(Candidate).count() == 0
 
-    res = test_client.get("/api/admin/profile", headers=AUTH)
+    res = test_client.get("/api/profile", headers=AUTH)
     assert res.status_code == 200
     body = res.json()
     assert body["name"] == DEMO_CANDIDATE["name"]
-    # And a row was created so subsequent reads/writes round-trip.
+    # And a row was created so subsequent reads/writes round-trip —
+    # one row per user, slug starts with the legacy `demo` prefix.
     with Session() as s:
         assert s.query(Candidate).count() == 1
-        assert s.query(Candidate).one().slug == DEMO_SLUG
+        row = s.query(Candidate).one()
+        assert row.slug.startswith(DEMO_SLUG)
+        assert row.user_id is not None
 
 
 def test_put_profile_persists_full_replacement(client_no_key):
     test_client, Session = client_no_key
 
-    res = test_client.put("/api/admin/profile", json=VALID_PROFILE_BODY, headers=AUTH)
+    res = test_client.put("/api/profile", json=VALID_PROFILE_BODY, headers=AUTH)
     assert res.status_code == 200
     body = res.json()
     assert body["name"] == "Alex Custom"
@@ -192,15 +221,15 @@ def test_put_profile_persists_full_replacement(client_no_key):
     assert body["experience"][0]["bullets"][1].startswith("Did the other")
 
     # GET reflects the new state.
-    fetched = test_client.get("/api/admin/profile", headers=AUTH).json()
+    fetched = test_client.get("/api/profile", headers=AUTH).json()
     assert fetched["name"] == "Alex Custom"
     assert fetched["links"]["github"] == "github.com/alex-custom"
 
-    # And the DB row was updated in place (still slug='demo', not a second row).
+    # And the DB row was updated in place — one row per user, not
+    # a second row.
     with Session() as s:
         rows = s.query(Candidate).all()
         assert len(rows) == 1
-        assert rows[0].slug == DEMO_SLUG
         assert rows[0].profile["summary"] == "Custom summary."
 
 
@@ -208,7 +237,7 @@ def test_put_profile_validates_required_fields(client_no_key):
     test_client, _ = client_no_key
     bad = {**VALID_PROFILE_BODY}
     del bad["name"]
-    res = test_client.put("/api/admin/profile", json=bad, headers=AUTH)
+    res = test_client.put("/api/profile", json=bad, headers=AUTH)
     assert res.status_code == 422
 
 
@@ -246,7 +275,7 @@ def test_saving_profile_invalidates_analyze_cache(client_no_key):
         old_hash = cached.input_hash
 
     # Save a new profile (different name → different fingerprint).
-    test_client.put("/api/admin/profile", json=VALID_PROFILE_BODY, headers=AUTH)
+    test_client.put("/api/profile", json=VALID_PROFILE_BODY, headers=AUTH)
 
     # Re-analyze: hash must change, cache row gets updated in place.
     test_client.post("/api/tailor/analyze", json={"job_id": job_id})
@@ -316,15 +345,15 @@ def test_parse_end_to_end_extracts_every_field(client_with_key):
     test_client, _ = client_with_key
 
     start = test_client.post(
-        "/api/admin/profile/parse",
+        "/api/profile/parse",
         json={"text": _FULL_RESUME},
         headers=AUTH,
     )
     assert start.status_code == 202
     run_id = start.json()["run_id"]
-    assert start.json()["status_url"] == f"/api/admin/profile/parse/{run_id}"
+    assert start.json()["status_url"] == f"/api/profile/parse/{run_id}"
 
-    poll = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
+    poll = test_client.get(f"/api/profile/parse/{run_id}", headers=AUTH)
     assert poll.status_code == 200
     body = poll.json()
     assert body["status"] == "success"
@@ -371,7 +400,7 @@ def test_parse_post_returns_202_immediately_with_run_id(client_with_key):
     """The kick-off response shape is unchanged from the previous
     AI-backed implementation — frontend code path keeps working."""
     test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    res = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
     assert res.status_code == 202
     body = res.json()
     assert "run_id" in body
@@ -383,7 +412,7 @@ def test_parse_rejects_empty_input(client_with_key):
     """Pydantic-level validation still catches the empty-string case
     before we hit the parser — caller error, 422."""
     test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": ""}, headers=AUTH)
+    res = test_client.post("/api/profile/parse", json={"text": ""}, headers=AUTH)
     assert res.status_code == 422
 
 
@@ -395,54 +424,40 @@ def test_parse_does_not_save(client_with_key):
     # Seed an existing saved profile so the assertion below is
     # meaningful (the parse_resume output for `_FULL_RESUME` does NOT
     # share the same name).
-    test_client.put("/api/admin/profile", json=VALID_PROFILE_BODY, headers=AUTH)
-    test_client.post("/api/admin/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    test_client.put("/api/profile", json=VALID_PROFILE_BODY, headers=AUTH)
+    test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
 
     with Session() as s:
-        row = s.query(Candidate).filter(Candidate.slug == DEMO_SLUG).one()
+        row = s.query(Candidate).one()
     # The saved row is still the one PUT placed, not the parsed one.
     assert row.profile["name"] == "Alex Custom"
 
 
 def test_parse_get_unknown_run_id_returns_404(client_with_key):
     test_client, _ = client_with_key
-    res = test_client.get("/api/admin/profile/parse/nope-not-real", headers=AUTH)
+    res = test_client.get("/api/profile/parse/nope-not-real", headers=AUTH)
     assert res.status_code == 404
 
 
-def test_parse_status_endpoint_requires_admin_token(client_with_key):
-    test_client, _ = client_with_key
-    res = test_client.get("/api/admin/profile/parse/anything")
-    assert res.status_code == 403
+def test_parse_status_endpoint_requires_sign_in(client_anon):
+    """Parse-status endpoint 401s without a signed-in user — guards
+    against a guessed run_id leaking another user's parsed profile."""
+    test_client, _ = client_anon
+    res = test_client.get("/api/profile/parse/anything")
+    assert res.status_code == 401
 
 
-def test_parse_works_without_anthropic_key(factories, monkeypatch):
+def test_parse_works_without_anthropic_key(client_no_key):
     """The deterministic parser doesn't need ANTHROPIC_API_KEY at all
     — pasting a resume must work even on an environment that has the
     key unset."""
-    settings = _settings(key="")
-
-    def override_db():
-        with factories() as s:
-            yield s
-
-    _wire_parse_worker(monkeypatch, factories)
-    app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_settings] = lambda: settings
-    config_module.get_settings.cache_clear()
-    try:
-        test_client = TestClient(app)
-        start = test_client.post(
-            "/api/admin/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH
-        )
-        assert start.status_code == 202
-        poll = test_client.get(f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH)
-        body = poll.json()
-        assert body["status"] == "success"
-        assert body["profile"]["name"] == "Alex Rivera"
-    finally:
-        app.dependency_overrides.clear()
-        config_module.get_settings.cache_clear()
+    test_client, _ = client_no_key
+    start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    assert start.status_code == 202
+    poll = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH)
+    body = poll.json()
+    assert body["status"] == "success"
+    assert body["profile"]["name"] == "Alex Rivera"
 
 
 def test_parse_random_text_returns_empty_profile_not_failure(client_with_key):
@@ -452,11 +467,9 @@ def test_parse_random_text_returns_empty_profile_not_failure(client_with_key):
     NEVER `status='failed'` for non-resume input."""
     test_client, _ = client_with_key
     junk = "lorem ipsum dolor sit amet"
-    start = test_client.post("/api/admin/profile/parse", json={"text": junk}, headers=AUTH)
+    start = test_client.post("/api/profile/parse", json={"text": junk}, headers=AUTH)
     assert start.status_code == 202
-    body = test_client.get(
-        f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH
-    ).json()
+    body = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH).json()
     assert body["status"] == "success"
     assert body["error"] is None
     profile = body["profile"]
@@ -473,11 +486,9 @@ def test_parse_truncates_oversized_input(client_with_key):
     profile."""
     test_client, _ = client_with_key
     huge = "x" * 300_000
-    start = test_client.post("/api/admin/profile/parse", json={"text": huge}, headers=AUTH)
+    start = test_client.post("/api/profile/parse", json={"text": huge}, headers=AUTH)
     assert start.status_code == 202
-    body = test_client.get(
-        f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH
-    ).json()
+    body = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH).json()
     assert body["status"] == "success"
 
 

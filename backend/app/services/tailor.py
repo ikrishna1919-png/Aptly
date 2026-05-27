@@ -139,22 +139,27 @@ def analyze_job(
     db: Session,
     job: Job,
     *,
+    user_id: int | None = None,
     settings: Settings | None = None,
     client: Anthropic | None = None,
 ) -> Analysis:
-    """Return the cached analysis for `job` or compute a fresh one.
+    """Return the cached analysis for `(user, job)` or compute a fresh
+    one.
 
-    The cache key combines the candidate fingerprint with the job's content
-    hash, so analyses are reused as long as both sides are unchanged.
+    The cache key combines the candidate fingerprint with the job's
+    content hash, so analyses are reused as long as both sides are
+    unchanged. Phase 5 makes the cache per-user — two users targeting
+    the same job get independent analyses driven by their own
+    profiles.
     """
     settings = settings or get_settings()
-    candidate = get_candidate(db)
+    candidate = get_candidate(db, user_id=user_id)
     candidate_fp = candidate_fingerprint(candidate)
     job_fp = job.content_hash or _fallback_job_hash(job)
     input_hash = hashlib.sha256(f"{candidate_fp}:{job_fp}".encode()).hexdigest()
 
     cached = db.execute(
-        select(JobAnalysis).where(JobAnalysis.job_id == job.id)
+        select(JobAnalysis).where(JobAnalysis.job_id == job.id, JobAnalysis.user_id == user_id)
     ).scalar_one_or_none()
     if cached is not None and cached.input_hash == input_hash:
         return _cap_questions(Analysis.model_validate(cached.analysis))
@@ -168,10 +173,11 @@ def analyze_job(
     # more than `_MAX_QUESTIONS`.
     analysis = _cap_questions(analysis)
 
-    # Upsert by job_id (unique).
+    # Upsert by (user_id, job_id) — the new uniqueness constraint.
     if cached is None:
         db.add(
             JobAnalysis(
+                user_id=user_id,
                 job_id=job.id,
                 input_hash=input_hash,
                 analysis=analysis.model_dump(),
@@ -189,13 +195,15 @@ def generate_resume(
     job: Job,
     answers: dict[str, str],
     *,
+    user_id: int | None = None,
     settings: Settings | None = None,
     client: Anthropic | None = None,
 ) -> TailoredResume:
-    """Produce an ATS-optimized resume for `job`, incorporating the user's
-    answers to the tailoring questions. Not cached — answers vary per call."""
+    """Produce an ATS-optimized resume for `(user, job)`, incorporating
+    the user's answers to the tailoring questions. Not cached —
+    answers vary per call."""
     settings = settings or get_settings()
-    candidate = get_candidate(db)
+    candidate = get_candidate(db, user_id=user_id)
     if not settings.has_anthropic_key:
         return _demo_resume(job, answers, candidate=candidate)
     return _llm_generate(job, answers, candidate, client=client, settings=settings)

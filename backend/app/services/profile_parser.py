@@ -784,13 +784,13 @@ def _finish_parse(
         db.commit()
 
 
-def _execute_parse_run(run_id: str, text: str, settings: Settings) -> None:
+def _execute_parse_run(run_id: str, text: str) -> None:
     """Worker entrypoint. The deterministic `parse_resume` never
     raises on input — `_execute_parse_run` therefore only ever lands
     on the `failed` branch when something underneath (e.g. the DB)
     blows up, which is the right shape."""
     try:
-        profile = parse_resume(text, settings=settings)
+        profile = parse_resume(text)
         _finish_parse(
             run_id,
             status=PARSE_STATUS_SUCCESS,
@@ -810,22 +810,19 @@ def _execute_parse_run(run_id: str, text: str, settings: Settings) -> None:
             log.exception("failed to record parse-run %s failure — DB unreachable?", run_id)
 
 
-def start_background_parse(text: str, settings: Settings) -> str:
+def start_background_parse(text: str, *, user_id: int | None = None) -> str:
     """Create a ParseRun row + spawn a worker. Returns the run_id so
     the HTTP handler can hand it back to the client immediately (202)
     and let the frontend poll for completion.
 
-    The parse itself runs in milliseconds now (no Anthropic round-trip),
-    but the background-job + polling shape is preserved so the
-    frontend code path is unchanged and any future heavy parsing
-    (e.g. PDF upload) can slot in without revisiting the API contract.
-    """
-    del settings  # parser doesn't use settings; keep the parameter for
-    # backwards compatibility with callers.
-
+    `user_id` ownership is set at row-creation time so the polling
+    endpoint can filter by it — without that filter a guessed `run_id`
+    would leak another user's parsed profile. `user_id=None` is
+    accepted for test paths that don't model multi-user (the field
+    is nullable on the column, see migration 0012)."""
     run_id = uuid.uuid4().hex
     with SessionLocal() as db:
-        db.add(ParseRun(run_id=run_id, status=PARSE_STATUS_RUNNING))
+        db.add(ParseRun(run_id=run_id, status=PARSE_STATUS_RUNNING, user_id=user_id))
         db.commit()
-    _launch_worker(_execute_parse_run, (run_id, text, None))  # type: ignore[arg-type]
+    _launch_worker(_execute_parse_run, (run_id, text))
     return run_id

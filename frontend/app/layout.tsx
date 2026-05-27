@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
+import { AuthProvider } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
 
 import "./globals.css";
@@ -38,13 +39,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         >
           Skip to main content
         </a>
-        <div className="relative flex min-h-screen flex-col">
-          <SiteHeader />
-          <main id="main" className="flex-1">
-            {children}
-          </main>
-          <SiteFooter />
-        </div>
+        <AuthProvider>
+          <div className="relative flex min-h-screen flex-col">
+            <SiteHeader />
+            <main id="main" className="flex-1">
+              {children}
+            </main>
+            <SiteFooter />
+          </div>
+        </AuthProvider>
       </body>
     </html>
   );
