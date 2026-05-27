@@ -46,11 +46,15 @@ def upgrade() -> None:
         sa.Column("source_type", sa.String(length=32), nullable=False),
         sa.Column("token", sa.String(length=128), nullable=False),
         sa.Column("display_name", sa.String(length=128), nullable=True),
+        # `true` is the only literal Postgres accepts for a boolean default.
+        # SQLite 3.23+ accepts it too. Numeric `1` renders as `DEFAULT 1`
+        # which Postgres rejects with "default for column ... cannot be cast
+        # automatically to type boolean".
         sa.Column(
             "enabled",
             sa.Boolean(),
             nullable=False,
-            server_default=sa.text("1"),
+            server_default=sa.text("true"),
         ),
         sa.Column("last_run_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_status", sa.String(length=16), nullable=True),
