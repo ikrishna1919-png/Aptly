@@ -67,6 +67,32 @@ SMARTRECRUITERS_TOKENS: list[str] = [
     "Versant3",
 ]
 
+# ── Ashby board tokens ────────────────────────────────────────────────────
+# `{token}` in https://api.ashbyhq.com/posting-api/job-board/{token} —
+# the public slug a company picks when they set up their Ashby board.
+# These are the well-known Ashby users seeded by migration 0010 alongside
+# the TSV-expanded candidate set; auto-prune handles any that have since
+# migrated away.
+ASHBY_KNOWN_TOKENS: list[tuple[str, str]] = [
+    ("linear", "Linear"),
+    ("posthog", "PostHog"),
+    ("notion", "Notion"),
+    ("ramp", "Ramp"),
+    ("vanta", "Vanta"),
+    ("replicate", "Replicate"),
+    ("modal", "Modal"),
+    ("anthropic", "Anthropic"),
+    ("hex", "Hex"),
+    ("census", "Census"),
+    ("cohere", "Cohere"),
+    ("anrok", "Anrok"),
+    ("replit", "Replit"),
+    ("browserbase", "Browserbase"),
+    ("together", "Together AI"),
+    ("mercury", "Mercury"),
+    ("coda", "Coda"),
+]
+
 
 # Compose the (source, token) list ingest + validation consume. Don't add
 # entries here directly — extend the per-source lists above.

@@ -1,3 +1,4 @@
+from app.sources.ashby import AshbySource
 from app.sources.base import JobSource, NormalizedJob
 from app.sources.greenhouse import GreenhouseSource
 from app.sources.lever import LeverSource
@@ -9,11 +10,13 @@ SOURCES: dict[str, type[JobSource]] = {
     LeverSource.name: LeverSource,
     SmartRecruitersSource.name: SmartRecruitersSource,
     WorkdaySource.name: WorkdaySource,
+    AshbySource.name: AshbySource,
 }
 
 __all__ = [
     "JobSource",
     "NormalizedJob",
+    "AshbySource",
     "GreenhouseSource",
     "LeverSource",
     "SmartRecruitersSource",
