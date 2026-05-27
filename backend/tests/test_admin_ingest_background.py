@@ -32,6 +32,7 @@ from app.config import Settings, get_settings
 from app.database import Base, get_db
 from app.main import app
 from app.models.job import Job
+from app.models.source import Source
 from app.services import ingest as ingest_module
 from app.sources.base import JobSource, NormalizedJob, SourceUnavailable
 
@@ -137,21 +138,22 @@ class _MixedSource(JobSource):
 
 
 @pytest.fixture
-def mixed_companies(monkeypatch):
-    """Patch the companies list + sources so the background ingest runs
-    against deterministic in-memory boards instead of the real internet."""
-    companies = [
-        ("fake", "fastco"),
-        ("fake", "slowco"),
-        ("fake", "happyco"),
-    ]
+def mixed_companies(monkeypatch, factories):
+    """Seed the sources table + patch SOURCES so the background ingest
+    runs against deterministic in-memory boards instead of the real
+    internet."""
+    with factories() as s:
+        s.add(Source(source_type="fake", token="fastco", enabled=True))
+        s.add(Source(source_type="fake", token="slowco", enabled=True))
+        s.add(Source(source_type="fake", token="happyco", enabled=True))
+        s.commit()
+
     mixed = _MixedSource(
         healthy={"fastco": 2, "happyco": 3},
         unhealthy={
             "slowco": "fake:slowco request failed: ConnectTimeout after 20s",
         },
     )
-    monkeypatch.setattr(ingest_module, "COMPANIES", companies)
     monkeypatch.setattr(ingest_module, "SOURCES", {"fake": lambda: mixed})
     return mixed
 
@@ -328,8 +330,8 @@ def test_running_status_visible_before_worker_finishes(monkeypatch, factories, s
         assert mid["status"] == "running"
         assert mid["finished_at"] is None
 
-        # Now drive the worker to completion (no-op companies list).
-        monkeypatch.setattr(ingest_module, "COMPANIES", [])
+        # Now drive the worker to completion. We've seeded zero Source
+        # rows on this DB so the worker is a no-op pass.
         target, args = pending.pop()
         target(*args)
 

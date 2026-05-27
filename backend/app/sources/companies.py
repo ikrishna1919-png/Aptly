@@ -1,18 +1,13 @@
-"""Editable seed list of company board tokens.
+"""First-deploy seed list of company board tokens.
 
-╭───────────────────────────────────────────────────────────────────────────╮
-│ HOW TO ADD A COMPANY                                                      │
-│   1. Find its public board on one of the three supported ATSes:           │
-│       Greenhouse:       https://boards-api.greenhouse.io/v1/boards/<TOKEN>/jobs │
-│       Lever:            https://api.lever.co/v0/postings/<TOKEN>?mode=json     │
-│       SmartRecruiters:  https://api.smartrecruiters.com/v1/companies/<TOKEN>/postings │
-│   2. Drop the `<TOKEN>` into the matching list below — one per line.      │
-│      SmartRecruiters identifiers are case-sensitive (e.g. "Versant3").    │
-│   3. Save. The next ingest pass picks it up; unreachable tokens are       │
-│      auto-skipped, so it's safe to commit aspirational entries.           │
-│   4. (Optional) `python -m app.cli validate-companies` reports which      │
-│      tokens resolved vs were skipped, with posting counts.                │
-╰───────────────────────────────────────────────────────────────────────────╯
+Runtime source of truth is the `sources` table (see `app.models.source`).
+These lists exist so Alembic migration `0007_sources_table` can seed that
+table the first time it runs, and so the test suite can pin the seed
+contents. After the migration, `run_ingest` reads enabled rows from the
+DB — editing this file no longer changes what ingest pulls on a deployed
+instance. Add new tokens by writing a follow-up Alembic migration (the
+seed insert here is `ON CONFLICT DO NOTHING`, so re-running it is safe
+but it will NOT add new rows on a DB that already has the table).
 """
 
 from __future__ import annotations
@@ -43,6 +38,17 @@ GREENHOUSE_TOKENS: list[str] = [
     "snowflake",
     "vulcanelements",
     "sigmacomputing",
+    "greenthumbindustries",
+    "assystinc",
+    "atek",
+    "sayari",
+    "torcrobotics",
+    "lovelytics",
+    "virtru",
+    "amendconsulting",
+    "cleerlyhealth",
+    "orioninnovation",
+    "vectorusa",
 ]
 
 # ── Lever board tokens ─────────────────────────────────────────────────────

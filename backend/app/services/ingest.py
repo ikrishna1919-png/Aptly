@@ -4,10 +4,18 @@ The rolling-window guarantee: after every run, the `jobs` table contains
 exactly the postings whose `source_updated_at` falls within the last
 `HOURS_WINDOW` hours. Anything older is deleted.
 
+Sources to pull from come from the `sources` table (one row per
+`(source_type, token)` pair, `enabled=True`). `companies.py` is just the
+first-deploy seed; at runtime the DB is the source of truth. Each
+source's row gets per-token telemetry written after every pass
+(`last_run_at`, `last_status` = success/error/skipped, `last_error`,
+`jobs_found_last_run`) so the operator can spot a board that's been
+silently broken for days.
+
 Per-board failures (timeout, 404, malformed JSON) are caught + logged +
 counted but never abort the run — one slow board can't stall the rest.
 HTTP-level timeouts live on the source adapters' `httpx.Client`
-(`timeout=20.0` for both Greenhouse and Lever).
+(`timeout=20.0` for all three).
 
 Long ingests don't fit inside a typical HTTP request budget (Render's
 free tier kills connections at 100s), so `POST /api/admin/ingest` no
@@ -37,9 +45,14 @@ from app.models.ingest_run import (
     IngestRun,
 )
 from app.models.job import Job
+from app.models.source import (
+    STATUS_ERROR,
+    STATUS_SKIPPED,
+    STATUS_SUCCESS,
+    Source,
+)
 from app.sources import SOURCES, JobSource, NormalizedJob
 from app.sources.base import SourceUnavailable
-from app.sources.companies import COMPANIES
 
 log = logging.getLogger(__name__)
 
@@ -95,72 +108,143 @@ def _ensure_aware(dt: datetime | None) -> datetime | None:
     return dt
 
 
+def _load_enabled_sources(db: Session) -> list[Source]:
+    """Read enabled rows in a stable order so logs are diffable across runs."""
+    return list(
+        db.execute(
+            select(Source)
+            .where(Source.enabled.is_(True))
+            .order_by(Source.source_type, Source.token)
+        ).scalars()
+    )
+
+
 def run_ingest(
     db: Session,
     settings: Settings,
-    companies: list[tuple[str, str]] | None = None,
+    sources: list[Source] | None = None,
     source_factories: dict[str, type[JobSource]] | None = None,
 ) -> IngestStats:
-    """Run a full ingest+cleanup pass. Commits at the end."""
+    """Run a full ingest+cleanup pass. Commits after each source so a
+    crash mid-pass leaves the already-pulled rows + their telemetry on
+    disk; commits at the end for the expiry pass."""
 
-    companies = companies if companies is not None else COMPANIES
+    source_rows = sources if sources is not None else _load_enabled_sources(db)
     source_factories = source_factories if source_factories is not None else SOURCES
 
     stats = IngestStats(window_hours=settings.hours_window, started_at=_utcnow().isoformat())
     window_start = _utcnow() - timedelta(hours=settings.hours_window)
     seen: set[tuple[str, str]] = set()
 
-    # Cache source instances so we don't open one client per board.
+    # Cache adapter instances so we don't open one client per board.
     source_instances: dict[str, JobSource] = {}
 
     try:
-        for source_name, token in companies:
+        for src in source_rows:
+            source_name = src.source_type
+            token = src.token
             cls = source_factories.get(source_name)
             if cls is None:
-                log.warning("unknown source %r; skipping %r", source_name, token)
+                msg = f"unknown source type {source_name!r}"
+                log.warning("%s (%s): skipped — %s", token, source_name, msg)
+                _record_source_result(
+                    db,
+                    src,
+                    status=STATUS_SKIPPED,
+                    error=msg,
+                    jobs_found=None,
+                )
                 continue
-            source = source_instances.get(source_name)
-            if source is None:
-                source = cls()
-                source_instances[source_name] = source
+
+            adapter = source_instances.get(source_name)
+            if adapter is None:
+                adapter = cls()
+                source_instances[source_name] = adapter
 
             stats.boards_attempted += 1
             try:
-                postings = list(source.fetch(token))
+                postings = list(adapter.fetch(token))
             except SourceUnavailable as e:
                 stats.boards_failed += 1
                 stats.boards_failures.append({"board": f"{source_name}:{token}", "error": str(e)})
-                log.warning("skipping %s:%s — %s", source_name, token, e)
+                log.warning("%s (%s): error — %s", token, source_name, e)
+                _record_source_result(
+                    db,
+                    src,
+                    status=STATUS_ERROR,
+                    error=str(e),
+                    jobs_found=0,
+                )
                 continue
             except Exception as e:  # noqa: BLE001
                 stats.boards_failed += 1
                 stats.boards_failures.append(
                     {"board": f"{source_name}:{token}", "error": f"unexpected: {e}"}
                 )
-                log.exception("unexpected failure on %s:%s", source_name, token)
+                log.exception("%s (%s): unexpected failure", token, source_name)
+                _record_source_result(
+                    db,
+                    src,
+                    status=STATUS_ERROR,
+                    error=f"unexpected: {e}",
+                    jobs_found=0,
+                )
                 continue
+
+            fetched_n = len(postings)
+            added = 0
+            updated = 0
+            outside = 0
+            duplicates = 0
+            unchanged = 0
 
             for nj in postings:
                 stats.fetched += 1
                 source_updated = _ensure_aware(nj.source_updated_at)
                 if source_updated is None or source_updated < window_start:
                     stats.skipped_outside_window += 1
+                    outside += 1
                     continue
                 key = (nj.source, nj.external_id)
                 if key in seen:
                     stats.skipped_duplicates += 1
+                    duplicates += 1
                     continue
                 seen.add(key)
-                inserted, updated = _upsert(db, nj, source_updated)
-                if inserted:
+                inserted_row, updated_row = _upsert(db, nj, source_updated)
+                if inserted_row:
                     stats.inserted += 1
-                elif updated:
+                    added += 1
+                elif updated_row:
                     stats.updated += 1
+                    updated += 1
                 else:
                     stats.skipped_duplicates += 1
+                    unchanged += 1
+
+            log.info(
+                "%s (%s): fetched %d, added %d, updated %d, skipped %d "
+                "(outside %d / dup %d / unchanged %d)",
+                token,
+                source_name,
+                fetched_n,
+                added,
+                updated,
+                outside + duplicates + unchanged,
+                outside,
+                duplicates,
+                unchanged,
+            )
+            _record_source_result(
+                db,
+                src,
+                status=STATUS_SUCCESS,
+                error=None,
+                jobs_found=added + updated,
+            )
     finally:
-        for source in source_instances.values():
-            close = getattr(source, "close", None)
+        for adapter in source_instances.values():
+            close = getattr(adapter, "close", None)
             if callable(close):
                 close()
 
@@ -168,6 +252,26 @@ def run_ingest(
     db.commit()
     stats.finished_at = _utcnow().isoformat()
     return stats
+
+
+def _record_source_result(
+    db: Session,
+    src: Source,
+    *,
+    status: str,
+    error: str | None,
+    jobs_found: int | None,
+) -> None:
+    """Write the per-source telemetry onto the Source row and commit.
+
+    Committing per-source means a crash halfway through the run still
+    leaves an honest picture of what ran (and what didn't) on the table.
+    """
+    src.last_run_at = _utcnow()
+    src.last_status = status
+    src.last_error = error
+    src.jobs_found_last_run = jobs_found
+    db.commit()
 
 
 def _upsert(db: Session, nj: NormalizedJob, source_updated: datetime) -> tuple[bool, bool]:
