@@ -16,6 +16,37 @@ def test_greenhouse_tokens_includes_new_companies():
     assert "sigmacomputing" in GREENHOUSE_TOKENS
 
 
+_NEW_GREENHOUSE_TOKENS = (
+    "greenthumbindustries",
+    "assystinc",
+    "atek",
+    "sayari",
+    "torcrobotics",
+    "lovelytics",
+    "virtru",
+    "amendconsulting",
+    "cleerlyhealth",
+    "orioninnovation",
+    "vectorusa",
+)
+
+
+def test_greenhouse_tokens_includes_latest_batch():
+    """The 11 tokens added when the sources table landed must be in the
+    seed list (the migration reads from these lists)."""
+    for token in _NEW_GREENHOUSE_TOKENS:
+        assert token in GREENHOUSE_TOKENS, f"{token!r} missing from GREENHOUSE_TOKENS"
+
+
+def test_smxtech_intentionally_absent():
+    """smxtech was deferred — its ATS platform was unconfirmed at the time
+    the rest of the batch was added. Pin its absence so a careless edit
+    can't sneak it back in without verifying the board exists."""
+    assert "smxtech" not in GREENHOUSE_TOKENS
+    assert "smxtech" not in LEVER_TOKENS
+    assert "smxtech" not in SMARTRECRUITERS_TOKENS
+
+
 def test_smartrecruiters_tokens_includes_versant3():
     """Versant3 is the seed entry for the new SmartRecruiters adapter."""
     assert "Versant3" in SMARTRECRUITERS_TOKENS
