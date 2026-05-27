@@ -27,6 +27,20 @@ class Settings(BaseSettings):
     # data so nothing crashes when the key isn't configured.
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
 
+    # After this many consecutive `last_status='error'` outcomes for a
+    # source row, the ingest loop flips `enabled=False` on it so the
+    # dead board stops eating a per-source timeout every pass. Tuned
+    # for the once-daily scheduled ingest: 3 days of failures is enough
+    # signal to park a token, and the operator can re-enable it by hand.
+    source_failure_threshold: int = Field(default=3, alias="SOURCE_FAILURE_THRESHOLD")
+
+    # Max number of source fetches in flight at once during the async
+    # network phase of `run_ingest`. The bottleneck is network latency,
+    # not CPU; 10 is enough to overlap most of the waits without
+    # hammering the upstream ATSes. Crank it up for boards that don't
+    # rate-limit; lower it if a vendor starts 429ing.
+    ingest_concurrency: int = Field(default=10, alias="INGEST_CONCURRENCY")
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

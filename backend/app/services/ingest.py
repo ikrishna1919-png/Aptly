@@ -12,10 +12,20 @@ source's row gets per-token telemetry written after every pass
 `jobs_found_last_run`) so the operator can spot a board that's been
 silently broken for days.
 
+The fetch step is parallelized with `httpx.AsyncClient` + an
+`asyncio.Semaphore(settings.ingest_concurrency)` so the per-board
+network waits overlap. DB writes stay sync — coroutines collect their
+postings into the per-source result list first, then the existing
+synchronous loop upserts them through the existing `Session`. Bounding
+the concurrency means we don't fire 800 simultaneous requests at the
+upstream ATSes; bounding it with a semaphore (not a thread pool) means
+each "slot" is virtually free.
+
 Per-board failures (timeout, 404, malformed JSON) are caught + logged +
 counted but never abort the run — one slow board can't stall the rest.
 HTTP-level timeouts live on the source adapters' `httpx.Client`
-(`timeout=20.0` for all three).
+(`timeout=20.0` for all three) and are honoured by the async path via
+the shared `AsyncClient` timeout.
 
 Long ingests don't fit inside a typical HTTP request budget (Render's
 free tier kills connections at 100s), so `POST /api/admin/ingest` no
@@ -23,10 +33,14 @@ longer awaits `run_ingest()` directly. It calls
 `start_background_ingest()`, which writes an `IngestRun` row and spawns
 a daemon thread to do the work, and returns the new `run_id` immediately
 so the caller can poll `GET /api/admin/ingest/{run_id}` for completion.
+The async fetch step runs INSIDE that background thread via
+`asyncio.run` — it parallelises the network within the existing job,
+not in place of it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import threading
@@ -34,6 +48,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -65,6 +80,7 @@ class IngestStats:
     boards_attempted: int = 0
     boards_failed: int = 0
     boards_failures: list[dict] = field(default_factory=list)  # [{board, error}]
+    boards_auto_disabled: list[str] = field(default_factory=list)  # ["greenhouse:foo", …]
     fetched: int = 0  # raw postings returned by sources
     skipped_outside_window: int = 0
     skipped_duplicates: int = 0
@@ -119,15 +135,108 @@ def _load_enabled_sources(db: Session) -> list[Source]:
     )
 
 
+@dataclass
+class _FetchOutcome:
+    """One source row's network result, ready for the sync DB phase.
+
+    `status` is one of `"ok"`, `"unknown"`, `"error"`, `"unexpected"`.
+    `postings` is set only when `status == "ok"`; `error` carries the
+    message in the other cases. The structure is intentionally
+    serialisation-friendly so adding a test fixture / log line doesn't
+    require crossing the async boundary."""
+
+    src: Source
+    status: str
+    postings: list[NormalizedJob] | None = None
+    error: str | None = None
+
+
+async def _fetch_one(
+    src: Source,
+    adapter: JobSource | None,
+    async_client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+) -> _FetchOutcome:
+    """Fetch a single source under the semaphore. Catches everything so
+    one failure can't cancel sibling tasks — `asyncio.gather` with
+    bare-raise semantics would tear the whole batch down on the first
+    exception, and even `return_exceptions=True` muddles the
+    per-source-type info we need for the telemetry write."""
+    async with sem:
+        if adapter is None:
+            return _FetchOutcome(
+                src=src,
+                status="unknown",
+                error=f"unknown source type {src.source_type!r}",
+            )
+        try:
+            postings = await adapter.fetch_async(src.token, async_client=async_client)
+            return _FetchOutcome(src=src, status="ok", postings=list(postings))
+        except SourceUnavailable as e:
+            return _FetchOutcome(src=src, status="error", error=str(e))
+        except Exception as e:  # noqa: BLE001
+            log.exception("%s (%s): unexpected fetch failure", src.token, src.source_type)
+            return _FetchOutcome(src=src, status="unexpected", error=f"unexpected: {e}")
+
+
+async def _fetch_all_async(
+    source_rows: list[Source],
+    source_factories: dict[str, type[JobSource]],
+    concurrency: int,
+    timeout: float,
+) -> list[_FetchOutcome]:
+    """Run every source's `fetch_async` concurrently, bounded by a
+    semaphore. Returns one `_FetchOutcome` per input row in input
+    order."""
+    if not source_rows:
+        return []
+
+    # Instantiate every adapter we'll need up front so the per-task
+    # cache lookup is race-free. Adapters are shared across tasks; for
+    # the native-async overrides (Greenhouse, Lever) the only mutable
+    # state is the async_client we pass in, so concurrent calls are
+    # safe. For the default `to_thread(fetch)` path, the underlying
+    # sync `httpx.Client` is already thread-safe.
+    instances: dict[str, JobSource] = {}
+    for src in source_rows:
+        if src.source_type in instances:
+            continue
+        cls = source_factories.get(src.source_type)
+        if cls is None:
+            continue
+        instances[src.source_type] = cls()
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as async_client:
+            tasks = [
+                _fetch_one(src, instances.get(src.source_type), async_client, sem)
+                for src in source_rows
+            ]
+            return await asyncio.gather(*tasks)
+    finally:
+        # Sync adapters expose a `close()`; closing the unused sync
+        # client is cheap and avoids a "unclosed httpx.Client" warning
+        # when the adapter's sync client was opened in __init__ but
+        # never used by the async path.
+        for adapter in instances.values():
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
 def run_ingest(
     db: Session,
     settings: Settings,
     sources: list[Source] | None = None,
     source_factories: dict[str, type[JobSource]] | None = None,
 ) -> IngestStats:
-    """Run a full ingest+cleanup pass. Commits after each source so a
-    crash mid-pass leaves the already-pulled rows + their telemetry on
-    disk; commits at the end for the expiry pass."""
+    """Run a full ingest+cleanup pass. The network step is parallelised
+    via `asyncio.gather` (bounded by `settings.ingest_concurrency`); the
+    DB step that follows is serial, using the provided sync `Session`."""
 
     source_rows = sources if sources is not None else _load_enabled_sources(db)
     source_factories = source_factories if source_factories is not None else SOURCES
@@ -136,117 +245,111 @@ def run_ingest(
     window_start = _utcnow() - timedelta(hours=settings.hours_window)
     seen: set[tuple[str, str]] = set()
 
-    # Cache adapter instances so we don't open one client per board.
-    source_instances: dict[str, JobSource] = {}
+    threshold = max(1, int(getattr(settings, "source_failure_threshold", 3)))
+    concurrency = max(1, int(getattr(settings, "ingest_concurrency", 10)))
 
-    try:
-        for src in source_rows:
-            source_name = src.source_type
-            token = src.token
-            cls = source_factories.get(source_name)
-            if cls is None:
-                msg = f"unknown source type {source_name!r}"
-                log.warning("%s (%s): skipped — %s", token, source_name, msg)
-                _record_source_result(
-                    db,
-                    src,
-                    status=STATUS_SKIPPED,
-                    error=msg,
-                    jobs_found=None,
-                )
-                continue
+    # ── Phase 1: async network fetch ──────────────────────────────────
+    outcomes = asyncio.run(
+        _fetch_all_async(
+            source_rows,
+            source_factories,
+            concurrency=concurrency,
+            timeout=20.0,
+        )
+    )
 
-            adapter = source_instances.get(source_name)
-            if adapter is None:
-                adapter = cls()
-                source_instances[source_name] = adapter
+    # ── Phase 2: serial DB upserts + telemetry writes ─────────────────
+    for outcome in outcomes:
+        src = outcome.src
+        source_name = src.source_type
+        token = src.token
 
-            stats.boards_attempted += 1
-            try:
-                postings = list(adapter.fetch(token))
-            except SourceUnavailable as e:
-                stats.boards_failed += 1
-                stats.boards_failures.append({"board": f"{source_name}:{token}", "error": str(e)})
-                log.warning("%s (%s): error — %s", token, source_name, e)
-                _record_source_result(
-                    db,
-                    src,
-                    status=STATUS_ERROR,
-                    error=str(e),
-                    jobs_found=0,
-                )
-                continue
-            except Exception as e:  # noqa: BLE001
-                stats.boards_failed += 1
-                stats.boards_failures.append(
-                    {"board": f"{source_name}:{token}", "error": f"unexpected: {e}"}
-                )
-                log.exception("%s (%s): unexpected failure", token, source_name)
-                _record_source_result(
-                    db,
-                    src,
-                    status=STATUS_ERROR,
-                    error=f"unexpected: {e}",
-                    jobs_found=0,
-                )
-                continue
-
-            fetched_n = len(postings)
-            added = 0
-            updated = 0
-            outside = 0
-            duplicates = 0
-            unchanged = 0
-
-            for nj in postings:
-                stats.fetched += 1
-                source_updated = _ensure_aware(nj.source_updated_at)
-                if source_updated is None or source_updated < window_start:
-                    stats.skipped_outside_window += 1
-                    outside += 1
-                    continue
-                key = (nj.source, nj.external_id)
-                if key in seen:
-                    stats.skipped_duplicates += 1
-                    duplicates += 1
-                    continue
-                seen.add(key)
-                inserted_row, updated_row = _upsert(db, nj, source_updated)
-                if inserted_row:
-                    stats.inserted += 1
-                    added += 1
-                elif updated_row:
-                    stats.updated += 1
-                    updated += 1
-                else:
-                    stats.skipped_duplicates += 1
-                    unchanged += 1
-
-            log.info(
-                "%s (%s): fetched %d, added %d, updated %d, skipped %d "
-                "(outside %d / dup %d / unchanged %d)",
-                token,
-                source_name,
-                fetched_n,
-                added,
-                updated,
-                outside + duplicates + unchanged,
-                outside,
-                duplicates,
-                unchanged,
-            )
+        if outcome.status == "unknown":
+            log.warning("%s (%s): skipped — %s", token, source_name, outcome.error)
             _record_source_result(
                 db,
                 src,
-                status=STATUS_SUCCESS,
-                error=None,
-                jobs_found=added + updated,
+                status=STATUS_SKIPPED,
+                error=outcome.error,
+                jobs_found=None,
+                failure_threshold=threshold,
+                stats=stats,
             )
-    finally:
-        for adapter in source_instances.values():
-            close = getattr(adapter, "close", None)
-            if callable(close):
-                close()
+            continue
+
+        stats.boards_attempted += 1
+
+        if outcome.status in ("error", "unexpected"):
+            stats.boards_failed += 1
+            stats.boards_failures.append(
+                {"board": f"{source_name}:{token}", "error": outcome.error or ""}
+            )
+            log.warning("%s (%s): error — %s", token, source_name, outcome.error)
+            _record_source_result(
+                db,
+                src,
+                status=STATUS_ERROR,
+                error=outcome.error,
+                jobs_found=0,
+                failure_threshold=threshold,
+                stats=stats,
+            )
+            continue
+
+        postings = outcome.postings or []
+        fetched_n = len(postings)
+        added = 0
+        updated = 0
+        outside = 0
+        duplicates = 0
+        unchanged = 0
+
+        for nj in postings:
+            stats.fetched += 1
+            source_updated = _ensure_aware(nj.source_updated_at)
+            if source_updated is None or source_updated < window_start:
+                stats.skipped_outside_window += 1
+                outside += 1
+                continue
+            key = (nj.source, nj.external_id)
+            if key in seen:
+                stats.skipped_duplicates += 1
+                duplicates += 1
+                continue
+            seen.add(key)
+            inserted_row, updated_row = _upsert(db, nj, source_updated)
+            if inserted_row:
+                stats.inserted += 1
+                added += 1
+            elif updated_row:
+                stats.updated += 1
+                updated += 1
+            else:
+                stats.skipped_duplicates += 1
+                unchanged += 1
+
+        log.info(
+            "%s (%s): fetched %d, added %d, updated %d, skipped %d "
+            "(outside %d / dup %d / unchanged %d)",
+            token,
+            source_name,
+            fetched_n,
+            added,
+            updated,
+            outside + duplicates + unchanged,
+            outside,
+            duplicates,
+            unchanged,
+        )
+        _record_source_result(
+            db,
+            src,
+            status=STATUS_SUCCESS,
+            error=None,
+            jobs_found=added + updated,
+            failure_threshold=threshold,
+            stats=stats,
+        )
 
     stats.deleted_expired = _delete_expired(db, window_start)
     db.commit()
@@ -261,8 +364,16 @@ def _record_source_result(
     status: str,
     error: str | None,
     jobs_found: int | None,
+    failure_threshold: int,
+    stats: IngestStats,
 ) -> None:
     """Write the per-source telemetry onto the Source row and commit.
+
+    Tracks `consecutive_failures` so a board that's been erroring for
+    `failure_threshold` runs in a row gets `enabled=False`d — the
+    operator can re-enable it once the underlying token is fixed. We
+    only count `STATUS_ERROR` toward the streak; `STATUS_SKIPPED` is a
+    config issue (unknown source_type), not a board failure.
 
     Committing per-source means a crash halfway through the run still
     leaves an honest picture of what ran (and what didn't) on the table.
@@ -271,6 +382,22 @@ def _record_source_result(
     src.last_status = status
     src.last_error = error
     src.jobs_found_last_run = jobs_found
+
+    if status == STATUS_SUCCESS:
+        src.consecutive_failures = 0
+    elif status == STATUS_ERROR:
+        src.consecutive_failures = (src.consecutive_failures or 0) + 1
+        if src.enabled and src.consecutive_failures >= failure_threshold:
+            src.enabled = False
+            stats.boards_auto_disabled.append(f"{src.source_type}:{src.token}")
+            log.warning(
+                "%s (%s): auto-disabled after %d consecutive failures",
+                src.token,
+                src.source_type,
+                src.consecutive_failures,
+            )
+    # STATUS_SKIPPED (unknown source_type) doesn't move the counter.
+
     db.commit()
 
 

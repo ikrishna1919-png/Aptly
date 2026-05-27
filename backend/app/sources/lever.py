@@ -42,6 +42,7 @@ class LeverSource(JobSource):
     def __init__(self, client: httpx.Client | None = None, timeout: float = 20.0) -> None:
         self._client = client or httpx.Client(timeout=timeout)
         self._owns_client = client is None
+        self._timeout = timeout
 
     def close(self) -> None:
         if self._owns_client:
@@ -53,12 +54,39 @@ class LeverSource(JobSource):
             resp = self._client.get(url, params={"mode": "json"})
         except httpx.HTTPError as e:
             raise SourceUnavailable(f"lever:{token} request failed: {e}") from e
-        if resp.status_code == 404:
-            raise SourceUnavailable(f"lever:{token} not found (404)")
-        if resp.status_code >= 400:
-            raise SourceUnavailable(f"lever:{token} HTTP {resp.status_code}: {resp.text[:200]}")
+        return self._parse_response(token, resp.status_code, resp.text, resp.json)
+
+    async def fetch_async(
+        self,
+        token: str,
+        async_client: httpx.AsyncClient | None = None,
+    ) -> Iterable[NormalizedJob]:
+        url = BASE_URL.format(company=token)
+        own = async_client is None
+        client = async_client or httpx.AsyncClient(timeout=self._timeout)
         try:
-            payload = resp.json()
+            try:
+                resp = await client.get(url, params={"mode": "json"})
+            except httpx.HTTPError as e:
+                raise SourceUnavailable(f"lever:{token} request failed: {e}") from e
+            return self._parse_response(token, resp.status_code, resp.text, resp.json)
+        finally:
+            if own:
+                await client.aclose()
+
+    def _parse_response(
+        self,
+        token: str,
+        status_code: int,
+        text: str,
+        json_loader,
+    ) -> list[NormalizedJob]:
+        if status_code == 404:
+            raise SourceUnavailable(f"lever:{token} not found (404)")
+        if status_code >= 400:
+            raise SourceUnavailable(f"lever:{token} HTTP {status_code}: {text[:200]}")
+        try:
+            payload = json_loader()
         except ValueError as e:
             raise SourceUnavailable(f"lever:{token} bad JSON: {e}") from e
         if not isinstance(payload, list):
