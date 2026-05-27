@@ -57,14 +57,24 @@ def _settings(key: str = "") -> Settings:
     )
 
 
+def _wire_parse_worker(monkeypatch, factories):
+    """Route the background-parse worker through the test's in-memory
+    engine + drive it inline so tests can assert the final state
+    without waiting on a real thread. Same pattern the ingest
+    background tests use."""
+    monkeypatch.setattr(parser_module, "SessionLocal", factories)
+    monkeypatch.setattr(parser_module, "_launch_worker", lambda target, args: target(*args))
+
+
 @pytest.fixture
-def client_no_key(factories):
+def client_no_key(factories, monkeypatch):
     settings = _settings(key="")
 
     def override_db():
         with factories() as s:
             yield s
 
+    _wire_parse_worker(monkeypatch, factories)
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_settings] = lambda: settings
     config_module.get_settings.cache_clear()
@@ -76,13 +86,14 @@ def client_no_key(factories):
 
 
 @pytest.fixture
-def client_with_key(factories):
+def client_with_key(factories, monkeypatch):
     settings = _settings(key="sk-test-fake")
 
     def override_db():
         with factories() as s:
             yield s
 
+    _wire_parse_worker(monkeypatch, factories)
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_settings] = lambda: settings
     config_module.get_settings.cache_clear()
@@ -91,6 +102,21 @@ def client_with_key(factories):
     finally:
         app.dependency_overrides.clear()
         config_module.get_settings.cache_clear()
+
+
+def _post_parse_and_poll(test_client, body: dict, *, expected_status: int = 200) -> dict:
+    """Kick off a parse, then GET the status. With the inline worker
+    patched in, the GET happens AFTER the worker has finished — so the
+    returned row carries the terminal state."""
+    res = test_client.post("/api/admin/profile/parse", json=body, headers=AUTH)
+    if res.status_code != 202:
+        # Synchronous failure path (e.g. 503 for missing key) — return
+        # the response as-is so the test can assert on it.
+        return {"_response": res}
+    run_id = res.json()["run_id"]
+    poll = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
+    assert poll.status_code == 200, poll.text
+    return poll.json()
 
 
 AUTH = {"X-Admin-Token": "t"}
@@ -262,6 +288,8 @@ class _MockAnthropicClient:
 
 def test_parse_returns_503_when_anthropic_key_missing(client_no_key):
     test_client, _ = client_no_key
+    # No API key → caller-fixable; surfaces synchronously as 503,
+    # no ParseRun row created.
     res = test_client.post(
         "/api/admin/profile/parse",
         json={"text": "John Doe\nSoftware Engineer"},
@@ -271,7 +299,9 @@ def test_parse_returns_503_when_anthropic_key_missing(client_no_key):
     assert "anthropic_api_key" in res.json()["detail"].lower()
 
 
-def test_parse_returns_structured_profile_when_key_present(client_with_key, monkeypatch):
+def test_parse_returns_structured_profile_via_background_run(client_with_key, monkeypatch):
+    """The new shape: POST returns 202 + run_id; GET the run when
+    polled returns the parsed Profile."""
     test_client, _ = client_with_key
 
     canned = {
@@ -301,16 +331,29 @@ def test_parse_returns_structured_profile_when_key_present(client_with_key, monk
     mock = _MockAnthropicClient(canned)
     monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
 
-    res = test_client.post(
+    # POST kicks off — 202 + run_id, no Profile in the body.
+    start = test_client.post(
         "/api/admin/profile/parse",
         json={"text": "long pasted resume text"},
         headers=AUTH,
     )
+    assert start.status_code == 202
+    run_id = start.json()["run_id"]
+    assert start.json()["status_url"] == f"/api/admin/profile/parse/{run_id}"
+    assert start.headers.get("Location") == start.json()["status_url"]
+
+    # Poll the run — worker has already finished (inline) so the
+    # response carries the parsed Profile.
+    res = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
     assert res.status_code == 200
     body = res.json()
-    assert body["name"] == "John Doe"
-    assert body["skills"] == ["Python", "Postgres", "Kafka"]
-    assert body["experience"][0]["company"] == "ExampleCo"
+    assert body["status"] == "success"
+    assert body["error"] is None
+    assert body["finished_at"] is not None
+    profile = body["profile"]
+    assert profile["name"] == "John Doe"
+    assert profile["skills"] == ["Python", "Postgres", "Kafka"]
+    assert profile["experience"][0]["company"] == "ExampleCo"
 
     # One call, on Sonnet 4.6, with the system prompt cached and the
     # truthful-only rule asserted.
@@ -333,9 +376,39 @@ def test_parse_rejects_empty_input(client_with_key):
     assert res.status_code == 422
 
 
+def test_parse_post_returns_202_immediately_with_run_id(client_with_key, monkeypatch):
+    """POST never blocks on the Anthropic call — even with a slow
+    underlying client, the HTTP response carries `run_id` + `running`
+    status. (The inline worker patch means the worker actually
+    finishes synchronously here; in production it'd run on a daemon
+    thread.)"""
+    test_client, _ = client_with_key
+    monkeypatch.setattr(
+        parser_module, "_build_client", lambda s, c: _MockAnthropicClient({"name": "x"})
+    )
+    res = test_client.post("/api/admin/profile/parse", json={"text": "x"}, headers=AUTH)
+    assert res.status_code == 202
+    body = res.json()
+    assert "run_id" in body
+    assert body["status"] == "running"
+
+
+def test_parse_get_unknown_run_id_returns_404(client_with_key):
+    test_client, _ = client_with_key
+    res = test_client.get("/api/admin/profile/parse/nope-not-real", headers=AUTH)
+    assert res.status_code == 404
+
+
+def test_parse_status_endpoint_requires_admin_token(client_with_key):
+    test_client, _ = client_with_key
+    res = test_client.get("/api/admin/profile/parse/anything")
+    assert res.status_code == 403
+
+
 def test_parse_does_not_save(client_with_key, monkeypatch):
-    """Parse RETURNS the structured profile; saving still requires PUT.
-    Otherwise a noisy paste would clobber the real profile silently."""
+    """Parse RETURNS the structured profile via the polling endpoint;
+    saving still requires PUT. Otherwise a noisy paste would clobber
+    the real profile silently."""
     test_client, Session = client_with_key
     canned = {
         "name": "Parsed Name (NOT saved)",
@@ -346,13 +419,12 @@ def test_parse_does_not_save(client_with_key, monkeypatch):
     }
     monkeypatch.setattr(parser_module, "_build_client", lambda s, c: _MockAnthropicClient(canned))
 
-    test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert start.status_code == 202
 
     # The DB row must NOT have been updated.
     with Session() as s:
-        row = s.query(Candidate).one_or_none()
-    # Either no row at all (parse doesn't auto-seed) or, if something else
-    # created one earlier in the test fixture, it's not the parsed name.
+        row = s.query(Candidate).filter(Candidate.slug == DEMO_SLUG).one_or_none()
     if row is not None:
         assert row.profile.get("name") != "Parsed Name (NOT saved)"
 
@@ -378,12 +450,19 @@ class _RaisingAnthropicClient:
         raise self.exc
 
 
-def test_parse_returns_504_on_anthropic_timeout(client_with_key, monkeypatch):
-    """SDK raises APITimeoutError → endpoint returns 504 with a readable
-    message; never hangs."""
+def _poll_run(test_client, run_id: str) -> dict:
+    r = test_client.get(f"/api/admin/profile/parse/{run_id}", headers=AUTH)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_parse_records_timeout_as_failed_run(client_with_key, monkeypatch):
+    """SDK raises APITimeoutError inside the worker → the ParseRun
+    row lands at `status='failed'` with the readable timeout message.
+    POST still returns 202 — the failure shows up via the polling
+    endpoint, not as an HTTP error on the kick-off call."""
     import anthropic
 
-    # APITimeoutError requires a request — pass a minimal sentinel.
     timeout_exc = anthropic.APITimeoutError(request=SimpleNamespace())
     monkeypatch.setattr(
         parser_module,
@@ -392,16 +471,19 @@ def test_parse_returns_504_on_anthropic_timeout(client_with_key, monkeypatch):
     )
 
     test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert res.status_code == 504
-    detail = res.json()["detail"].lower()
-    assert "didn't respond" in detail or "timed out" in detail or "timeout" in detail
-    # Number of seconds is mentioned so the user knows how long we waited.
-    assert "90" in res.json()["detail"]
+    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert start.status_code == 202
+    body = _poll_run(test_client, start.json()["run_id"])
+    assert body["status"] == "failed"
+    assert body["profile"] is None
+    err = body["error"].lower()
+    assert "didn't respond" in err or "timed out" in err or "timeout" in err
+    # Surface how long we waited so the user knows.
+    assert "90" in body["error"]
 
 
-def test_parse_returns_502_on_anthropic_connection_error(client_with_key, monkeypatch):
-    """SDK raises APIConnectionError → endpoint returns 502 with the
+def test_parse_records_connection_error_as_failed_run(client_with_key, monkeypatch):
+    """SDK raises APIConnectionError → run lands at `failed` with the
     underlying error message."""
     import anthropic
 
@@ -413,14 +495,16 @@ def test_parse_returns_502_on_anthropic_connection_error(client_with_key, monkey
     )
 
     test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert res.status_code == 502
-    assert "claude" in res.json()["detail"].lower()
+    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert start.status_code == 202
+    body = _poll_run(test_client, start.json()["run_id"])
+    assert body["status"] == "failed"
+    assert "claude" in (body["error"] or "").lower()
 
 
-def test_parse_returns_502_on_anthropic_api_status_error(client_with_key, monkeypatch):
-    """SDK raises APIStatusError (rate limit, overloaded, etc.) → 502
-    with an unambiguous error message rather than a 500 / hang."""
+def test_parse_records_api_status_error_as_failed_run(client_with_key, monkeypatch):
+    """SDK raises APIStatusError (rate limit, overloaded, etc.) → run
+    lands at `failed` with a non-empty user-facing message."""
     import anthropic
     import httpx
 
@@ -439,17 +523,16 @@ def test_parse_returns_502_on_anthropic_api_status_error(client_with_key, monkey
     )
 
     test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert res.status_code == 502
-    # The user should see *something* — empty/None detail would defeat
-    # the whole point of the regression fix.
-    assert res.json()["detail"]
+    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert start.status_code == 202
+    body = _poll_run(test_client, start.json()["run_id"])
+    assert body["status"] == "failed"
+    assert body["error"]
 
 
-def test_parse_returns_502_on_invalid_json_response(client_with_key, monkeypatch):
+def test_parse_records_invalid_json_as_failed_run(client_with_key, monkeypatch):
     """If Claude returns text that doesn't validate against the Profile
-    schema, we surface a 502 rather than letting a Pydantic error bubble
-    as a 500."""
+    schema, the run lands at `failed` with a retry-suggesting message."""
 
     class _BadJSONClient:
         def __init__(self):
@@ -462,9 +545,11 @@ def test_parse_returns_502_on_invalid_json_response(client_with_key, monkeypatch
     monkeypatch.setattr(parser_module, "_build_client", lambda s, c: _BadJSONClient())
 
     test_client, _ = client_with_key
-    res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert res.status_code == 502
-    assert "retry" in res.json()["detail"].lower()
+    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert start.status_code == 202
+    body = _poll_run(test_client, start.json()["run_id"])
+    assert body["status"] == "failed"
+    assert "retry" in (body["error"] or "").lower()
 
 
 def test_parse_passes_explicit_timeout_to_sdk(client_with_key, monkeypatch):
@@ -484,7 +569,7 @@ def test_parse_passes_explicit_timeout_to_sdk(client_with_key, monkeypatch):
 
     test_client, _ = client_with_key
     res = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
-    assert res.status_code == 200
+    assert res.status_code == 202
 
     assert len(mock.calls) == 1
     call_kwargs = mock.calls[0]
@@ -510,7 +595,7 @@ def test_parse_clips_oversized_resume(client_with_key, monkeypatch):
 
     test_client, _ = client_with_key
     res = test_client.post("/api/admin/profile/parse", json={"text": huge}, headers=AUTH)
-    assert res.status_code == 200
+    assert res.status_code == 202
 
     user_text = mock.calls[0]["messages"][0]["content"]
     # The text payload includes prompt scaffolding + clipped body + the

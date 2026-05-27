@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -66,6 +66,10 @@ export default function ProfilePage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  // Abort handle so the spinner can be cancelled (e.g. on retry or
+  // navigation) without leaving the polling loop running in the
+  // background.
+  const parseAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     setToken(localStorage.getItem(TOKEN_KEY) ?? "");
@@ -102,24 +106,46 @@ export default function ProfilePage() {
   async function onParse() {
     if (!token) return setError("Admin token required");
     if (!pasted.trim()) return setError("Paste your resume text first");
+    // Cancel any prior in-flight parse before starting a new one —
+    // protects against a "retry" double-click triggering two polling
+    // loops against the same browser session.
+    parseAbortRef.current?.abort();
+    const controller = new AbortController();
+    parseAbortRef.current = controller;
+
     setError(null);
-    setInfo(null);
+    setInfo("Kicking off parse…");
     setParsing(true);
     try {
-      const parsed = await parseProfileText(pasted, token);
+      const parsed = await parseProfileText(pasted, token, {
+        signal: controller.signal,
+        onProgress: () => setInfo("Parsing your resume with Claude — this can take up to ~90s."),
+      });
       setProfile(normaliseProfile(parsed));
       setInfo("Parsed — review and edit, then click Save.");
     } catch (e) {
-      if (e instanceof ParseTimeoutError) {
-        // Timeout has its own message already; show it verbatim.
+      if (e instanceof DOMException && e.name === "AbortError") {
+        // Caller-initiated cancel — silent.
+        setInfo(null);
+      } else if (e instanceof ParseTimeoutError) {
         setError(e.message);
       } else {
         setError(e instanceof Error ? e.message : "Parse failed");
       }
     } finally {
-      setParsing(false);
+      // Only clear the spinner if THIS controller is still the active
+      // one (a fresh retry could have swapped it in mid-flight).
+      if (parseAbortRef.current === controller) {
+        parseAbortRef.current = null;
+        setParsing(false);
+      }
     }
   }
+
+  // Stop polling if the page unmounts mid-parse.
+  useEffect(() => {
+    return () => parseAbortRef.current?.abort();
+  }, []);
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
@@ -247,15 +273,14 @@ export default function ProfilePage() {
             onChange={(e) => setPasted(e.target.value)}
             placeholder="Paste your resume as plain text — copy-paste from PDF or DOCX is fine."
           />
-          <div className="flex items-center justify-end gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3">
             {parsing && (
               <span
-                className="text-xs text-muted-foreground"
+                className="inline-flex items-center gap-2 text-xs text-muted-foreground"
                 role="status"
                 aria-live="polite"
               >
-                Parsing with Claude — usually 10–30s, up to 90s on a busy
-                day…
+                <Spinner /> Parsing your resume — usually 10–30s, up to ~90s.
               </span>
             )}
             <Button
@@ -263,7 +288,7 @@ export default function ProfilePage() {
               onClick={() => void onParse()}
               disabled={parsing || !token || !pasted.trim()}
             >
-              {parsing ? "Parsing…" : "Parse with Claude"}
+              {parsing ? "Parsing…" : error ? "Retry parse" : "Parse with Claude"}
             </Button>
           </div>
         </CardContent>
@@ -583,4 +608,35 @@ function cleanForSave(p: Profile): Profile {
       github: opt(p.links.github),
     },
   };
+}
+
+/** Tiny inline spinner so the parsing indicator reads as alive. The
+ * 90-second worst case means a static label could plausibly look
+ * frozen — the rotating ring makes the in-flight state unambiguous. */
+function Spinner() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      width="12"
+      height="12"
+      className="animate-spin"
+      fill="none"
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        opacity="0.25"
+      />
+      <path
+        d="M21 12a9 9 0 0 0-9-9"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
 }

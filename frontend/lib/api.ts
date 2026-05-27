@@ -132,12 +132,32 @@ export async function saveProfile(profile: Profile, token: string): Promise<Prof
   return (await res.json()) as Profile;
 }
 
-// Parsing a full resume against Claude is slow (~10–60s), so this fetch
-// runs with a client-side abort budget that's a couple seconds longer
-// than the backend's 90-second SDK timeout. Without an explicit budget
-// here, an upstream hiccup that doesn't close the TCP connection would
-// leave the spinner running forever.
-const PARSE_TIMEOUT_MS = 95_000;
+// Parse runs as a background job on the backend:
+//   POST /api/admin/profile/parse  → 202 { run_id, status_url }
+//   GET  /api/admin/profile/parse/{run_id}  → { status, profile?, error? }
+//
+// The kick-off POST returns immediately (the long Anthropic call no
+// longer blocks the HTTP request, which is why this fix exists). The
+// frontend polls the status URL until the row settles at
+// `success` (with `profile`) or `failed` (with `error`).
+
+export const PARSE_POLL_INTERVAL_MS = 2_000;
+// Anthropic's own deadline is 90s; we wait a touch longer on the
+// client so a row that genuinely finished doesn't get cut off by the
+// polling cap. If `parseProfileText` hits this without seeing a
+// terminal state, it throws `ParseTimeoutError`.
+export const PARSE_MAX_WAIT_MS = 120_000;
+
+export type ParseRunStatus = "pending" | "running" | "success" | "failed";
+
+export type ParseRun = {
+  run_id: string;
+  status: ParseRunStatus;
+  profile: Profile | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+};
 
 export class ParseTimeoutError extends Error {
   constructor() {
@@ -148,28 +168,76 @@ export class ParseTimeoutError extends Error {
   }
 }
 
-export async function parseProfileText(text: string, token: string): Promise<Profile> {
-  const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
-  try {
-    const res = await fetch(`${API_URL}/api/admin/profile/parse`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Admin-Token": token },
-      body: JSON.stringify({ text }),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
-    }
-    return (await res.json()) as Profile;
-  } catch (e) {
-    if (e instanceof DOMException && e.name === "AbortError") {
-      throw new ParseTimeoutError();
-    }
-    throw e;
-  } finally {
-    clearTimeout(timeoutHandle);
+/** Kick off the parse. Returns the run_id the caller can poll. */
+export async function startParse(
+  text: string,
+  token: string,
+): Promise<{ run_id: string }> {
+  const res = await fetch(`${API_URL}/api/admin/profile/parse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Token": token },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   }
+  const body = (await res.json()) as { run_id: string };
+  return body;
+}
+
+/** Fetch the current state of a parse run. */
+export async function fetchParseRun(run_id: string, token: string): Promise<ParseRun> {
+  const res = await fetch(
+    `${API_URL}/api/admin/profile/parse/${encodeURIComponent(run_id)}`,
+    { headers: { "X-Admin-Token": token } },
+  );
+  if (!res.ok) {
+    throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  }
+  return (await res.json()) as ParseRun;
+}
+
+/**
+ * Kick off a parse and poll until it lands at `success` or `failed`.
+ * Returns the parsed Profile on success; throws on failure or timeout.
+ * `onProgress` (if supplied) fires once with `"running"` after the
+ * kick-off so callers can flip a UI spinner; it doesn't fire again
+ * because nothing else changes until the terminal state.
+ */
+export async function parseProfileText(
+  text: string,
+  token: string,
+  opts: { signal?: AbortSignal; onProgress?: (status: ParseRunStatus) => void } = {},
+): Promise<Profile> {
+  const { signal, onProgress } = opts;
+  const { run_id } = await startParse(text, token);
+  onProgress?.("running");
+
+  const deadline = Date.now() + PARSE_MAX_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new DOMException("Parse polling aborted", "AbortError");
+    }
+    const run = await fetchParseRun(run_id, token);
+    if (run.status === "success") {
+      if (!run.profile) {
+        // Defence-in-depth: a `success` row without a profile means
+        // the backend bug-out path elided the payload. Don't crash —
+        // surface a generic message.
+        throw new Error("Parse succeeded but no profile was returned. Retry.");
+      }
+      return run.profile;
+    }
+    if (run.status === "failed") {
+      throw new Error(run.error || "Parse failed");
+    }
+    await sleep(PARSE_POLL_INTERVAL_MS);
+  }
+  throw new ParseTimeoutError();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export type ManualJobInput = {
