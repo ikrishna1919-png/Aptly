@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import DOMPurify from "isomorphic-dompurify";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +10,21 @@ import { JobDescription } from "@/components/job-description";
 import { TailorPanel } from "@/components/tailor-panel";
 import { fetchJob, MANUAL_SOURCE, type Job } from "@/lib/api";
 import { formatLongDate, formatRelative } from "@/lib/utils";
+
+/**
+ * Strip HTML tags for the `<meta name="description">` value. Runs in
+ * the server function so the JD sanitizer can stay client-only (the
+ * whole reason this file no longer imports DOMPurify at the top
+ * level). A regex strip is sufficient here because the result is
+ * never injected back into the DOM — it goes into a meta tag value
+ * which is plain-text only.
+ */
+function stripTagsForMeta(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 export const dynamic = "force-dynamic";
 
@@ -27,14 +41,11 @@ export async function generateMetadata({
   // description so search engines / link previews see clean text
   // rather than a half-truncated `<p>` fragment.
   const plainDescription = job.description
-    ? DOMPurify.sanitize(job.description, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] })
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 200)
+    ? stripTagsForMeta(job.description).slice(0, 200) || undefined
     : undefined;
   return {
     title: `${job.title} at ${job.company}`,
-    description: plainDescription || undefined,
+    description: plainDescription,
   };
 }
 
@@ -133,13 +144,9 @@ export default async function JobDetailPage({
         <h2 id="jd-heading" className="mb-3 text-sm font-semibold">
           Description
         </h2>
-        {job.description ? (
-          <JobDescription html={job.description} />
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            No description provided.
-          </p>
-        )}
+        {/* `JobDescription` is null-safe — it renders the fallback if
+            `html` is null, empty, or fully sanitised away. */}
+        <JobDescription html={job.description} />
       </section>
 
       <Separator className="my-8" />
