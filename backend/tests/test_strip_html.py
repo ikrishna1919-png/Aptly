@@ -148,3 +148,14 @@ def test_strip_html_now_handles_double_encoded_input():
     # Paragraphs become newlines.
     assert "Hello" in out and "World" in out
     assert out == "Hello\n\nWorld"
+
+
+def test_clean_html_and_strip_html_handle_non_string_input():
+    """A misbehaving ATS response could deliver a number, dict, or
+    bool for the description field. Both helpers must return `""`
+    instead of crashing — the calling code already expects a string."""
+    from app.sources._text import clean_html
+
+    for bad in (None, "", 42, 3.14, True, False, {"x": 1}, ["a"]):
+        assert clean_html(bad) == "", f"clean_html({bad!r}) crashed/non-empty"
+        assert strip_html(bad) == "", f"strip_html({bad!r}) crashed/non-empty"

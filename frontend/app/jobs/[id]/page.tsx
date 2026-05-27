@@ -1,13 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import DOMPurify from "isomorphic-dompurify";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { CompanyMark } from "@/components/company-mark";
-import { JobDescription } from "@/components/job-description";
+import { JobDescription, htmlToPlainText } from "@/components/job-description";
 import { TailorPanel } from "@/components/tailor-panel";
 import { fetchJob, MANUAL_SOURCE, type Job } from "@/lib/api";
 import { formatLongDate, formatRelative } from "@/lib/utils";
@@ -27,14 +26,11 @@ export async function generateMetadata({
   // description so search engines / link previews see clean text
   // rather than a half-truncated `<p>` fragment.
   const plainDescription = job.description
-    ? DOMPurify.sanitize(job.description, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] })
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 200)
+    ? htmlToPlainText(job.description).slice(0, 200) || undefined
     : undefined;
   return {
     title: `${job.title} at ${job.company}`,
-    description: plainDescription || undefined,
+    description: plainDescription,
   };
 }
 
@@ -133,13 +129,9 @@ export default async function JobDetailPage({
         <h2 id="jd-heading" className="mb-3 text-sm font-semibold">
           Description
         </h2>
-        {job.description ? (
-          <JobDescription html={job.description} />
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            No description provided.
-          </p>
-        )}
+        {/* `JobDescription` is null-safe — renders the "no description"
+            fallback if `html` is null, empty, or fully sanitised away. */}
+        <JobDescription html={job.description} />
       </section>
 
       <Separator className="my-8" />
