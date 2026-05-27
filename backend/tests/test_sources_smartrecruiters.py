@@ -113,8 +113,13 @@ def test_parses_list_then_detail_and_normalises_fields():
     assert eng.employment_type and eng.employment_type.lower().startswith("full")
     # updatedOn wins over releasedDate for the source_updated_at field.
     assert eng.source_updated_at.isoformat().startswith("2026-05-25T10:00:00")
-    # HTML stripped, JD skills detected.
-    assert "<p>" not in (eng.description or "")
+    # JD is stored as HTML: section heading + the body's tags survive.
+    # The frontend sanitizes + renders with prose styling.
+    assert "<h3>About the role</h3>" in (eng.description or "")
+    assert "<p>" in (eng.description or "")
+    assert "<strong>Python</strong>" in (eng.description or "")
+    # Skills extraction operates on the plain-text view, so tag noise
+    # doesn't pollute the skill list.
     assert "Python" in eng.skills
     assert "Kafka" in eng.skills
     assert "AWS" in eng.skills

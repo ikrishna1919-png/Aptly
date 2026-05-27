@@ -41,6 +41,12 @@ from app.sources._text import strip_html
 _MAX_JD_CHARS = 6000
 _TRUNCATION_NOTE = "\n[truncated]"
 
+# Hard cap on clarifying questions surfaced to the user. The prompt
+# asks the model to self-limit, but we ALSO truncate in code so a
+# verbose response can't slip past — six questions is the most we'll
+# show regardless of what comes back.
+_MAX_QUESTIONS = 6
+
 if TYPE_CHECKING:
     from anthropic import Anthropic
 
@@ -79,10 +85,12 @@ class Analysis(BaseModel):
     )
     questions: list[str] = Field(
         description=(
-            "Step 3: one short yes/no question per gap, asking whether the "
-            "candidate genuinely has that skill but failed to list it. ONLY "
-            "ask about missing skills — do NOT ask about anything in `matched`. "
-            "Empty list is valid when there are no gaps."
+            "Step 3: short yes/no questions, each asking whether the "
+            "candidate genuinely has a MISSING skill from `gaps` but failed "
+            "to list it. ONLY ask about missing skills — do NOT ask about "
+            "anything in `matched`. Cap at MAX 6 questions, prioritized by "
+            "impact (the JD's must-haves first). Empty list is valid when "
+            "there are no gaps."
         ),
     )
     genuine_lacks: list[str] = Field(
@@ -149,12 +157,16 @@ def analyze_job(
         select(JobAnalysis).where(JobAnalysis.job_id == job.id)
     ).scalar_one_or_none()
     if cached is not None and cached.input_hash == input_hash:
-        return Analysis.model_validate(cached.analysis)
+        return _cap_questions(Analysis.model_validate(cached.analysis))
 
     if not settings.has_anthropic_key:
         analysis = _demo_analysis(job, candidate=candidate)
     else:
         analysis = _llm_analyze(job, candidate, client=client, settings=settings)
+    # Hard ceiling, post-parse: the prompt asks for ≤6 but the model
+    # has been known to over-deliver. Truncate so the user never sees
+    # more than `_MAX_QUESTIONS`.
+    analysis = _cap_questions(analysis)
 
     # Upsert by job_id (unique).
     if cached is None:
@@ -210,12 +222,19 @@ _SYSTEM_ANALYZE = (
     "conservative — only put something in `matched` when you can point to "
     "concrete evidence in the candidate profile.\n"
     "\n"
-    "3. GAP-ONLY QUESTIONS → `questions`. Produce a CONCISE BATCH of short "
-    "yes/no questions, ONE PER GAP, asking whether the candidate genuinely "
-    "has that skill but failed to list it. Do NOT ask about anything in "
+    "3. GAP-ONLY QUESTIONS → `questions`. Produce short yes/no questions "
+    "asking whether the candidate genuinely has a MISSING skill (from "
+    "`gaps`) but failed to list it. Do NOT ask about anything in "
     "`matched`. NEVER invent skills — your questions are the only path by "
     "which a gap can be added later. If `gaps` is empty, return an empty "
     "`questions` list.\n"
+    "\n"
+    "   HARD CAP: AT MOST 6 questions. If `gaps` has more than 6 entries, "
+    "   choose the 6 questions that would most change the candidate's "
+    "   fit for THIS JD — prioritise the JD's stated must-haves and "
+    "   high-frequency keywords over nice-to-haves. Drop the rest. "
+    "   Never exceed 6 questions even if more gaps exist; the user "
+    "   can't answer endless questions.\n"
     "\n"
     "5. GENUINE LACKS → `genuine_lacks`. Flag JD requirements the candidate "
     "genuinely lacks and cannot plausibly confirm via a question (e.g. "
@@ -227,7 +246,8 @@ _SYSTEM_ANALYZE = (
     "\n"
     "Constraints not enforced by the schema:\n"
     "- match_score MUST be an integer in [0, 100] (higher = better fit).\n"
-    "- questions MUST be one per `gaps` entry — no more, no fewer."
+    "- questions MUST be drawn from `gaps` only, MAX 6, prioritised by "
+    "  impact on this JD."
 )
 
 _SYSTEM_GENERATE = (
@@ -399,6 +419,15 @@ def _first_text(response: Any) -> str:
 # ─── Demo-mode (no API key) ──────────────────────────────────────────────────
 
 
+def _cap_questions(analysis: Analysis) -> Analysis:
+    """Truncate `questions` to `_MAX_QUESTIONS`. Returns the same
+    instance when nothing needs trimming; otherwise a copy with the
+    list shortened so the original (cached) payload isn't mutated."""
+    if len(analysis.questions) <= _MAX_QUESTIONS:
+        return analysis
+    return analysis.model_copy(update={"questions": analysis.questions[:_MAX_QUESTIONS]})
+
+
 def _question_for_gap(skill: str) -> str:
     """Deterministic question text used by demo mode AND by tests that need
     to map an answer back to its originating gap."""
@@ -424,8 +453,9 @@ def _demo_analysis(job: Job, *, candidate: dict[str, Any]) -> Analysis:
         top_skills=job_skills or ["Communication", "Problem solving"],
         matched=matched,
         gaps=gaps,
-        # ONE question per gap. Empty gaps → empty questions.
-        questions=[_question_for_gap(g) for g in gaps],
+        # One question per gap, capped at `_MAX_QUESTIONS` so demo mode
+        # mirrors the same ceiling the live path enforces.
+        questions=[_question_for_gap(g) for g in gaps[:_MAX_QUESTIONS]],
         # Demo can't tell apart "gap" from "genuinely lacks", so leave empty.
         genuine_lacks=[],
     )

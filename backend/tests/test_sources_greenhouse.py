@@ -54,7 +54,12 @@ def test_parses_jobs_and_strips_html():
     assert j1.remote is True
     assert "Python" in j1.skills
     assert "React" in j1.skills
-    assert "<p>" not in (j1.description or "")
+    # The stored description is real HTML — paragraphs and emphasis tags
+    # are preserved so the (sanitized) frontend render keeps the
+    # JD's formatting.
+    assert "<p>" in (j1.description or "")
+    assert "<strong>" in (j1.description or "")
+    assert "Python" in (j1.description or "")
     assert j1.source_updated_at.isoformat().startswith("2026-05-25T10:00:00")
 
     j2 = jobs[1]

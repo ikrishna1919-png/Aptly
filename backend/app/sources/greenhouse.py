@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 import httpx
 
 from app.services.skills import extract_skills
-from app.sources._text import infer_remote, infer_sponsorship, strip_html
+from app.sources._text import clean_html, infer_remote, infer_sponsorship, strip_html
 from app.sources.base import JobSource, NormalizedJob, SourceUnavailable
 
 BASE_URL = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs"
@@ -106,7 +106,14 @@ class GreenhouseSource(JobSource):
         location_obj = raw.get("location") or {}
         location = (location_obj.get("name") or None) if isinstance(location_obj, dict) else None
 
-        description = strip_html(raw.get("content"))
+        # Two views of the JD: HTML for storage + UI rendering, plain
+        # text for the keyword / remote / sponsorship heuristics
+        # (which would otherwise key on `<p>` tags as if they were
+        # content).
+        raw_content = raw.get("content")
+        description_html = clean_html(raw_content) or None
+        description_text = strip_html(raw_content)
+
         updated_at = _parse_iso(raw.get("updated_at"))
         posted_at = _parse_iso(raw.get("first_published")) or updated_at
 
@@ -117,13 +124,13 @@ class GreenhouseSource(JobSource):
             title=title,
             url=url,
             location=location,
-            remote=infer_remote(location, description),
+            remote=infer_remote(location, description_text),
             employment_type=None,  # Greenhouse boards don't expose this consistently.
-            description=description or None,
+            description=description_html,
             posted_at=posted_at,
             source_updated_at=updated_at or posted_at or _utcnow(),
-            sponsors_visa=infer_sponsorship(description),
-            skills=extract_skills(description),
+            sponsors_visa=infer_sponsorship(description_text),
+            skills=extract_skills(description_text),
         )
 
 

@@ -19,7 +19,11 @@ def test_empty_inputs():
 
 def test_html_entities_decoded():
     assert strip_html("Build &amp; ship") == "Build & ship"
-    assert strip_html("Use &lt;Tag&gt; carefully") == "Use <Tag> carefully"
+    # Double-encoded HTML tags are decoded then stripped — the common
+    # case for Greenhouse / Lever responses that arrive entity-escaped.
+    # The trade-off (literal `&lt;Tag&gt;` text gets stripped) is fine
+    # for JD content, which essentially never has displayable `<Tag>` text.
+    assert strip_html("Use &lt;p&gt;HTML&lt;/p&gt; here") == "Use\nHTML\nhere"
     # &nbsp; (U+00A0) is intentionally normalized to a plain space — it's
     # just noise in JD text and the LLM doesn't benefit from the distinction.
     assert strip_html("salary&nbsp;range") == "salary range"
@@ -99,3 +103,48 @@ def test_looks_like_html_negative_signals():
     assert looks_like_html("") is False
     assert looks_like_html("Just plain text, no markup.") is False
     assert looks_like_html("Hello & goodbye") is False  # bare & isn't an entity
+
+
+# ── clean_html (HTML-preserving variant) ───────────────────────────────────
+
+
+def test_clean_html_empty_inputs():
+    from app.sources._text import clean_html
+
+    assert clean_html(None) == ""
+    assert clean_html("") == ""
+
+
+def test_clean_html_keeps_tags_and_decodes_entities():
+    """`clean_html` is for STORAGE: tags survive (the frontend renders
+    them after DOMPurify), entities are decoded so the stored value is
+    real HTML rather than escaped text."""
+    from app.sources._text import clean_html
+
+    out = clean_html("<p>We&apos;re hiring &amp; building <strong>fast</strong>.</p>")
+    assert "<p>" in out and "</p>" in out
+    assert "<strong>fast</strong>" in out
+    # Entities decoded.
+    assert "We're" in out
+    assert "&" in out and "&amp;" not in out
+
+
+def test_clean_html_decodes_double_encoded_input():
+    """The actual bug from the field: some ATS responses double-encode
+    their HTML (`&lt;p&gt;…`). `clean_html` produces real HTML the
+    frontend can sanitize-and-render."""
+    from app.sources._text import clean_html
+
+    out = clean_html("&lt;p&gt;Hello &lt;strong&gt;world&lt;/strong&gt;&lt;/p&gt;")
+    assert out == "<p>Hello <strong>world</strong></p>"
+
+
+def test_strip_html_now_handles_double_encoded_input():
+    """Regression: `strip_html` on a double-encoded JD used to leave the
+    decoded tags in the output (entity-decode ran AFTER tag-strip). It
+    must now produce clean plain text."""
+    out = strip_html("&lt;p&gt;Hello&lt;/p&gt;&lt;p&gt;World&lt;/p&gt;")
+    assert "<" not in out and ">" not in out
+    # Paragraphs become newlines.
+    assert "Hello" in out and "World" in out
+    assert out == "Hello\n\nWorld"
