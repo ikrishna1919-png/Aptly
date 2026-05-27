@@ -602,3 +602,97 @@ def test_parse_clips_oversized_resume(client_with_key, monkeypatch):
     # [truncated] marker. Must be substantially shorter than the input.
     assert len(user_text) < parser_module._MAX_RESUME_CHARS + 500
     assert "[truncated]" in user_text
+
+
+# ── Schema regression — Anthropic 400 on `default` keyword ────────────────
+
+
+def _scan_annotation_keys(node, path="", hits=None):
+    """Yield `(path, key)` for every annotation keyword on a schema
+    node — but NOT for field names inside `properties` (a field
+    literally called `title` is fine; an annotation `"title": "Foo"`
+    on a node is the thing Anthropic rejects). Walks the same way the
+    production stripper does: through `properties.{*}` values,
+    `items`, `prefixItems`, `anyOf` / `oneOf` / `allOf`, and `$defs`."""
+    if hits is None:
+        hits = []
+    if isinstance(node, list):
+        for i, item in enumerate(node):
+            _scan_annotation_keys(item, f"{path}[{i}]", hits)
+        return hits
+    if not isinstance(node, dict):
+        return hits
+    # Annotation keys live on THIS node — collect them, then descend
+    # into structural children.
+    for k in node.keys():
+        hits.append((path or "<root>", k))
+    for container in ("properties", "patternProperties", "$defs", "definitions"):
+        if container in node and isinstance(node[container], dict):
+            for sub_key, sub in node[container].items():
+                _scan_annotation_keys(sub, f"{path}.{container}.{sub_key}", hits)
+    if "items" in node:
+        _scan_annotation_keys(node["items"], f"{path}.items", hits)
+    if "prefixItems" in node:
+        _scan_annotation_keys(node["prefixItems"], f"{path}.prefixItems", hits)
+    for branch in ("anyOf", "oneOf", "allOf"):
+        if branch in node:
+            _scan_annotation_keys(node[branch], f"{path}.{branch}", hits)
+    return hits
+
+
+def test_profile_schema_strips_default_and_other_annotations():
+    """The live 400 from Anthropic was triggered by `"default": null` in
+    the PROFILE_SCHEMA — Pydantic emits it for every `field: T | None
+    = None` and Anthropic's structured-output validator rejects the
+    keyword. Pin that the prepared schema has none of the annotation
+    keywords Anthropic rejects, anywhere."""
+    forbidden = {"default", "title", "examples", "readOnly", "writeOnly", "deprecated"}
+    hits = [
+        (path, key)
+        for path, key in _scan_annotation_keys(parser_module.PROFILE_SCHEMA)
+        if key in forbidden
+    ]
+    assert not hits, "PROFILE_SCHEMA still carries forbidden annotation keywords: " f"{hits[:5]}"
+
+
+def test_anthropic_400_records_actionable_error_message(client_with_key, monkeypatch):
+    """A 400 from Anthropic must surface the actual API message (and the
+    misleading "shorten the resume" string from the old code is gone) so
+    the operator can diagnose without grepping logs. Length is almost
+    never the actual cause of a 400 — schema issues are."""
+    import anthropic
+    import httpx
+
+    bad_request = anthropic.BadRequestError(
+        "400 bad",
+        response=httpx.Response(
+            status_code=400,
+            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+        ),
+        body={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "For 'object' type, property 'default' is not supported.",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        parser_module,
+        "_build_client",
+        lambda s, c: _RaisingAnthropicClient(bad_request),
+    )
+
+    test_client, _ = client_with_key
+    start = test_client.post("/api/admin/profile/parse", json={"text": "anything"}, headers=AUTH)
+    assert start.status_code == 202
+    poll = test_client.get(f"/api/admin/profile/parse/{start.json()['run_id']}", headers=AUTH)
+    body = poll.json()
+    assert body["status"] == "failed"
+    err = body["error"]
+    # Carries the actual API message — not the legacy "shorten the
+    # resume" string.
+    assert "default" in err
+    assert "not supported" in err
+    assert "400" in err
+    assert "shorten the resume" not in err.lower()

@@ -211,12 +211,19 @@ def parse_resume(
         ) from e
     except anthropic.APIStatusError as e:
         # 4xx/5xx from Anthropic itself (rate limit, overloaded, refusal,
-        # bad request from a malformed schema, etc.). Surface a readable
-        # message rather than letting the raw exception bubble.
-        log.warning("resume parse API error %s: %s", e.status_code, e)
-        raise ResumeParseError(
-            f"Anthropic returned an error ({e.status_code}). Retry, or shorten the resume."
-        ) from e
+        # bad request from a malformed schema, etc.). Log the FULL body
+        # so future debugging has the actual API message instead of
+        # the user-facing string — and surface a status-specific
+        # message so the parse-row error tells the operator what
+        # actually happened.
+        api_message = _extract_anthropic_message(e)
+        log.warning(
+            "resume parse Anthropic API error: status=%s message=%r body=%r",
+            e.status_code,
+            api_message,
+            getattr(e, "body", None),
+        )
+        raise ResumeParseError(_readable_api_status_message(e.status_code, api_message)) from e
 
     body = _first_text(response)
     try:
@@ -250,6 +257,48 @@ def _first_text(response: Any) -> str:
         if getattr(block, "type", None) == "text":
             return block.text
     raise ResumeParseError("Anthropic response contained no text block")
+
+
+def _extract_anthropic_message(exc: anthropic.APIStatusError) -> str | None:
+    """Pull the human-readable error string out of an Anthropic API
+    error. The SDK exposes `body` as a dict (or sometimes a string);
+    the structured shape is `{"error": {"type": ..., "message": ...}}`.
+    Falling back to `str(exc)` keeps us from ever returning None on a
+    populated error."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg
+        if isinstance(body.get("message"), str):
+            return body["message"]
+    if isinstance(body, str) and body.strip():
+        return body
+    return str(exc) or None
+
+
+def _readable_api_status_message(status_code: int, api_message: str | None) -> str:
+    """Turn an Anthropic-side 4xx/5xx into a user-friendly message that
+    NAMES THE CAUSE. `400` in particular gets the actual API message so
+    the operator doesn't waste time chasing "shorten the resume" red
+    herrings — almost every 400 we've seen so far has been a schema
+    issue, not an input-length issue."""
+    tail = f": {api_message}" if api_message else ""
+    if status_code == 400:
+        return (
+            "Anthropic rejected the request (HTTP 400). This is almost always a "
+            "schema or payload issue, not the resume length. Check the backend "
+            f"logs for the full error body{tail}"
+        )
+    if status_code == 401:
+        return f"Anthropic rejected the API key (HTTP 401){tail}"
+    if status_code == 429:
+        return f"Anthropic rate limit hit (HTTP 429) — retry in a moment{tail}"
+    if 500 <= status_code < 600:
+        return f"Anthropic is having trouble (HTTP {status_code}) — retry{tail}"
+    return f"Anthropic returned an error (HTTP {status_code}){tail}"
 
 
 # ─── Background runner ──────────────────────────────────────────────────────
