@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
+
+import httpx
 
 
 @dataclass
@@ -31,7 +34,15 @@ class NormalizedJob:
 
 
 class JobSource(abc.ABC):
-    """Interface every ATS adapter implements."""
+    """Interface every ATS adapter implements.
+
+    Adapters expose both a sync `fetch` (used by tests + the
+    validate-companies CLI) and an async `fetch_async` (used by the
+    parallelized ingest path). Adapters with a native async
+    implementation override `fetch_async`; the default falls back to
+    running the sync `fetch` in a worker thread, which still parallelises
+    correctly since `httpx.Client` releases the GIL on network I/O.
+    """
 
     name: str  # short identifier persisted on the Job row, e.g. "greenhouse"
 
@@ -42,6 +53,20 @@ class JobSource(abc.ABC):
         Raises `SourceUnavailable` if the token doesn't resolve (404, etc.)
         so callers can skip cleanly.
         """
+
+    async def fetch_async(
+        self,
+        token: str,
+        async_client: httpx.AsyncClient | None = None,
+    ) -> Iterable[NormalizedJob]:
+        """Concurrent variant of `fetch`. Native-async adapters override
+        this and use the supplied `async_client` (shared across the
+        ingest run for connection pooling). The default offloads the
+        sync `fetch` to a worker thread so adapters that haven't been
+        portable to async still benefit from the orchestrator's
+        parallelism."""
+        del async_client  # default path doesn't need it
+        return await asyncio.to_thread(self.fetch, token)
 
 
 class SourceUnavailable(Exception):
