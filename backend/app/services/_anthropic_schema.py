@@ -5,8 +5,13 @@ Anthropic's validator has two strictness rules that Pydantic's default
 schema output doesn't satisfy:
 
   1. Every object node must explicitly set `additionalProperties: false`.
-  2. Numeric/string/array range keywords are NOT allowed
-     (`minimum`/`maximum`/`minItems`/`maxItems`/etc).
+  2. A handful of JSON-schema keywords are not allowed: numeric/string/
+     array range constraints (`minimum` / `maxItems` / etc.), AND the
+     annotation keywords Pydantic ships by default — `default`, `title`,
+     `examples`, `readOnly`, `writeOnly`, `deprecated`. `default` is the
+     live regression that caused the resume-parse 400: Pydantic emits
+     `"default": null` for every `field: T | None = None`, and the
+     validator now rejects it.
 
 `prepare_schema(model)` applies both passes recursively. Use it wherever
 you'd otherwise pass `Model.model_json_schema()` to
@@ -19,25 +24,38 @@ from typing import Any
 
 from pydantic import BaseModel
 
-# Constraints Anthropic's structured-output validator rejects.
+# Keywords Anthropic's structured-output validator rejects (or that
+# add no signal for the model and are stripped pre-emptively to keep
+# this list as the single point of contact when the validator
+# tightens further). Stripping is always safe — every enforcement
+# that mattered lives in the Pydantic model + the prompt text.
 _UNSUPPORTED_KEYS: tuple[str, ...] = (
-    # Numeric
+    # Numeric range
     "minimum",
     "maximum",
     "exclusiveMinimum",
     "exclusiveMaximum",
     "multipleOf",
-    # String
+    # String range / shape
     "minLength",
     "maxLength",
     "pattern",
-    # Array
+    "format",
+    # Array range / shape
     "minItems",
     "maxItems",
     "uniqueItems",
     "contains",
     "minContains",
     "maxContains",
+    # Annotations Anthropic rejects (`default`) or that are pure
+    # noise once the schema reaches the API.
+    "default",
+    "title",
+    "examples",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
 )
 
 

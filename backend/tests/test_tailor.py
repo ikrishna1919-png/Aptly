@@ -403,7 +403,7 @@ def test_tailored_resume_schema_is_strict_at_every_object_level():
 
 
 # Constraints Anthropic's structured-output validator rejects (kept in sync
-# with tailor._UNSUPPORTED_KEYS — change one, change the other).
+# with `_anthropic_schema._UNSUPPORTED_KEYS` — change one, change the other).
 _FORBIDDEN_KEYS = (
     # Numeric
     "minimum",
@@ -415,6 +415,7 @@ _FORBIDDEN_KEYS = (
     "minLength",
     "maxLength",
     "pattern",
+    "format",
     # Array
     "minItems",
     "maxItems",
@@ -422,6 +423,15 @@ _FORBIDDEN_KEYS = (
     "contains",
     "minContains",
     "maxContains",
+    # Annotations — `default` was the live regression that 400'd the
+    # parse path on every `field: T | None = None` (Pydantic emits
+    # `"default": null` for those).
+    "default",
+    "title",
+    "examples",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
 )
 
 
