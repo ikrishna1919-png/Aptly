@@ -65,6 +65,7 @@ class IngestStats:
     boards_attempted: int = 0
     boards_failed: int = 0
     boards_failures: list[dict] = field(default_factory=list)  # [{board, error}]
+    boards_auto_disabled: list[str] = field(default_factory=list)  # ["greenhouse:foo", …]
     fetched: int = 0  # raw postings returned by sources
     skipped_outside_window: int = 0
     skipped_duplicates: int = 0
@@ -139,6 +140,8 @@ def run_ingest(
     # Cache adapter instances so we don't open one client per board.
     source_instances: dict[str, JobSource] = {}
 
+    threshold = max(1, int(getattr(settings, "source_failure_threshold", 3)))
+
     try:
         for src in source_rows:
             source_name = src.source_type
@@ -153,6 +156,8 @@ def run_ingest(
                     status=STATUS_SKIPPED,
                     error=msg,
                     jobs_found=None,
+                    failure_threshold=threshold,
+                    stats=stats,
                 )
                 continue
 
@@ -174,6 +179,8 @@ def run_ingest(
                     status=STATUS_ERROR,
                     error=str(e),
                     jobs_found=0,
+                    failure_threshold=threshold,
+                    stats=stats,
                 )
                 continue
             except Exception as e:  # noqa: BLE001
@@ -188,6 +195,8 @@ def run_ingest(
                     status=STATUS_ERROR,
                     error=f"unexpected: {e}",
                     jobs_found=0,
+                    failure_threshold=threshold,
+                    stats=stats,
                 )
                 continue
 
@@ -241,6 +250,8 @@ def run_ingest(
                 status=STATUS_SUCCESS,
                 error=None,
                 jobs_found=added + updated,
+                failure_threshold=threshold,
+                stats=stats,
             )
     finally:
         for adapter in source_instances.values():
@@ -261,8 +272,16 @@ def _record_source_result(
     status: str,
     error: str | None,
     jobs_found: int | None,
+    failure_threshold: int,
+    stats: IngestStats,
 ) -> None:
     """Write the per-source telemetry onto the Source row and commit.
+
+    Tracks `consecutive_failures` so a board that's been erroring for
+    `failure_threshold` runs in a row gets `enabled=False`d — the
+    operator can re-enable it once the underlying token is fixed. We
+    only count `STATUS_ERROR` toward the streak; `STATUS_SKIPPED` is a
+    config issue (unknown source_type), not a board failure.
 
     Committing per-source means a crash halfway through the run still
     leaves an honest picture of what ran (and what didn't) on the table.
@@ -271,6 +290,22 @@ def _record_source_result(
     src.last_status = status
     src.last_error = error
     src.jobs_found_last_run = jobs_found
+
+    if status == STATUS_SUCCESS:
+        src.consecutive_failures = 0
+    elif status == STATUS_ERROR:
+        src.consecutive_failures = (src.consecutive_failures or 0) + 1
+        if src.enabled and src.consecutive_failures >= failure_threshold:
+            src.enabled = False
+            stats.boards_auto_disabled.append(f"{src.source_type}:{src.token}")
+            log.warning(
+                "%s (%s): auto-disabled after %d consecutive failures",
+                src.token,
+                src.source_type,
+                src.consecutive_failures,
+            )
+    # STATUS_SKIPPED (unknown source_type) doesn't move the counter.
+
     db.commit()
 
 
