@@ -36,10 +36,15 @@ def clean_html(s: str | None) -> str:
     sanitize + render.
 
     The result is intended for storage on `Job.description` and for
-    rendering (after DOMPurify) in the UI. The heuristics + the AI
-    prompt path want plain text instead — use `strip_html` for those.
+    rendering (server-side sanitized) in the UI. The heuristics + the
+    AI prompt path want plain text instead — use `strip_html` for
+    those.
+
+    Defensive: returns `""` for None, empty strings, AND any non-str
+    input (a misbehaving API returning a number / dict for the JD
+    field would otherwise crash `html.unescape`).
     """
-    if not s:
+    if not isinstance(s, str) or not s:
         return ""
     # html.unescape is idempotent; calling it on already-decoded HTML
     # is a no-op. Whitespace is collapsed conservatively so the stored
@@ -65,8 +70,10 @@ def strip_html(s: str | None) -> str:
     Block-level tags (`<p>`, `<br>`, `<li>`, …) become newlines first
     so paragraphs and bullets survive into the cleaned form, instead
     of collapsing into a single wall of text.
+
+    Defensive against non-str input — same contract as `clean_html`.
     """
-    if not s:
+    if not isinstance(s, str) or not s:
         return ""
 
     # Decode first — any `&lt;` etc. in the input is rewritten to its

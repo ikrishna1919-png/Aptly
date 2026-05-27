@@ -303,7 +303,11 @@ def _clean_jd(job: Job) -> str:
     descriptions become a clear placeholder so the prompt is still
     well-formed.
     """
-    raw = job.description or ""
+    # Be defensive: `job.description` is typed `str | None` but a
+    # row written by a bad ingest could land with a non-string value.
+    # `strip_html` itself short-circuits on non-strings, so the worst
+    # case here is the placeholder below.
+    raw = job.description if isinstance(job.description, str) else ""
     cleaned = strip_html(raw)
     if not cleaned:
         return "(no description provided)"
