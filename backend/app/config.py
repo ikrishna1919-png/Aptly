@@ -77,8 +77,12 @@ class Settings(BaseSettings):
     session_secret: str = Field(default="dev-insecure-session-secret", alias="SESSION_SECRET")
     # Where to send the user after a successful OAuth callback. In
     # production this is the deployed frontend (Vercel); in local
-    # dev it's the Next.js dev server.
-    frontend_url: str = Field(default="http://localhost:3000", alias="FRONTEND_URL")
+    # dev it's the Next.js dev server. **NO default.** Defaulting to
+    # `http://localhost:3000` in production caused
+    # ERR_CONNECTION_REFUSED on prod sign-ins; the auth callback
+    # now raises a clear 500 if this isn't set rather than silently
+    # bouncing the user at localhost.
+    frontend_url: str = Field(default="", alias="FRONTEND_URL")
     # Email of the operator who should inherit the existing
     # pre-multi-user data on first Google sign-in. The migration
     # writes this same value into `users.email` for the bootstrap
@@ -95,8 +99,19 @@ class Settings(BaseSettings):
 
     @property
     def has_google_oauth(self) -> bool:
+        """Both halves of the OAuth flow need to be configured before
+        we let a user start sign-in: the credentials + redirect URI
+        Google needs, AND the `frontend_url` we'll bounce the user
+        to after the callback. Without the latter the user would
+        complete OAuth and then 500 on the callback — fail at the
+        start endpoint instead so the failure mode is "Sign in
+        button shows an error" rather than "you've authorized
+        Aptly's Google app but can't actually sign in"."""
         return bool(
-            self.google_client_id and self.google_client_secret and self.google_redirect_uri
+            self.google_client_id
+            and self.google_client_secret
+            and self.google_redirect_uri
+            and self.frontend_url
         )
 
 

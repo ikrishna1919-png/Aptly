@@ -47,6 +47,12 @@ export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
   }
   const res = await fetch(`${API_URL}/api/jobs?${params.toString()}`, {
     cache: "no-store",
+    // Every call to our backend rides the session cookie. The
+    // public endpoints don't NEED it today, but consistent
+    // `credentials: 'include'` everywhere makes auditing simple —
+    // one rule, no per-endpoint exceptions — and lets per-user
+    // filters slot in later without revisiting each fetch site.
+    credentials: "include",
   });
   if (!res.ok) {
     throw new Error(`Backend returned ${res.status}`);
@@ -55,7 +61,10 @@ export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
 }
 
 export async function fetchJob(id: number): Promise<Job | null> {
-  const res = await fetch(`${API_URL}/api/jobs/${id}`, { cache: "no-store" });
+  const res = await fetch(`${API_URL}/api/jobs/${id}`, {
+    cache: "no-store",
+    credentials: "include",
+  });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Backend returned ${res.status}`);
   return (await res.json()) as Job;
@@ -69,7 +78,10 @@ export type Health = {
 
 export async function fetchHealth(): Promise<Health | null> {
   try {
-    const res = await fetch(`${API_URL}/api/health`, { cache: "no-store" });
+    const res = await fetch(`${API_URL}/api/health`, {
+      cache: "no-store",
+      credentials: "include",
+    });
     if (!res.ok) return null;
     return (await res.json()) as Health;
   } catch {
@@ -305,6 +317,7 @@ export async function createManualJob(
 ): Promise<Job> {
   const res = await fetch(`${API_URL}/api/admin/jobs`, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       "X-Admin-Token": token,
@@ -321,6 +334,7 @@ export async function createManualJob(
 export async function deleteManualJob(id: number, token: string): Promise<void> {
   const res = await fetch(`${API_URL}/api/admin/jobs/${id}`, {
     method: "DELETE",
+    credentials: "include",
     headers: { "X-Admin-Token": token },
   });
   if (!res.ok) {
