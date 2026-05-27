@@ -100,8 +100,10 @@ def test_seeded_candidates_default_to_enabled_with_zero_failures(migrated_db):
     Session, _ = migrated_db
     with Session() as s:
         rows = s.execute(select(Source).where(Source.display_name == "23andMe")).scalars().all()
-    # One greenhouse + one lever row for 23andMe.
-    assert {r.source_type for r in rows} == {"greenhouse", "lever"}
+    # Migration 0008 seeds greenhouse + lever for every TSV row;
+    # migration 0010 adds ashby. All three are candidates against
+    # the same slugified token until auto-prune narrows it.
+    assert {r.source_type for r in rows} == {"greenhouse", "lever", "ashby"}
     for r in rows:
         assert r.enabled is True
         assert r.consecutive_failures == 0
@@ -110,17 +112,19 @@ def test_seeded_candidates_default_to_enabled_with_zero_failures(migrated_db):
 
 def test_total_row_count_matches_seed_plus_existing(migrated_db):
     """Sanity check: the row count after running every migration equals
-    the existing seed (from companies.py) plus the candidate seed,
-    minus any overlap (e.g. stripe/airbnb that exist in both lists).
-    Reported as part of the PR summary."""
+    the existing seed (from companies.py) plus the candidate seeds,
+    minus any overlap. Bounded loosely so one-off additions don't
+    require updating the literal."""
     Session, _ = migrated_db
     with Session() as s:
         total = s.execute(select(Source)).scalars().all()
-    # The committed seed is ~830 candidate rows + 38 existing — anywhere
-    # near that range catches "seed didn't run" without being brittle to
-    # one-off additions.
-    assert len(total) > 800
-    assert len(total) < 1000
+    # 0008 → ~834 candidates (greenhouse + lever)
+    # 0009 → 1 row (GM workday)
+    # 0010 → ~417 candidates (ashby) + 17 known-Ashby tokens
+    # 0007 → 38 existing seed rows (some overlap with 0008/0010)
+    # Total lands around 1250-1350 in practice.
+    assert len(total) > 1100
+    assert len(total) < 1500
 
 
 def test_bulk_seed_is_idempotent_across_downgrade_upgrade(migrated_db):

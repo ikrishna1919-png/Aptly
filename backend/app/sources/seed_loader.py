@@ -68,19 +68,29 @@ def read_seed_file(path: pathlib.Path | None = None) -> list[SeedCompany]:
     return rows
 
 
-def candidate_rows(path: pathlib.Path | None = None) -> list[dict]:
-    """Expand seed → DB rows for `sources`. Two per company (one
-    `greenhouse`, one `lever`). Deduplicates inside the batch on
-    `(source_type, token)` so the multi-row insert doesn't trip the
-    Postgres "cannot affect row a second time" rule when two names
-    slugify to the same token."""
+def candidate_rows(
+    path: pathlib.Path | None = None,
+    *,
+    source_types: tuple[str, ...] | None = None,
+) -> list[dict]:
+    """Expand seed → DB rows for `sources`. Two per company by default
+    (one `greenhouse`, one `lever`). Pass `source_types` to override —
+    e.g. a later migration that bulk-seeds Ashby candidates calls
+    `candidate_rows(source_types=("ashby",))` without touching the
+    Greenhouse/Lever default behaviour earlier migrations relied on.
+
+    Deduplicates inside the batch on `(source_type, token)` so the
+    multi-row insert doesn't trip the Postgres "cannot affect row a
+    second time" rule when two names slugify to the same token.
+    """
+    types = source_types if source_types is not None else CANDIDATE_SOURCE_TYPES
     seen: set[tuple[str, str]] = set()
     out: list[dict] = []
     for company in read_seed_file(path):
         token = slugify(company.name)
         if not token:
             continue
-        for source_type in CANDIDATE_SOURCE_TYPES:
+        for source_type in types:
             key = (source_type, token)
             if key in seen:
                 continue
