@@ -41,6 +41,24 @@ class Settings(BaseSettings):
     # rate-limit; lower it if a vendor starts 429ing.
     ingest_concurrency: int = Field(default=10, alias="INGEST_CONCURRENCY")
 
+    # Maximum source rows processed per `run_ingest` invocation, picked
+    # `last_run_at ASC NULLS FIRST` so never-checked rows run first and
+    # the run rotates through the table over successive scheduled
+    # invocations. Bounds wall-clock per run so a single pass always
+    # finishes within the scheduled budget — important once `sources`
+    # has hundreds of rows. Set to a very large number to disable
+    # the cap.
+    ingest_max_per_run: int = Field(default=150, alias="INGEST_MAX_PER_RUN")
+
+    # Within a single run, sources are processed in batches: each
+    # batch is async-fetched, then sync-written + committed before
+    # the next batch's fetch starts. Smaller = more frequent
+    # checkpoints (more crash-resilient); larger = better connection
+    # pool reuse and slightly less event-loop churn. 25 keeps every
+    # 25-source unit of work durable on disk before the next one
+    # starts so a mid-run timeout never wipes the whole pass.
+    ingest_batch_size: int = Field(default=25, alias="INGEST_BATCH_SIZE")
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
