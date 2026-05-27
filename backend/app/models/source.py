@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,7 +57,12 @@ class Source(Base):
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     token: Mapped[str] = mapped_column(String(128), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    # `server_default` must be valid SQL for every backend we run against.
+    # `true` is the cross-dialect literal: Postgres requires it (rejects
+    # numeric `1` for booleans), SQLite 3.23+ accepts it as an alias for 1.
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
 
     # Per-source observability — written by `app.services.ingest.run_ingest`
     # after every pass. All nullable so a never-run row reads cleanly.
