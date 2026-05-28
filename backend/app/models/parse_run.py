@@ -48,6 +48,18 @@ class ParseRun(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Raw structured-output JSON from the LLM, captured BEFORE the
+    # parser maps it into the Profile shape. Populated on `success`
+    # (when the LLM branch ran); null otherwise. Persisted so a bad
+    # parse can be triaged without re-running the upload — the
+    # operator looks at this row, sees exactly what the model
+    # returned, and decides whether the bug is in extraction (LLM
+    # didn't return what we'd hoped) or mapping / display (we lost
+    # something between the model output and the `profile` column).
+    #
+    # NULL on rows from before migration 0016 + on parses that fell
+    # back to the regex extractor (no LLM JSON to capture).
+    raw_llm_output: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 PARSE_STATUS_PENDING = "pending"
