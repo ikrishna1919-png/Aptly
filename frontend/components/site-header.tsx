@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Menu,
@@ -22,20 +22,17 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth-context";
 import { useOpenLogin } from "@/lib/use-login-modal";
-import { isGatedPath } from "@/lib/routes";
 
 /**
  * Top navigation for the app.
  *
- * The primary nav + the Settings submenu now render UNCONDITIONALLY,
- * regardless of auth state — the app's surface is always visible. What
- * changes by auth state is what a click does:
+ * The primary nav + the Settings submenu render UNCONDITIONALLY. Pages are
+ * public, so every nav link is a plain navigation for everyone — no click
+ * interception. Page-specific actions gate themselves via `useAuthGate`,
+ * and a logged-out visitor still gets a prominent "Sign in" button.
  *
- *   * Logged in → links navigate normally.
- *   * Logged out + a gated destination → the click is intercepted and
- *     opens the login modal (`?login=1`) with the destination stashed
- *     as `?next=`, so OAuth returns the user there.
- *   * Public destinations (e.g. Support) always navigate.
+ * Historic note (kept intentionally terse):
+ *     to sign in only when they act.
  *
  * A logged-out visitor also gets a prominent "Sign in" button; a
  * logged-in visitor gets the avatar/SettingsMenu instead.
@@ -48,21 +45,17 @@ import { isGatedPath } from "@/lib/routes";
  *   * Mobile sheet animates open/closed via AnimatePresence.
  */
 
-type NavItem = { href: string; label: string; icon: LucideIcon; gated: boolean };
+type NavItem = { href: string; label: string; icon: LucideIcon };
 
-// `gated` is derived from the single source of truth in `lib/routes`
-// so the header and the middleware can never drift apart. Support is
-// a public page, so it always navigates.
-const APP_NAV: NavItem[] = (
-  [
-    { href: "/jobs", label: "Jobs", icon: Briefcase },
-    { href: "/applications", label: "Application Tracker", icon: ClipboardList },
-    { href: "/interview-prep", label: "Interview Prep", icon: GraduationCap },
-    { href: "/ats", label: "ATS", icon: Search },
-    { href: "/email-finder", label: "Email Finder", icon: Mailbox },
-    { href: "/support", label: "Support", icon: LifeBuoy },
-  ] as const
-).map((item) => ({ ...item, gated: isGatedPath(item.href) }));
+// All destinations are publicly viewable; the nav just navigates.
+const APP_NAV: NavItem[] = [
+  { href: "/jobs", label: "Jobs", icon: Briefcase },
+  { href: "/applications", label: "Application Tracker", icon: ClipboardList },
+  { href: "/interview-prep", label: "Interview Prep", icon: GraduationCap },
+  { href: "/ats", label: "ATS", icon: Search },
+  { href: "/email-finder", label: "Email Finder", icon: Mailbox },
+  { href: "/support", label: "Support", icon: LifeBuoy },
+];
 
 export function SiteHeader() {
   const { status } = useAuth();
@@ -79,18 +72,10 @@ export function SiteHeader() {
     return pathname === href || pathname.startsWith(`${href}/`);
   };
 
-  // Intercept a gated nav click ONLY when the user is DEFINITIVELY signed
-  // out (a real 401). During "loading" or "error" we let the click
-  // through and trust the cookie + server to authorize — treating those
-  // as "logged out" is exactly the bug that kept popping the modal for
-  // signed-in users on a cold-start `/me` failure.
-  const handleNavClick =
-    (item: NavItem) => (e: MouseEvent<HTMLAnchorElement>) => {
-      if (item.gated && status === "unauthenticated") {
-        e.preventDefault();
-        openLogin(item.href);
-      }
-    };
+  // Pages are public now — nav links are plain navigations for everyone. No
+  // click interception: actions on each page gate themselves via
+  // `useAuthGate`. (Profile/Subscription are still page-gated by middleware,
+  // which redirects a logged-out direct hit to the login modal.)
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur-md supports-[backdrop-filter]:bg-background/65">
@@ -118,7 +103,6 @@ export function SiteHeader() {
             <Link
               key={item.href}
               href={item.href}
-              onClick={handleNavClick(item)}
               aria-current={isActive(item.href) ? "page" : undefined}
               className={cn(
                 "relative rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -181,10 +165,7 @@ export function SiteHeader() {
                 <Link
                   key={item.href}
                   href={item.href}
-                  onClick={(e) => {
-                    handleNavClick(item)(e);
-                    setMobileOpen(false);
-                  }}
+                  onClick={() => setMobileOpen(false)}
                   aria-current={isActive(item.href) ? "page" : undefined}
                   className={cn(
                     "flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors duration-fast",

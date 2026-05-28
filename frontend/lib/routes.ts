@@ -1,31 +1,24 @@
 /**
  * Single source of truth for which route prefixes require a signed-in
- * user. Consumed by:
- *   * `middleware.ts` — server-side redirect of a logged-out direct
- *     hit to `/?login=1&next=<path>` (no flash of gated chrome).
- *   * the header / settings nav — to decide whether a logged-out
- *     click should open the login modal instead of navigating.
+ * user. Consumed by `middleware.ts` for a server-side redirect of a
+ * logged-out direct hit to `/?login=1&next=<path>`.
  *
- * Note: this is a UX gate, NOT the security boundary. The real access
- * controls are the backend `/api/auth/me` check + the per-endpoint
- * `require_*_user` dependencies. Keep them in sync conceptually, but
- * the backend is authoritative.
+ * Strategic shift: pages are PUBLIC; we gate ACTIONS (apply, tailor,
+ * track) instead — see `useAuthGate`. Only routes that render
+ * user-specific data stay page-gated:
+ *   * `/profile`     — the user's career data.
+ *   * `/settings`    — subscription/billing + per-user preferences.
+ *   * `/admin`       — admin-only surface (also backend-gated).
  *
- * Corrections vs. a naive list (verified against the route tree):
- *   * `/support` is PUBLIC (no guard) — not gated.
- *   * "Contact us" lives at `/settings/contact`, which IS gated
- *     (covered by the `/settings` prefix below).
+ * Everything else (`/jobs`, `/jobs/[id]`, `/applications`,
+ * `/interview-prep`, `/ats`, `/email-finder`, `/support`) is publicly
+ * viewable; their primary actions open the login modal when needed.
+ *
+ * This is a UX gate, NOT the security boundary — the backend
+ * `/api/auth/me` check + per-endpoint `require_*_user` dependencies are
+ * authoritative.
  */
-export const GATED_PREFIXES = [
-  "/jobs",
-  "/applications",
-  "/interview-prep",
-  "/ats",
-  "/email-finder",
-  "/profile",
-  "/settings",
-  "/admin",
-] as const;
+export const GATED_PREFIXES = ["/profile", "/settings", "/admin"] as const;
 
 /** True when `pathname` is under a gated prefix (exact match or a
  * sub-path). `/jobs` matches `/jobs` and `/jobs/123` but not

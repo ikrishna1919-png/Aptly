@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
-import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { ApplyButton } from "@/components/jobs/apply-button";
 import { BackToList } from "@/components/jobs/back-to-list";
 import { SponsorshipInsights } from "@/components/jobs/sponsorship";
+import { TailorCta } from "@/components/jobs/tailor-cta";
 import { CompanyMark } from "@/components/company-mark";
 import { JobDescription } from "@/components/job-description";
 import { TailorPanel } from "@/components/tailor-panel";
@@ -74,28 +75,24 @@ export default async function JobDetailPage({ params }: { params: { id: string }
               </h1>
             </div>
           </div>
-          <Button
-            asChild
+          <ApplyButton
+            url={job.url}
             size="sm"
             className="hidden shrink-0 rounded-full font-semibold sm:inline-flex"
           >
-            <a href={job.url} target="_blank" rel="noopener noreferrer">
-              Apply
-              <ExternalIcon />
-            </a>
-          </Button>
+            Apply
+            <ExternalIcon />
+          </ApplyButton>
         </div>
 
         {/* 2. Sub-header meta line. */}
         <p className="text-sm text-muted-foreground">{subParts.join(" · ")}</p>
 
         {/* Apply button, full width on phones (header button is hidden there). */}
-        <Button asChild className="w-full rounded-full font-semibold sm:hidden">
-          <a href={job.url} target="_blank" rel="noopener noreferrer">
-            Apply at {job.company}
-            <ExternalIcon />
-          </a>
-        </Button>
+        <ApplyButton url={job.url} className="w-full rounded-full font-semibold sm:hidden">
+          Apply at {job.company}
+          <ExternalIcon />
+        </ApplyButton>
       </header>
 
       {/* 3. Sponsorship insights placeholder. */}
@@ -103,12 +100,10 @@ export default async function JobDetailPage({ params }: { params: { id: string }
         <SponsorshipInsights />
       </div>
 
-      {/* 4. Tailor CTA — scrolls to the embedded tailoring panel (already
-          scoped to this job). */}
+      {/* 4. Tailor CTA — gated action: scrolls to the embedded tailoring
+          panel when signed in, prompts sign-in otherwise. */}
       <div className="mt-4">
-        <Button asChild size="lg" variant="secondary" className="w-full font-semibold sm:w-auto">
-          <a href="#tailor-panel">Tailor my resume for this job</a>
-        </Button>
+        <TailorCta />
       </div>
 
       <Separator className="my-7" />
@@ -139,12 +134,10 @@ export default async function JobDetailPage({ params }: { params: { id: string }
 
       {/* 6. Apply repeated at the bottom. */}
       <div className="mt-8 flex justify-center">
-        <Button asChild size="lg" className="w-full rounded-full font-semibold sm:w-auto">
-          <a href={job.url} target="_blank" rel="noopener noreferrer">
-            Apply at {job.company}
-            <ExternalIcon />
-          </a>
-        </Button>
+        <ApplyButton url={job.url} size="lg" className="w-full rounded-full font-semibold sm:w-auto">
+          Apply at {job.company}
+          <ExternalIcon />
+        </ApplyButton>
       </div>
     </article>
   );
