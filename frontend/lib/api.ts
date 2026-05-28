@@ -14,6 +14,9 @@ export type Job = {
   description: string | null;
   posted_at: string | null;
   source_updated_at: string | null;
+  // Derived server-side from `remote` + a JD "hybrid" heuristic — no stored
+  // column. "remote" | "hybrid" | "onsite" | null.
+  work_model: string | null;
   // ── Sponsorship intelligence (DOL H-1B LCA) ────────────────────────────
   // `sponsors_h1b` is the conservative signal (≥N LCAs in the past
   // 12 months); `past_h1b_activity` is the inclusive one (any LCA in
@@ -58,6 +61,12 @@ export type JobsQuery = {
   /** Inclusive H-1B signal: jobs at employers with any LCA filed in
    * the past 3 years. Same `false`-is-no-filter contract as above. */
   past_h1b_activity?: boolean;
+  /** Work model: "remote" | "hybrid" | "onsite". Omit for "any". */
+  work_model?: string;
+  /** Recency window: "24h" | "7d" | "30d". Omit for "any". */
+  posted_within?: string;
+  /** When true, exclude jobs whose JD appears to require a master's/PhD. */
+  bachelors_friendly?: boolean;
   limit?: number;
   offset?: number;
 };
