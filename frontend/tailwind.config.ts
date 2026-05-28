@@ -16,6 +16,11 @@ const config: Config = {
     extend: {
       fontFamily: {
         sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+        // `font-display` reaches the headline serif loaded in
+        // layout.tsx via `next/font/google`. Used on landing-page
+        // headlines + section titles to give the marketing surface
+        // its own voice while the in-app UI keeps the body sans.
+        display: ["var(--font-display)", "ui-serif", "Georgia", "serif"],
         mono: [
           "ui-monospace",
           "SFMono-Regular",
@@ -80,6 +85,13 @@ const config: Config = {
           from: { opacity: "0", transform: "translateY(4px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        // Landing-page page-load reveal — slower + larger
+        // displacement than the in-app `fade-in` so the orchestrated
+        // hero animation reads as deliberate rather than as a flicker.
+        "rise-in": {
+          from: { opacity: "0", transform: "translateY(14px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
         shimmer: {
           "0%": { backgroundPosition: "-200% 0" },
           "100%": { backgroundPosition: "200% 0" },
@@ -87,6 +99,7 @@ const config: Config = {
       },
       animation: {
         "fade-in": "fade-in 200ms ease-out",
+        "rise-in": "rise-in 600ms cubic-bezier(0.22, 1, 0.36, 1) both",
         shimmer: "shimmer 1.6s linear infinite",
       },
     },

@@ -51,7 +51,7 @@ function SignInInner() {
           </p>
           <p className="text-xs text-muted-foreground">
             <Link href="/" className="hover:text-foreground">
-              ← Back to jobs
+              ← Back to home
             </Link>
           </p>
         </CardContent>

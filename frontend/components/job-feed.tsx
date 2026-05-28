@@ -36,7 +36,7 @@ export async function JobsFeed({ query }: { query: JobsQuery }) {
         }
         action={
           <Link
-            href="/"
+            href="/jobs"
             className="text-sm font-medium text-primary underline-offset-4 hover:underline"
           >
             Clear filters
