@@ -542,17 +542,15 @@ export type ManualJobInput = {
   description?: string;
 };
 
-export async function createManualJob(
-  input: ManualJobInput,
-  token: string,
-): Promise<Job> {
+/** Manual-entry admin endpoints. Gated on the session cookie + the
+ * caller's email being in the backend's `ADMIN_EMAILS` allowlist —
+ * no more `X-Admin-Token` header. Non-admins get 403 from the
+ * backend's `require_admin_user` dependency. */
+export async function createManualJob(input: ManualJobInput): Promise<Job> {
   const res = await fetch(`${API_URL}/api/admin/jobs`, {
     method: "POST",
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Token": token,
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
   if (!res.ok) {
@@ -562,11 +560,10 @@ export async function createManualJob(
   return (await res.json()) as Job;
 }
 
-export async function deleteManualJob(id: number, token: string): Promise<void> {
+export async function deleteManualJob(id: number): Promise<void> {
   const res = await fetch(`${API_URL}/api/admin/jobs/${id}`, {
     method: "DELETE",
     credentials: "include",
-    headers: { "X-Admin-Token": token },
   });
   if (!res.ok) {
     const detail = await safeDetail(res);
@@ -681,6 +678,12 @@ export type CurrentUser = {
    * type for backwards compatibility with older backends that
    * don't emit the field. */
   profile_saved?: boolean;
+  /** True iff the user's email is in the backend `ADMIN_EMAILS`
+   * allowlist. Used to hide admin UI (manual-entry controls, the
+   * /admin nav link). The BACKEND `require_admin_user` dependency
+   * is the actual access gate — hiding the UI is cosmetic, not
+   * an authorisation control. */
+  is_admin?: boolean;
 };
 
 /** Fetch the current user, or null when not signed in. Never

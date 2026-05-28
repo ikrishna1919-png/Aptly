@@ -25,17 +25,30 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.auth import get_current_user
 from app.api.jobs import JobOut
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.ingest_run import IngestRun
 from app.models.job import MANUAL_SOURCE, Job
+from app.models.user import User
 from app.services.ingest import start_background_ingest
 
 router = APIRouter()
 
 
 def _require_admin(settings: Settings, token: str | None) -> None:
+    """Token-gated path — used by the scheduled GitHub Actions
+    cron that posts `/admin/ingest`. Separate from the user-facing
+    admin gate below (`require_admin_user`) which protects the
+    manual-entry endpoints humans call from the UI.
+
+    Two-gate design rationale: cron has no user identity to attach
+    to; humans must not be able to bypass the email allowlist by
+    discovering / leaking the cron token. Keeping the gates
+    distinct means a token leak doesn't unlock manual-entry, and a
+    non-admin user account can't trigger an ingest run.
+    """
     expected = settings.admin_token
     if not expected:
         # If no admin token is configured, the endpoint is locked shut —
@@ -46,6 +59,29 @@ def _require_admin(settings: Settings, token: str | None) -> None:
         )
     if not token or not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+
+
+def require_admin_user(
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> User:
+    """FastAPI dependency for the human-facing admin endpoints.
+
+    Verifies that:
+      1. There IS a signed-in user (`get_current_user` already 401s
+         when not — the dependency above does the heavy lifting).
+      2. The user's email is in the `ADMIN_EMAILS` allowlist. 403
+         otherwise — non-admin users see exactly the same error
+         whether the endpoint exists or not, no enumeration.
+
+    Defaults closed: empty `ADMIN_EMAILS` means every user 403s.
+    Hide the UI on the frontend too (cosmetic), but rely on this
+    dependency for the actual access control. Anyone can hit the
+    endpoint directly — the gate has to live on the server.
+    """
+    if not settings.is_admin_email(user.email):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admins only")
+    return user
 
 
 class IngestStartResponse(BaseModel):
@@ -141,11 +177,10 @@ class ManualJobIn(BaseModel):
 def create_manual_job(
     payload: ManualJobIn,
     db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    # Gated on the user's email being in `ADMIN_EMAILS`, NOT on
+    # the cron token — see `require_admin_user` for the rationale.
+    _admin: User = Depends(require_admin_user),
 ) -> Job:
-    _require_admin(settings, x_admin_token)
-
     now = datetime.now(UTC)
     job = Job(
         source=MANUAL_SOURCE,
@@ -178,10 +213,8 @@ def create_manual_job(
 def delete_manual_job(
     job_id: int = Path(..., ge=1),
     db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    _admin: User = Depends(require_admin_user),
 ) -> None:
-    _require_admin(settings, x_admin_token)
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")

@@ -102,6 +102,39 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+/** Like `RequireAuth`, but additionally requires the user to be an
+ * admin (`is_admin=true` on the `/me` response, which the backend
+ * derives from the `ADMIN_EMAILS` allowlist).
+ *
+ * The BACKEND `require_admin_user` dependency is the actual access
+ * gate — every admin endpoint 403s non-admins regardless of what
+ * the UI did. This wrapper is purely about not showing the admin
+ * surface to people who can't use it. */
+export function RequireAdmin({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  useEffect(() => {
+    if (loading) return;
+    if (!user) {
+      const next = encodeURIComponent(pathname || "/");
+      router.replace(`/sign-in?next=${next}`);
+      return;
+    }
+    if (!user.is_admin) {
+      // Bounce non-admins back to the canonical signed-in landing
+      // (`/profile`, which itself routes to `/jobs` once saved).
+      // Avoids a half-rendered admin page flash before the access
+      // gate's 403.
+      router.replace("/profile");
+    }
+  }, [loading, user, pathname, router]);
+
+  if (loading || !user || !user.is_admin) return null;
+  return <>{children}</>;
+}
+
 /** Like `RequireAuth`, but additionally requires the user to have
  * SAVED their profile at least once (`profile_saved=true` on the
  * `/me` response).

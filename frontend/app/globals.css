@@ -159,16 +159,39 @@
   /* Staggered reveal helper. Each child element with
      `.reveal-stagger-item` picks up a per-index animation delay
      via inline style; this class just sets the starting state
-     so SSR doesn't flash content before the animation runs. */
+     so SSR doesn't flash content before the animation runs.
+     `animation-fill-mode: both` (the `both` keyword on the
+     shorthand) keeps the element at the `to` state once the
+     animation completes, so the hero copy stays visible. */
   .reveal-stagger-item {
     opacity: 0;
-    animation: rise-in 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    transform: translateY(8px);
+    animation: aptly-rise-in 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   @media (prefers-reduced-motion: reduce) {
     /* Honour the OS setting — no motion, just show the content. */
     .reveal-stagger-item {
       opacity: 1;
+      transform: none;
       animation: none;
     }
+  }
+}
+
+/* Keyframes for the hero's staggered reveal. Defined OUTSIDE the
+   `@layer base` block because keyframes inside a cascade layer get
+   sorted into the layer's namespace and can't be referenced by the
+   matching `animation: …` declaration above. (This is a real
+   regression source: an earlier version named the animation but
+   never declared the keyframes, so every hero element stuck at
+   `opacity: 0` and the landing read as half-loaded.) */
+@keyframes aptly-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

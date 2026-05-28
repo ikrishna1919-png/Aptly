@@ -202,6 +202,13 @@ class CurrentUserOut(BaseModel):
     # `False` and gets routed to `/profile` first, so the tailor
     # service never runs against the demo template.
     profile_saved: bool = False
+    # True iff the user's email is in the `ADMIN_EMAILS` env-var
+    # allowlist. The frontend uses this to hide admin UI
+    # (manual-entry controls, the /admin nav link); the BACKEND
+    # `require_admin_user` dependency is the actual access gate
+    # — non-admins are 403'd at the endpoint regardless of
+    # whether the UI was hidden client-side.
+    is_admin: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -210,6 +217,7 @@ class CurrentUserOut(BaseModel):
 def auth_me(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> CurrentUserOut:
     """Return the currently signed-in user. 401 when no session."""
     # Local import to dodge the cycle between auth + candidate models.
@@ -223,6 +231,7 @@ def auth_me(
         email=user.email,
         name=user.name,
         profile_saved=row is not None,
+        is_admin=settings.is_admin_email(user.email),
     )
 
 
@@ -234,7 +243,21 @@ async def google_login(
 ) -> Response:
     """Start the OAuth flow. Stashes the post-login destination on
     the session so the callback can bounce the user back to where
-    they came from."""
+    they came from.
+
+    Clears any stale OAuth state (`_state_google_<nonce>` /
+    `_nonce_google` from a half-finished prior handshake) before
+    issuing the new authorize redirect. Without this, a user who
+    backs out of Google mid-flow and clicks "Sign in" again can
+    hit a state-mismatch in the callback because authlib finds two
+    competing state entries and validates against the wrong one.
+
+    Passes `prompt=select_account` to Google so the chooser is
+    shown EVERY time, not silently reusing whichever account the
+    browser last signed into. That matches what users expect after
+    an explicit sign-out — they want to be able to switch accounts,
+    not auto-resume yesterday's session.
+    """
     if not settings.has_google_oauth:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -243,9 +266,27 @@ async def google_login(
                 "GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI on the backend."
             ),
         )
+
+    # Strip stale OAuth scratch entries — keep nothing from an
+    # earlier handshake. authlib stashes state + nonce under keys
+    # prefixed with `_state_google_` and `_nonce_google`; flush
+    # them so the next `authorize_redirect` writes a clean slate.
+    stale = [k for k in request.session if k.startswith(("_state_google_", "_nonce_google"))]
+    for key in stale:
+        request.session.pop(key, None)
+
     request.session["next"] = next
     oauth = _get_oauth(settings)
-    return await oauth.google.authorize_redirect(request, settings.google_redirect_uri)
+    return await oauth.google.authorize_redirect(
+        request,
+        settings.google_redirect_uri,
+        # `prompt=select_account` ⇒ Google always shows the account
+        # chooser, even when the browser has an active Google session.
+        # After an explicit sign-out the user should be able to pick
+        # a different Google account; the default behaviour silently
+        # re-uses the last one, which is wrong here.
+        prompt="select_account",
+    )
 
 
 @router.get("/auth/google/callback")
@@ -279,7 +320,15 @@ async def google_callback(
     user = find_or_link_user(db, google_info)
 
     request.session[SESSION_USER_KEY] = user.id
-    next_path = request.session.pop("next", None) or "/"
+    # Post-login destination. The frontend stashes `next=/profile`
+    # when the user comes through the create-account flow; falling
+    # back to `/profile` (NOT `/`) for any login with no `next`
+    # routes returning users to the editor where they can
+    # confirm/update their profile before the gated `/jobs` feed
+    # opens. The home route's server-side check still bounces
+    # users with a saved profile straight to `/jobs`, so this
+    # only adds the desired "profile first" hop for newcomers.
+    next_path = request.session.pop("next", None) or "/profile"
     return RedirectResponse(
         url=_build_frontend_url(settings, next_path), status_code=status.HTTP_302_FOUND
     )

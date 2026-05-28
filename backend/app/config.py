@@ -102,10 +102,36 @@ class Settings(BaseSettings):
     # writes this same value into `users.email` for the bootstrap
     # row. Match this to the Google address you'll sign in with.
     initial_user_email: str = Field(default="owner@example.com", alias="INITIAL_USER_EMAIL")
+    # Comma-separated list of Google emails that may use the
+    # human-facing admin features (manual-entry job creation /
+    # deletion). Empty by default — no users are admins until the
+    # operator explicitly enrols them. Compared case-insensitively
+    # via `is_admin_email`.
+    #
+    # NOTE: distinct from `ADMIN_TOKEN`, which is the shared secret
+    # the scheduled ingest cron uses. The token gates the
+    # server-to-server endpoints (`/admin/ingest`); `ADMIN_EMAILS`
+    # gates the user-facing endpoints (`/admin/jobs`).
+    admin_emails: str = Field(default="", alias="ADMIN_EMAILS")
 
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def admin_email_list(self) -> list[str]:
+        """Normalised list of admin emails, lowercased + stripped.
+        Empty list means "no admins" — every admin-gated endpoint
+        will 403."""
+        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
+
+    def is_admin_email(self, email: str | None) -> bool:
+        """Case-insensitive membership check against `ADMIN_EMAILS`.
+        None / empty email → False so a bug in the auth path
+        defaults closed."""
+        if not email:
+            return False
+        return email.strip().lower() in self.admin_email_list
 
     @property
     def has_anthropic_key(self) -> bool:
