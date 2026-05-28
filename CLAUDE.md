@@ -1,133 +1,79 @@
 # CLAUDE.md — Aptly
 
-Project memory for Claude Code. Read this and `ROADMAP.md` at the start of
-every session before making changes.
+> Context file for Claude Code. Read this first in every session.
 
-## What this is
-Aptly aggregates real job postings, filters them for what matters (visa
-sponsorship, location, title, skills), uses Claude to tailor the user's resume
-per role for ATS, exports DOCX/PDF, and later assists with applying.
+## What Aptly is
+A job platform for **international students who need visa (H-1B) sponsorship**. Core value: aggregate tech jobs that sponsor, surface sponsorship signals, and tailor resumes/cover letters per job. The moat is **sponsorship intelligence from free public DOL/LCA data** + aggregation + tailoring — NOT breadth of listings.
 
-**The wedge:** aggregation + AI resume tailoring + assisted apply, with
-trustworthy sponsorship filtering. We are NOT cloning LinkedIn. Stay focused on
-this loop; don't sprawl into social-network features.
+Audience is high-stakes (visa timelines). Trustworthiness > flashiness. Never fabricate data on a user's resume.
 
-## Stack (decided — don't swap without asking the user)
-- Backend: **FastAPI** (Python 3.11+), SQLAlchemy 2.x, Alembic for migrations.
-- DB: **PostgreSQL** (managed: Neon or Supabase). Local dev via Docker Compose.
-- Frontend: **Next.js** (App Router) + TypeScript + Tailwind + shadcn/ui.
-- Auth: **Google OAuth via `authlib`** + signed-cookie sessions (Phase 5). Email/password is intentionally not supported. See "Backend env vars (auth)" below.
-- AI: **Claude API** (resume tailoring + resume parsing).
-- Hosting: Vercel (frontend) + Railway/Render/Fly (backend) + managed Postgres.
-- Background ingestion: cron to start; RQ/Celery later.
+## Live infrastructure
+- **Domain:** aptly.fyi (bought via Vercel; Vercel = registrar + DNS host)
+  - Frontend: `https://aptly.fyi` (Vercel)
+  - Backend: `https://api.aptly.fyi` (Render) — health: `/api/health`, docs: `/docs`
+- Backend service name on Render: `aptly-backend-47l1`
+- DB: Postgres on Neon
+- Repo: github.com/ikrishna1919-png/Aptly (account ikrishna1919-png)
+- Model in use: `claude-sonnet-4-6`
+- Google OAuth client_id: `162079275825-7t9qbopjh4i5m8e4ocpmujdkeid1hoi1.apps.googleusercontent.com`
+- NOTE: there are TWO Vercel projects on this repo (`aptly` and `aptly-buvg`). `aptly-buvg` is the old default and should be disconnected once confirmed unused. Until then, both build on each PR (double failure noise).
 
-## Repo structure (monorepo)
-```
-/backend     FastAPI app, SQLAlchemy models, Alembic, services, routers
-/frontend    Next.js app
-/infra        docker-compose (local Postgres), deploy configs
-ROADMAP.md   the phased plan
-CLAUDE.md    this file
-```
+## Stack
+- Backend: FastAPI (Py 3.11) + SQLAlchemy 2.x + Alembic. Anthropic SDK.
+- Frontend: Next.js (App Router) + TypeScript + Tailwind + shadcn/ui. Framer Motion for animation.
+- Monorepo: `/backend`, `/frontend`, `/infra`.
+
+## Key paths
+- `backend/app/main.py` — FastAPI app
+- `backend/app/sources/` — JobSource base class + per-ATS adapters
+- `backend/app/services/tailor.py` — resume/cover-letter tailoring (GENERATE step)
+- `backend/scripts/start.sh` — runs `alembic upgrade head` then uvicorn (`set -euo pipefail`, so a bad migration crashes the deploy and Render keeps the prior deploy live)
+- `render.yaml` — Render Blueprint, Root Dir = backend
+- `infra/company_seed.tsv`, `infra/tasks/`
+- `backend/tests/fixtures/golden_parse_reference.json` — known-correct parse of the AWS resume (regression target)
+
+## Current working state (as of handoff)
+WORKING:
+- Auth: Google sign-in, FIXED via custom domain (cookie is now first-party on `.aptly.fyi`). Works 9/10; rare `redirect_uri_mismatch` (stale/cached request, not a config bug).
+- Job aggregation across multiple ATS adapters (see below).
+- Resume parsing (PDF/DOCX/text) — improved significantly via sending PDFs DIRECTLY to Anthropic as a document (NOT pdfplumber). Still has minor gaps; profile is editable to cover misses.
+- Manual profile entry (primary path) with all sections.
+- AI resume tailoring.
+- Landing page, app nav shell, light-blue design system, profile page (clean layout).
+
+ADAPTERS DONE: Greenhouse, Lever, Workday, SmartRecruiters, Ashby. All plug into the `sources` table.
 
 ## Hard rules (do not violate)
-1. **Never scrape LinkedIn, Indeed, or Glassdoor directly.** Legal + anti-bot
-   risk. Use public ATS APIs (Greenhouse, Lever, Ashby, Workable), then Adzuna,
-   then a paid aggregator at scale.
-2. **Auto-apply stays human-in-the-loop.** Prepare/pre-fill applications;
-   the user confirms submission. No bots submitting through sites that forbid
-   automation.
-3. **Secrets** live in env vars only — never commit `.env`, keys, or tokens.
-4. **Data quality:** dedupe across sources, track freshness, flag ghost jobs
-   (~1 in 5 postings is stale/fake).
-5. Keep AI cost down: cache analyses; don't re-tailor unchanged inputs.
+- NEVER scrape LinkedIn / Indeed / Glassdoor / JobRight. Pull from ATS origin directly. (Legal + ban + strategic.) This has been pushed on repeatedly; the answer is always no.
+- NEVER write malware or anything enabling it.
+- For PDFs: send the PDF directly to Anthropic as a base64 `document` block. NEVER text-extract PDFs with pdfplumber (it strips spaces → "AzureDevOps" → corrupts everything). DOCX text extraction is OK (clean).
+- Resume tailoring: NEVER fabricate metrics, skills, or achievements. Ground every bullet in the user's real, confirmed experience. Professional-but-human writing, NOT casual/informal.
+- Migrations must be Postgres-valid (no SQLite-isms like `DEFAULT 1`; use `server_default=sa.text('true')`). A bad migration crashes the whole deploy.
+- Don't split jobs per source type — one `jobs` table with a `source` field.
+- Don't propose Spark/microservices — the bottleneck is network I/O; async + concurrency is the right model.
+- Don't auto-merge auth/migration PRs. Verify PR base = main.
+- Don't clone other companies' sites (Sonara, Lovable, etc.) — match the quality bar with original design only.
+- Be honest about live vs coming-soon features in all copy. Don't advertise auto-apply/email-finder/interview-prep as available — they're coming-soon.
 
-## Conventions
-- Python: type hints, `ruff` + `black`, pytest. Pydantic for I/O schemas.
-- TS: strict mode, ESLint + Prettier.
-- Every feature: tests + a short note in the PR/commit on what changed.
-- Small, reviewable commits. Run tests before declaring done.
-- Migrations via Alembic only — never hand-edit the DB schema.
+## Database notes
+- `sources` table drives ingestion (source_type, token, enabled, last_run_at, last_status, jobs_found_last_run, etc.). Unique (source_type, token).
+- `parse_runs` table columns: id, finished_at, user_id, raw_llm_output, profile, started_at, run_id, status, error.
+  - Diagnostic query: `select id, status, error, raw_llm_output, profile from parse_runs order by started_at desc limit 1;`
+  - `raw_llm_output` is the ground truth for diagnosing parse issues (extraction vs mapping vs display).
 
-## Backend env vars (auth, Phase 5)
+## Env vars (names only; values in dashboards)
+- Render: ADMIN_TOKEN, ANTHROPIC_API_KEY, DATABASE_URL (Neon pooled, `postgresql+psycopg://`), CORS_ORIGINS=https://aptly.fyi, FRONTEND_URL=https://aptly.fyi, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI=https://api.aptly.fyi/api/auth/google/callback, COOKIE_DOMAIN=.aptly.fyi, ADMIN_EMAILS (comma-sep; starts with ikrishna1919@gmail.com), HOURS_WINDOW (still 48 — widen to surface more jobs), INGEST_CONCURRENCY (default 10), INGEST_MAX_PER_RUN (default 150).
+- Vercel: NEXT_PUBLIC_API_URL=https://api.aptly.fyi
+- GitHub Actions: APTLY_API_URL=https://api.aptly.fyi, APTLY_ADMIN_TOKEN
 
-Google sign-in needs the following env vars set on the backend
-service (Render). Without `GOOGLE_*` the auth router still loads
-but `/api/auth/google/login` returns 503.
+## Recurring lessons (hard-won)
+1. DIAGNOSE FROM LOGS / GROUND-TRUTH BEFORE FIXING. Guessing has caused multiple wrong-fix cycles. Use `raw_llm_output`, Render logs, and `npm run build` locally to reproduce before changing code.
+2. Long ops on Render free tier → timeout. Use background jobs; always write a terminal status (success/error), never leave "running".
+3. Anthropic structured-output 400s: reject `additionalProperties` (unless false), `minimum`/`maximum`, `minItems`/`maxItems`. Keep schemas clean.
+4. Dependency works locally, breaks in serverless (e.g. isomorphic-dompurify ESM). Run `npm run build` to catch before deploy.
+5. `Cannot GET` = wrong host (Node/Express 404). FastAPI 404 = `{"detail":"Not Found"}` = right host, wrong path.
+6. After a failed Vercel build: the LIVE site stays on the last good deploy, but the broken build sits in `main` and blocks the NEXT deploy. Fix the build; don't just roll back.
+7. Keep risky changes (auth, migrations) in separate PRs from cosmetic ones.
 
-| Var | Required | Notes |
-|---|---|---|
-| `GOOGLE_CLIENT_ID` | yes | From the Google Cloud console OAuth client. |
-| `GOOGLE_CLIENT_SECRET` | yes | Same place. |
-| `GOOGLE_REDIRECT_URI` | yes | Full URL of the OAuth callback on the BACKEND. With the custom domain in place, that's `https://api.aptly.fyi/api/auth/google/callback`. Must match the URI registered in the Google Cloud console exactly. |
-| `SESSION_SECRET` | yes (prod) | Long random string — signs the session cookie. The default is an obvious placeholder so deploys can't accidentally ship without setting this. Rotate to invalidate every session. |
-| `FRONTEND_URL` | **yes (no default)** | Where to bounce the user after a successful OAuth callback — `https://aptly.fyi` in prod, `http://localhost:3000` for local dev. **There is intentionally no default**: a missing value raises HTTP 500 from `/api/auth/google/login` so a misconfigured deploy fails loud instead of silently redirecting users at `localhost:3000` and showing `ERR_CONNECTION_REFUSED`. |
-| `CORS_ORIGINS` | yes | Comma-separated list of origins allowed to send credentialed requests. With both subdomains under the shared parent (`aptly.fyi` and `api.aptly.fyi`), set this to `https://aptly.fyi` (and add `http://localhost:3000` locally). The browser sends the session cookie cross-subdomain via `Domain=.aptly.fyi`; CORS still has to allowlist the frontend origin or browsers refuse the credentialed request. |
-| `COOKIE_DOMAIN` | yes (prod) | Parent domain to scope the session cookie to, with a LEADING DOT — `.aptly.fyi` for prod. SessionMiddleware emits `Domain=.aptly.fyi` on set; the logout handler mirrors the same value on delete so the cookie clears cleanly. **Leave empty for local dev** (host-only cookie is correct when there's only one origin) AND for any legacy setup where the browser never touches the backend origin directly. |
-| `ENVIRONMENT` | yes (prod) | Set to `production` outside local dev so the session cookie picks up `Secure=True`. SameSite is `Lax` everywhere — correct because `aptly.fyi` and `api.aptly.fyi` are same-site, so the cookie travels on top-level navigations and fetch calls without needing `SameSite=None`. |
-| `INITIAL_USER_EMAIL` | yes (first deploy) | The Google address of the owner. Migration 0012 seeds a `users` row with this email + `google_subject_id=NULL`; on the owner's first sign-in the auth handler links the Google `sub` to that row, preserving the existing single-user data. After that this var is informational only. |
-
-Google Cloud setup (one-time):
-
-1. Create an OAuth 2.0 Client ID in the Google Cloud console (Web
-   application).
-2. Add the callback as an **Authorised redirect URI**:
-   `https://api.aptly.fyi/api/auth/google/callback`. For local dev
-   also add `http://localhost:8000/api/auth/google/callback`.
-3. Copy the Client ID + Secret into the env vars above.
-4. Add `https://aptly.fyi` (and `http://localhost:3000` for dev) to
-   **Authorised JavaScript origins**.
-5. Restrict the OAuth consent screen to the scopes Aptly uses:
-   `openid`, `email`, `profile`. No Drive / Calendar access.
-
-### Shared-parent-domain cookies (production)
-
-Frontend on `https://aptly.fyi` and backend on
-`https://api.aptly.fyi` share the parent domain `aptly.fyi`. The
-session cookie is issued with `Domain=.aptly.fyi` so it works
-first-party for BOTH subdomains — the user's browser sends it on
-every `aptly.fyi → api.aptly.fyi` fetch, no proxy required. This
-is the permanent fix for the "Safari can't sign in" /
-"can't sign back in after sign-out" bugs: same-site cookies pass
-ITP, and the deletion on logout (which mirrors the same `Domain`
-attribute) clears the cookie cleanly so the next OAuth handshake
-starts from scratch.
-
-  * **Cookie attrs in prod**: `Domain=.aptly.fyi; Path=/;
-    SameSite=Lax; HttpOnly; Secure`.
-  * **Local dev**: leave `COOKIE_DOMAIN` empty. The host-only
-    cookie is correct when there's only one origin
-    (`http://localhost:3000` ↔ `http://localhost:8000`); the
-    frontend's `next dev` rewrite still proxies `/api/*` to the
-    local backend so the dev experience stays single-origin.
-  * **Frontend API client** (`frontend/lib/api.ts`) calls
-    `https://api.aptly.fyi/api/...` directly in production. The
-    legacy Vercel rewrite is no longer required; remove
-    `API_PROXY_TARGET` and `NEXT_PUBLIC_API_URL` from Vercel
-    once the new client base URL is in place.
-  * **OAuth flow**: `GOOGLE_REDIRECT_URI` is on the BACKEND
-    origin. Google sends the user to
-    `api.aptly.fyi/api/auth/google/callback` → backend exchanges the
-    code, links/creates the user, sets `Set-Cookie: session=…;
-    Domain=.aptly.fyi; …` → backend 302s to `${FRONTEND_URL}/<next>`
-    (i.e. `aptly.fyi`) → browser sends the parent-domain cookie on
-    the next `/api/auth/me` call → user lands signed-in.
-
-Sanity check after a deploy: open the app in Safari OR in a Chrome
-incognito window, sign in with Google. You should land at `/jobs`
-with the session intact; the in-app "Sign out" button works; a
-sign-out → sign-in loop completes cleanly. If sign-out doesn't
-clear the cookie, double-check that `COOKIE_DOMAIN` is the
-literal string `.aptly.fyi` (with the leading dot) and is set on
-BOTH the live deploy AND any preview deploys you're testing
-against.
-
-## Current phase
-**Phase 0 — Foundation.** Goal: clean monorepo, Postgres wired with one real
-migration, local Docker Postgres, hello-world backend + frontend, CI, and an
-early deploy. See ROADMAP.md for the full phase list. Do not jump ahead to
-later phases unless the user asks.
-
-## Open input needed (for Phase 1)
-Target companies / sponsors to seed the job feed (which ATS board tokens to
-ingest first). Ask the user when Phase 1 starts.
+## Free-tier note
+Render free tier sleeps and cold-starts (~30s). Upgrade to Starter (~$7/mo, always-on) before real users — it's the biggest snappiness lever. Set an Anthropic billing alert (usage-based cost is the wild card).
