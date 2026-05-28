@@ -6,16 +6,21 @@ import { BrandMark } from "@/components/brand-mark";
 import { useAuth } from "@/lib/auth-context";
 
 // In-app nav for signed-in users — anchored to `/jobs`, the feed
-// home (the bare `/` is the public landing now). Profile + admin are
-// unchanged.
-const nav = [
+// home (the bare `/` is the public landing now). The `Admin` entry
+// is appended only when `user.is_admin` is true (see below) so
+// non-admin users never see it. The backend's `require_admin_user`
+// dependency is the actual access gate; hiding the link is purely
+// cosmetic.
+const BASE_NAV: { href: string; label: string }[] = [
   { href: "/jobs", label: "Jobs" },
   { href: "/profile", label: "Profile" },
-  { href: "/admin", label: "Admin" },
 ];
 
 export function SiteHeader() {
   const { user, loading, signOut } = useAuth();
+  const nav = user?.is_admin
+    ? [...BASE_NAV, { href: "/admin", label: "Admin" }]
+    : BASE_NAV;
   // The brand link ALWAYS points at `/`. The home route's server
   // component checks `/auth/me` and routes signed-in users to
   // `/profile` (when their profile isn't saved yet) or `/jobs`

@@ -16,7 +16,12 @@ import { googleSignInUrl } from "@/lib/api";
 
 function SignInInner() {
   const params = useSearchParams();
-  const next = params.get("next") || "/";
+  // After sign-in, route to /profile by default (NOT /). Newcomers
+  // need to fill in the profile editor before /jobs unlocks; for
+  // returning users the home route's server-side check immediately
+  // bounces them on to /jobs once the cookie is in. Either way,
+  // the editor is the safer landing spot.
+  const next = params.get("next") || "/profile";
   // `?error=oauth` arrives via the callback handler when the OAuth
   // exchange fails (token expired, code already used, etc.). Don't
   // surface the raw error — just a friendly retry message.

@@ -19,8 +19,7 @@ import {
   type Job,
   type ManualJobInput,
 } from "@/lib/api";
-
-const TOKEN_KEY = "aptly.adminToken";
+import { RequireAdmin } from "@/lib/auth-context";
 
 const EMPTY_FORM = {
   title: "",
@@ -37,19 +36,24 @@ const EMPTY_FORM = {
 type FormState = typeof EMPTY_FORM;
 
 export default function AdminPage() {
-  const [token, setToken] = useState("");
-  const [tokenLoaded, setTokenLoaded] = useState(false);
+  // The page is admin-only. `RequireAdmin` redirects non-admins to
+  // `/profile` BEFORE any of the admin UI mounts, and the backend
+  // `require_admin_user` dependency is the real gate — direct API
+  // calls 403 regardless of what the UI did.
+  return (
+    <RequireAdmin>
+      <AdminInner />
+    </RequireAdmin>
+  );
+}
+
+function AdminInner() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [manualJobs, setManualJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-
-  useEffect(() => {
-    setToken(localStorage.getItem(TOKEN_KEY) ?? "");
-    setTokenLoaded(true);
-  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -65,14 +69,8 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
-    if (tokenLoaded) void refresh();
-  }, [tokenLoaded, refresh]);
-
-  function saveToken(value: string) {
-    setToken(value);
-    if (value) localStorage.setItem(TOKEN_KEY, value);
-    else localStorage.removeItem(TOKEN_KEY);
-  }
+    void refresh();
+  }, [refresh]);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -82,7 +80,6 @@ export default function AdminPage() {
     e.preventDefault();
     setError(null);
     setInfo(null);
-    if (!token) return setError("Admin token required");
 
     const payload: ManualJobInput = {
       title: form.title.trim(),
@@ -101,7 +98,7 @@ export default function AdminPage() {
 
     setSubmitting(true);
     try {
-      await createManualJob(payload, token);
+      await createManualJob(payload);
       setForm(EMPTY_FORM);
       setInfo(`Added “${payload.title}”`);
       await refresh();
@@ -113,12 +110,11 @@ export default function AdminPage() {
   }
 
   async function onDelete(job: Job) {
-    if (!token) return setError("Admin token required");
     if (!confirm(`Delete "${job.title}"?`)) return;
     setError(null);
     setInfo(null);
     try {
-      await deleteManualJob(job.id, token);
+      await deleteManualJob(job.id);
       setInfo(`Deleted “${job.title}”`);
       await refresh();
     } catch (e) {
@@ -152,32 +148,10 @@ export default function AdminPage() {
           </code>{" "}
           and persist until you delete them — the 48-hour rolling cleanup
           skips them. They appear in the public feed alongside ATS-ingested
-          postings.
+          postings. Access is gated on your account being in the backend
+          admin allowlist.
         </p>
       </header>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Admin token</CardTitle>
-          <CardDescription>
-            Stored in this browser only (localStorage). Must match{" "}
-            <code className="rounded bg-muted px-1 font-mono text-[12px]">
-              ADMIN_TOKEN
-            </code>{" "}
-            on the backend.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Input
-            type="password"
-            placeholder="X-Admin-Token"
-            value={token}
-            onChange={(e) => saveToken(e.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </CardContent>
-      </Card>
 
       <Card>
         <CardHeader>
