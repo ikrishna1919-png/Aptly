@@ -293,6 +293,12 @@ class _LLMStructuralExtract(BaseModel):
     `Languages:` etc.). Pydantic produces an `anyOf` in the JSON schema
     that Anthropic accepts.
 
+    Contact fields (`email`, `phone`, `location`, `linkedin_url`,
+    `github_url`) live on the schema too — required by the PDF path,
+    which deliberately does NOT pre-extract text via pdfplumber. The
+    text-input path still prefers its regex-extracted contact fields
+    (cheap, deterministic) and ignores these; the PDF path uses them.
+
     `section_order` records the resume's actual section ordering so the
     tailor service can mirror the candidate's voice / structure. Free-
     form strings (we don't constrain via enum) so a template that
@@ -300,6 +306,11 @@ class _LLMStructuralExtract(BaseModel):
     still round-trips."""
 
     name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    linkedin_url: str | None = None
+    github_url: str | None = None
     experience: list[_LLMExperience] = Field(default_factory=list)
     education: list[_LLMEducation] = Field(default_factory=list)
     skills: list[str] | list[_LLMSkillGroup] = Field(default_factory=list)
@@ -537,22 +548,27 @@ def parse_resume_pdf(
 ) -> Profile:
     """PDF-input variant of `parse_resume`.
 
-    Skips the pdfplumber text-extraction step that's the source of
-    most "dropped bullets" complaints — bullets, multi-column
-    layouts, and table cells survive intact when Claude reads the
-    PDF directly via the `document` content block.
+    **No pre-extraction.** The PDF bytes go straight to Claude as a
+    base64 `document` content block. pdfplumber is NOT called on
+    this path — text extraction with pdfplumber was producing
+    space-stripped output ("AzureDevOps" instead of "Azure DevOps",
+    "DataWarehousing" instead of "Data Warehousing") which the LLM
+    then echoed in its structural output. Claude's native document
+    understanding handles word spacing, multi-column layouts,
+    bullets, and tables correctly; reading the PDF natively is what
+    makes that work, and any text-extract step in front of it
+    defeats the point.
 
-    The regex contact-field pass still runs against pdfplumber's
-    text view so emails, phone numbers, and URLs keep their cheap
-    deterministic source. Worst case the regex pass returns nothing
-    (image-only PDF); the LLM result still populates name +
-    structural fields and the user fills the rest.
+    Contact fields (name, email, phone, location, links) also come
+    from the LLM here — there's no regex fallback because there's
+    no text view to run regex against. The text-paste path
+    (`parse_resume`) still uses the regex contact pass because
+    pasted text is, by definition, already correctly spaced.
 
     Same failure modes as `parse_resume`: any Anthropic error or
-    wall-clock timeout falls through to the regex result. The
-    worker also catches an empty extraction here so an image-only
-    PDF can still produce SOMETHING (e.g. the model often surfaces
-    the candidate's name + headline even from a scanned page).
+    wall-clock timeout returns an empty profile rather than
+    fabricating one. The worker catches that and writes
+    `status=failed` with the real exception so the user knows.
     """
     tag = f"parse_run={run_id}" if run_id else "parse_run=adhoc"
     settings = settings or get_settings()
@@ -560,38 +576,19 @@ def parse_resume_pdf(
         log.info("%s: empty PDF input, returning empty profile", tag)
         return _empty_profile()
 
-    log.info("%s: parse_resume_pdf received %d bytes", tag, len(pdf_bytes))
-
-    # Run the cheap pdfplumber text extract for the regex contact
-    # fields. Failure here is non-fatal — we still send the PDF to
-    # Claude and merge whatever LLM result we get. An image-only PDF
-    # falls into this branch silently.
-    regex_profile = _empty_profile()
-    try:
-        from app.services.resume_extractor import _extract_pdf  # noqa: PLC0415
-
-        extracted_text = _extract_pdf(pdf_bytes) or ""
-        log.info(
-            "%s: pdfplumber extracted %d chars for regex contact pass",
-            tag,
-            len(extracted_text),
-        )
-        if extracted_text.strip():
-            lines = [ln.rstrip() for ln in extracted_text.splitlines()]
-            sections = _segment_sections(lines)
-            header_lines = sections.get("_preamble", [])
-            regex_profile = _regex_extract(extracted_text, lines, sections, header_lines)
-    except Exception as exc:  # noqa: BLE001
-        # Don't fail the whole parse for a regex-pass blip. The LLM
-        # result alone is plenty when pdfplumber can't read the file.
-        log.warning("%s: pdfplumber pass failed (continuing): %s", tag, exc)
+    log.info(
+        "%s: parse_resume_pdf received %d bytes — sending PDF directly to Claude as document",
+        tag,
+        len(pdf_bytes),
+    )
 
     if not settings.has_anthropic_key:
-        # No key → no LLM. Best we can do is the regex result, which
-        # may be empty for a scanned PDF — that's fine, the API path
-        # surfaces an actionable error if everything's blank.
-        log.info("%s: no ANTHROPIC_API_KEY — returning regex-only profile", tag)
-        return regex_profile
+        # No key → no LLM, and we refuse to fall back to pdfplumber
+        # text. Surface an empty profile and let the worker write
+        # `failed` with a clear message rather than serve
+        # space-stripped text to the user.
+        log.warning("%s: no ANTHROPIC_API_KEY for PDF path; returning empty profile", tag)
+        return _empty_profile()
 
     log.info("%s: starting Anthropic structural extract (PDF document input)", tag)
     try:
@@ -604,17 +601,17 @@ def parse_resume_pdf(
         )
     except concurrent.futures.TimeoutError:
         log.warning(
-            "%s: PDF LLM call exceeded wall-clock %.1fs; falling back to regex",
+            "%s: PDF LLM call exceeded wall-clock %.1fs; returning empty profile",
             tag,
             _LLM_HARD_TIMEOUT_SECONDS,
         )
-        return regex_profile
+        return _empty_profile()
     except Exception as exc:  # noqa: BLE001
-        log.exception("%s: PDF LLM extraction failed; falling back to regex: %s", tag, exc)
-        return regex_profile
+        log.exception("%s: PDF LLM extraction failed; returning empty profile: %s", tag, exc)
+        return _empty_profile()
 
-    log.info("%s: Anthropic PDF extract returned; merging with regex profile", tag)
-    return _merge(regex_profile, llm)
+    log.info("%s: Anthropic PDF extract returned; building profile from LLM-only result", tag)
+    return _llm_to_profile(llm)
 
 
 # ─── LLM extraction ─────────────────────────────────────────────────────────
@@ -792,9 +789,34 @@ def _llm_extract_structural_pdf(
         {
             "type": "text",
             "text": (
-                "The attached PDF is the candidate's resume. Read every page,"
-                " including bulleted lists, tables, and multi-column sections,"
-                " and return the extracted fields as JSON matching the schema."
+                "The attached PDF is the candidate's resume — read the "
+                "RENDERED PAGES directly (do NOT treat this as raw text). "
+                "Preserve word spacing as it appears visually: 'Azure "
+                "DevOps' is two words, not 'AzureDevOps'. Read every page, "
+                "every column, every bullet, every table cell.\n"
+                "\n"
+                "Extract the candidate's contact info into the top-level "
+                "`name`, `email`, `phone`, `location`, `linkedin_url`, and "
+                "`github_url` fields — there is no separate contact-field "
+                "extractor on this path, the LLM is the only source.\n"
+                "\n"
+                "Critical for THIS document:\n"
+                "  * Return ONE experience entry per job, even when the "
+                "    candidate has held multiple roles at the same employer "
+                "    or moved across employers in succession. If the resume "
+                "    lists five jobs, the `experience` array has five "
+                "    entries. Do not collapse roles together.\n"
+                "  * Pair company / title / dates / bullets WITHIN each job "
+                "    — never pair a title from one job with the company "
+                "    from another. The company is the employer; the title "
+                "    is the role.\n"
+                "  * If the document has a Projects section, populate "
+                "    `projects`. If it has a Certifications / Licenses "
+                "    section, populate `certifications`. If it has an "
+                "    Awards / Honors / Achievements section, populate "
+                "    `achievements`. Don't drop any of these.\n"
+                "\n"
+                "Return the extracted fields as JSON matching the schema."
             ),
         },
     ]
@@ -928,9 +950,12 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
     fallback). An empty experience list from the LLM keeps the regex
     list — partial > empty.
 
-    Projects, achievements, and section_order come from the LLM only
-    — the regex extractor never tried to populate them, so there's no
-    fallback to merge against."""
+    Projects, achievements, certifications, and section_order come
+    from the LLM only — the regex extractor never tried to populate
+    them, so there's no fallback to merge against.
+
+    Used by the TEXT-input path. The PDF path uses `_llm_to_profile`
+    instead because it has no regex source to merge against."""
     name = (llm.name or regex_profile.name or "").strip()
 
     llm_experience = [_to_profile_experience(e) for e in llm.experience]
@@ -961,6 +986,52 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
         location=regex_profile.location,
         links=regex_profile.links,
         summary=regex_profile.summary,
+        skills=skills,
+        experience=experience,
+        education=education,
+        projects=projects,
+        achievements=achievements,
+        certifications=certifications,
+        section_order=section_order,
+    )
+
+
+def _llm_to_profile(llm: _LLMStructuralExtract) -> Profile:
+    """Build a Profile from the LLM's structural extract ALONE — no
+    regex source.
+
+    Used by the PDF path, where running any text-extractor would
+    defeat the purpose of sending the PDF directly to Claude (the
+    pdfplumber output was producing space-stripped words like
+    'AzureDevOps' that the LLM then echoed). The contact fields
+    (email / phone / location / links) come from the LLM-extracted
+    values on `_LLMStructuralExtract` directly.
+    """
+    name = (llm.name or "").strip()
+
+    experience = [e for e in (_to_profile_experience(x) for x in llm.experience) if e is not None]
+    education = [e for e in (_to_profile_education(x) for x in llm.education) if e is not None]
+    skills = _flatten_skills(llm.skills)
+    projects = [p for p in (_to_profile_project(p) for p in llm.projects) if p is not None]
+    achievements = [
+        a for a in (_to_profile_achievement(a) for a in llm.achievements) if a is not None
+    ]
+    certifications = [
+        c for c in (_to_profile_certification(c) for c in llm.certifications) if c is not None
+    ]
+    section_order = [s.strip().lower() for s in llm.section_order if s and s.strip()]
+
+    linkedin = (llm.linkedin_url or "").strip() or None
+    github = (llm.github_url or "").strip() or None
+
+    return Profile(
+        name=name,
+        headline=None,
+        email=(llm.email or "").strip() or None,
+        phone=(llm.phone or "").strip() or None,
+        location=(llm.location or "").strip() or None,
+        links=ProfileLinks(linkedin=linkedin, github=github),
+        summary="",
         skills=skills,
         experience=experience,
         education=education,
