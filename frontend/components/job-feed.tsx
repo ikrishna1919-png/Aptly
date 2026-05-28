@@ -26,11 +26,12 @@ export async function JobsFeed({ query }: { query: JobsQuery }) {
   if (data.total === 0) {
     return (
       <EmptyState
-        title="No jobs match these filters"
+        title="No jobs match your filters yet"
         description={
           <>
-            Try clearing some filters or check back after the next 6-hour ingest.
-            The feed only ever shows the last {data.window_hours} hours.
+            Try widening the location, removing a filter, or check back after the
+            next 6-hour ingest. The feed only ever shows the last{" "}
+            {data.window_hours} hours.
           </>
         }
         action={
