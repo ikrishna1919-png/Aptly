@@ -319,19 +319,30 @@ def auth_logout(
     The cookie is named `session` (Starlette's default — see
     `app.main.create_app`). `secure` tracks the environment: HTTPS
     only in prod, plain HTTP for `next dev` so local sign-out works.
+
+    `domain` MUST match the value `SessionMiddleware` used on set
+    (driven by `COOKIE_DOMAIN`). When the production setup pins the
+    cookie to `.aptly.fyi` so the frontend + backend subdomains
+    share a session, the delete header must carry the same scope —
+    omitting it writes a host-only delete that doesn't match the
+    parent-domain cookie, and the old cookie survives logout. That
+    was the "can't sign back in" bug.
     """
     if hasattr(request, "session"):
         request.session.clear()
 
     response = JSONResponse({"ok": True})
     is_dev = settings.environment == "development"
-    response.delete_cookie(
-        key="session",
-        path="/",
-        samesite="lax",
-        secure=not is_dev,
-        httponly=True,
-    )
+    delete_kwargs: dict[str, Any] = {
+        "key": "session",
+        "path": "/",
+        "samesite": "lax",
+        "secure": not is_dev,
+        "httponly": True,
+    }
+    if settings.cookie_domain:
+        delete_kwargs["domain"] = settings.cookie_domain
+    response.delete_cookie(**delete_kwargs)
     return response
 
 

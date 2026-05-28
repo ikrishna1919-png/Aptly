@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -18,35 +20,40 @@ def create_app() -> FastAPI:
     # SessionMiddleware must wrap the request before any handler that
     # touches `request.session`.
     #
-    # Cookie attrs are environment-dependent, but the dimension that
-    # USED to matter (cross-origin vs. same-origin) is now gone:
-    # the frontend proxies every browser → backend call through its
-    # own origin via Next.js rewrites (see `frontend/next.config.mjs`).
-    # That makes the session cookie FIRST-PARTY for the user-facing
-    # origin, so `SameSite=Lax` is correct everywhere — and it's the
-    # right choice because:
+    # Cookie attribute rules of thumb:
     #
-    #   * `Lax` survives Safari's Intelligent Tracking Prevention
-    #     and Chrome / Firefox incognito (which all block third-
-    #     party cookies that `SameSite=None` would require).
-    #   * `None` is no longer needed: the cookie isn't crossing
-    #     origins from the browser's perspective.
-    #
-    # The `Secure` flag still tracks the environment — HTTPS in
-    # production, plain HTTP for local `next dev`.
+    #   * `SameSite=Lax` everywhere. Correct for the production
+    #     setup (frontend on `aptly.fyi`, backend on
+    #     `api.aptly.fyi` — same site, so Lax considers them
+    #     same-site for cookie purposes). Survives Safari ITP and
+    #     Chrome / Firefox incognito (which both block the
+    #     `SameSite=None` third-party cookies we'd otherwise need).
+    #     `None` is never the right answer once same-site cookies
+    #     work.
+    #   * `Secure` tracks the environment — HTTPS-only in
+    #     production, plain HTTP for local `next dev`.
+    #   * `Domain=COOKIE_DOMAIN` (when set) lets the SAME session
+    #     cookie cover both subdomains, so the user's `aptly.fyi`
+    #     browser session is recognised when JS / browser navigates
+    #     to `api.aptly.fyi`. Leave the env var empty for local
+    #     dev OR for the legacy Vercel-rewrite-proxy setup (host-
+    #     only is correct when the browser never touches the
+    #     backend origin directly).
     is_dev = settings.environment == "development"
     same_site = "lax"
     https_only = not is_dev
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=settings.session_secret,
-        same_site=same_site,
-        https_only=https_only,
+    session_kwargs: dict[str, Any] = {
+        "secret_key": settings.session_secret,
+        "same_site": same_site,
+        "https_only": https_only,
         # Two-week sessions: long enough that a daily user rarely
         # re-auths, short enough that a lost device's cookie
         # eventually goes stale.
-        max_age=60 * 60 * 24 * 14,
-    )
+        "max_age": 60 * 60 * 24 * 14,
+    }
+    if settings.cookie_domain:
+        session_kwargs["domain"] = settings.cookie_domain
+    app.add_middleware(SessionMiddleware, **session_kwargs)
     # CORS must explicitly list the frontend origin — browsers reject
     # `Access-Control-Allow-Origin: *` together with
     # `Access-Control-Allow-Credentials: true`. The `cors_origin_list`
