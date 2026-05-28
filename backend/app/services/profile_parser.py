@@ -64,7 +64,7 @@ import logging
 import re
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
@@ -2390,3 +2390,63 @@ def start_background_parse_pdf(
         db.commit()
     _launch_worker(_execute_parse_run_pdf, (run_id, pdf_bytes, settings))
     return run_id
+
+
+# How long a row may sit at `running` before the startup sweep treats
+# it as orphaned. A real parse finishes well inside a minute (60s hard
+# LLM ceiling + a few seconds of bookkeeping), so 5 minutes is
+# comfortably past any legitimate in-flight parse — anything older was
+# abandoned by a process that died mid-parse.
+_ORPHAN_RUNNING_AFTER = timedelta(minutes=5)
+
+
+def sweep_orphaned_parse_runs() -> int:
+    """Mark long-`running` ParseRun rows as failed. Returns the count.
+
+    The worker's try/except/finally guarantees a terminal status as
+    long as the *process* survives. The one gap it can't cover is the
+    process itself dying mid-parse (OOM, Render cold-start eviction, a
+    hard restart): the daemon thread is killed before `finally` runs,
+    so the row stays `running` forever and the polling client waits out
+    its full ceiling for a parse that can never finish.
+
+    Run this once at startup to reap those: any row still `running` and
+    older than `_ORPHAN_RUNNING_AFTER` is flipped to `failed` with a
+    clear, user-presentable message. Rows newer than the cutoff are
+    left alone — they may belong to a parse the previous process was
+    legitimately still running when this one booted (unlikely given a
+    restart, but the cutoff makes the sweep safe regardless).
+
+    Best-effort: a DB hiccup here is logged and swallowed so it can
+    never keep the API from booting.
+    """
+    cutoff = datetime.now(UTC) - _ORPHAN_RUNNING_AFTER
+    try:
+        with SessionLocal() as db:
+            rows = (
+                db.execute(
+                    select(ParseRun).where(
+                        ParseRun.status == PARSE_STATUS_RUNNING,
+                        ParseRun.started_at < cutoff,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for run in rows:
+                run.status = PARSE_STATUS_FAILED
+                run.error = (
+                    "Parse was interrupted by a server restart before it "
+                    "could finish. Please upload your resume again."
+                )
+                run.finished_at = datetime.now(UTC)
+            if rows:
+                db.commit()
+                log.warning(
+                    "startup sweep: marked %d orphaned parse_run(s) as failed",
+                    len(rows),
+                )
+            return len(rows)
+    except Exception:  # noqa: BLE001
+        log.exception("startup sweep: failed to reap orphaned parse_runs")
+        return 0
