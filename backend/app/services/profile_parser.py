@@ -153,11 +153,35 @@ class ProfileProject(BaseModel):
 
 
 class ProfileAchievement(BaseModel):
-    """One award / honour / notable accomplishment."""
+    """One award / honour / notable accomplishment.
+
+    NOT for certifications — those are a separate, structurally
+    different thing (named credentials with an issuer + sometimes a
+    credential ID). The parser prompt explicitly tells the model to
+    keep them apart so an `AWS Certified Solutions Architect` ends up
+    in `certifications`, not here.
+    """
 
     title: str
     description: str = ""
     date: str | None = None
+
+
+class ProfileCertification(BaseModel):
+    """One named credential / licence / certification.
+
+    Distinct from `ProfileAchievement` — certifications have a
+    specific issuer (AWS, Microsoft, PMI, the state bar, etc.) and
+    often a credential ID; achievements are awards / honours /
+    recognitions without that structure. The parser separates them
+    on the section heading (`Certifications` / `Licenses` vs
+    `Awards` / `Honors`).
+    """
+
+    name: str
+    issuer: str | None = None
+    date: str | None = None
+    credential_id: str | None = None
 
 
 class Profile(BaseModel):
@@ -181,6 +205,7 @@ class Profile(BaseModel):
     education: list[ProfileEducation] = Field(default_factory=list)
     projects: list[ProfileProject] = Field(default_factory=list)
     achievements: list[ProfileAchievement] = Field(default_factory=list)
+    certifications: list[ProfileCertification] = Field(default_factory=list)
     # Order the user's resume presents its sections in, when known.
     # Populated by the LLM parser; the tailor service uses it to
     # mirror the user's section ordering. Free-form strings so a
@@ -254,6 +279,13 @@ class _LLMAchievement(BaseModel):
     date: str | None = None
 
 
+class _LLMCertification(BaseModel):
+    name: str | None = None
+    issuer: str | None = None
+    date: str | None = None
+    credential_id: str | None = None
+
+
 class _LLMStructuralExtract(BaseModel):
     """The structured output the resume-parse Claude call returns. The
     `skills` field can be either a flat list (most resumes) OR a list
@@ -273,6 +305,7 @@ class _LLMStructuralExtract(BaseModel):
     skills: list[str] | list[_LLMSkillGroup] = Field(default_factory=list)
     projects: list[_LLMProject] = Field(default_factory=list)
     achievements: list[_LLMAchievement] = Field(default_factory=list)
+    certifications: list[_LLMCertification] = Field(default_factory=list)
     section_order: list[str] = Field(default_factory=list)
 
 
@@ -578,29 +611,55 @@ def parse_resume_pdf(
 
 
 _SYSTEM_PROMPT = (
-    "You extract structured fields from a candidate's pasted resume "
-    "text. You will be shown the raw resume; return JSON matching the "
-    "provided schema.\n"
+    "You extract structured fields from a candidate's resume (the "
+    "input may be raw text or an attached PDF). Return JSON matching "
+    "the provided schema.\n"
     "\n"
     "Be CONSERVATIVE. The cost of being wrong is worse than the cost "
     "of being incomplete:\n"
     "  * Return null for any field you cannot confidently extract.\n"
     "  * Never invent or guess a value. If the resume doesn't clearly "
     "    state the company, title, dates, or location, leave it null.\n"
-    "  * Pull values VERBATIM from the resume text. Do not paraphrase "
+    "  * Pull values VERBATIM from the resume. Do not paraphrase "
     "    titles or shorten company names.\n"
+    "\n"
+    "── Completeness ──\n"
+    "  * Capture EVERY section that appears in the resume — summary, "
+    "    experience, education, skills, projects, achievements, "
+    "    certifications, AND record their order in `section_order`.\n"
+    "  * In `experience`, return ONE entry for EVERY job listed — "
+    "    never omit, never merge, never summarise multiple jobs into "
+    "    one. If the resume lists six jobs, the experience array has "
+    "    six entries. The hard rule: if the candidate's resume names "
+    "    a role, it has its own object in `experience`.\n"
+    "\n"
+    "── Pairing ──\n"
+    "  Each `experience` entry is ONE job and only one job. Inside a "
+    "  single entry, `company`, `title`, `location`, `start_date`, "
+    "  `end_date`, and `description_bullets` must ALL describe the "
+    "  SAME job — never pair the title from one job with the company "
+    "  from another, never attach bullets from job B to job A. When "
+    "  in doubt about which job a bullet belongs to, look at the "
+    "  visual grouping in the resume (indentation, blank lines, "
+    "  proximity to the job header) and keep the bullet with its "
+    "  parent job. A bullet you can't confidently assign to a job is "
+    "  dropped, not pasted onto the wrong one.\n"
     "\n"
     "Field-by-field guidance:\n"
     "  - name: the candidate's full name, exactly as written at the "
     "    top of the resume. null if the resume doesn't start with a "
     "    clearly-formatted name.\n"
-    "  - experience: each entry is one role. `company` is the "
-    "    employer name; `title` is the role; do NOT swap them. "
-    "    `start_date` / `end_date` are free-form date strings as they "
-    "    appear in the resume (e.g. 'Jan 2022', '2022', '2022-01'); "
-    "    end_date is the literal string 'Present' for ongoing roles. "
-    "    `description_bullets` is the achievement bullets verbatim, "
-    "    one string per bullet, stripped of leading glyphs.\n"
+    "  - experience: see the pairing + completeness rules above. "
+    "    `company` is the employer name; `title` is the role; do NOT "
+    "    swap them. `start_date` / `end_date` are free-form date "
+    "    strings as they appear in the resume (e.g. 'Jan 2022', "
+    "    '2022', '2022-01'); end_date is the literal string 'Present' "
+    "    for ongoing roles. `description_bullets` is the achievement "
+    "    bullets VERBATIM as a list — one string per bullet, stripped "
+    "    of the leading bullet glyph (•, –, *, etc.) but with the "
+    "    rest of the bullet preserved word-for-word. A multi-line "
+    "    bullet stays as ONE entry in the list; don't split it on "
+    "    line breaks.\n"
     "  - education: one entry per institution. `school` is the "
     "    institution; `degree` is the credential (B.S., M.A., Ph.D., "
     "    etc.); `field_of_study` is the major (separate field — do "
@@ -616,15 +675,41 @@ _SYSTEM_PROMPT = (
     "    sentences; `technologies` is the stack as a string list (only "
     "    if the resume explicitly enumerates one); `link` is the URL if "
     "    one is given. Omit the section entirely if the resume has none.\n"
-    "  - achievements: awards, honours, notable accomplishments under "
-    "    headers like 'Awards', 'Honors', 'Achievements', 'Recognition'. "
-    "    Distinct from project bullets and from experience-section "
-    "    achievements — only what's filed under its own header. Omit if "
+    "  - achievements: AWARDS, HONOURS, RECOGNITIONS — things like "
+    "    'Dean's List', 'Employee of the Year', '1st place in X "
+    "    competition', 'Fulbright Scholar'. Distinct from project "
+    "    bullets and from experience-section achievements — only "
+    "    what's filed under its own header like 'Awards', 'Honors', "
+    "    'Achievements', 'Recognition'. NOT for certifications — see "
+    "    the next field.\n"
+    "  - certifications: NAMED CREDENTIALS, LICENSES, professional "
+    "    certifications — things with an `issuer` and sometimes a "
+    "    credential ID. Examples: 'AWS Certified Solutions Architect "
+    "    – Associate' (issuer: Amazon Web Services), 'Project "
+    "    Management Professional (PMP)' (issuer: PMI), 'Certified "
+    "    Public Accountant' (issuer: AICPA), 'Microsoft Certified: "
+    "    Azure Administrator Associate', 'Series 7'. Found under "
+    "    headers like 'Certifications', 'Licenses', 'Licenses & "
+    "    Certifications', 'Professional Certifications'. `name` is "
+    "    the credential title; `issuer` is the org that grants it "
+    "    (null if not stated); `date` is the earn / issue date as it "
+    "    appears (null if not stated); `credential_id` is the ID "
+    "    string when the resume includes one. Omit the section if "
     "    the resume has none.\n"
-    "  - section_order: a list of the resume's section headings in the "
-    "    order they appear, lowercased. Example: ['summary', 'experience', "
-    "    'projects', 'skills', 'education']. Used by downstream tooling "
-    "    to mirror the candidate's preferred ordering.\n"
+    "  - section_order: a list of the resume's section headings in "
+    "    the order they appear, lowercased. Use the canonical names "
+    "    where possible: 'summary', 'experience', 'projects', "
+    "    'skills', 'education', 'achievements', 'certifications'. "
+    "    Used by downstream tooling to mirror the candidate's "
+    "    preferred ordering.\n"
+    "\n"
+    "Misclassification trap to avoid:\n"
+    "  * A certification (e.g. 'AWS Certified Cloud Practitioner') is "
+    "    NOT an achievement. It goes in `certifications`, not "
+    "    `achievements`. The rule of thumb: if it has an issuer "
+    "    organisation or a credential ID, it's a certification.\n"
+    "  * An award (e.g. 'Dean's List, Fall 2022') is NOT a "
+    "    certification — it goes in `achievements`.\n"
     "\n"
     "Output strictly the JSON schema requested — no prose, no markdown."
 )
@@ -820,6 +905,9 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
     achievements = [
         a for a in (_to_profile_achievement(a) for a in llm.achievements) if a is not None
     ]
+    certifications = [
+        c for c in (_to_profile_certification(c) for c in llm.certifications) if c is not None
+    ]
     section_order = [s.strip().lower() for s in llm.section_order if s and s.strip()]
 
     return Profile(
@@ -835,6 +923,7 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
         education=education,
         projects=projects,
         achievements=achievements,
+        certifications=certifications,
         section_order=section_order,
     )
 
@@ -861,6 +950,18 @@ def _to_profile_achievement(entry: _LLMAchievement) -> ProfileAchievement | None
         title=title,
         description=(entry.description or "").strip(),
         date=(entry.date or "").strip() or None,
+    )
+
+
+def _to_profile_certification(entry: _LLMCertification) -> ProfileCertification | None:
+    name = (entry.name or "").strip()
+    if not name:
+        return None
+    return ProfileCertification(
+        name=name,
+        issuer=(entry.issuer or "").strip() or None,
+        date=(entry.date or "").strip() or None,
+        credential_id=(entry.credential_id or "").strip() or None,
     )
 
 

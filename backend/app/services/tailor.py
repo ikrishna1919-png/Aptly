@@ -126,6 +126,13 @@ class TailoredAchievement(BaseModel):
     date: str | None = None
 
 
+class TailoredCertification(BaseModel):
+    name: str
+    issuer: str | None = None
+    date: str | None = None
+    credential_id: str | None = None
+
+
 class TailoredResume(BaseModel):
     """The structured output of POST /api/tailor/generate."""
 
@@ -135,6 +142,7 @@ class TailoredResume(BaseModel):
     education: list[str] = Field(description="One line per education entry")
     projects: list[TailoredProject] = Field(default_factory=list)
     achievements: list[TailoredAchievement] = Field(default_factory=list)
+    certifications: list[TailoredCertification] = Field(default_factory=list)
     # The order sections appear in the final document, lowercased.
     # The renderer walks this list to decide which sections to emit
     # and in what order; sections with no content are skipped. Empty
@@ -370,9 +378,18 @@ _SYSTEM_GENERATE = (
     "    form string like 'Jan 2023 – Mar 2023' or '2023', or null.\n"
     "  - education: one line per entry; the candidate's profile is the "
     "    source of truth.\n"
-    "  - achievements: include when the profile has any.\n"
+    "  - achievements: include awards / honours / recognitions when "
+    "    the profile has any. Distinct from certifications — see "
+    "    next field.\n"
+    "  - certifications: include named credentials / licences from "
+    "    the profile when present. Each entry carries `name` "
+    "    (required), `issuer`, `date`, and `credential_id` — fill in "
+    "    what the profile provides, leave the rest null. Do NOT "
+    "    fabricate a missing issuer or date.\n"
     "  - section_order: lowercase identifiers in the order the document "
-    "    should render sections in.\n"
+    "    should render sections in. Valid values include: 'summary', "
+    "    'skills', 'experience', 'projects', 'education', "
+    "    'achievements', 'certifications'.\n"
     "\n"
     "In `ats_notes`, briefly explain (a) which JD-terminology choices "
     "you made, (b) which user-confirmed gaps you incorporated, and (c) "
