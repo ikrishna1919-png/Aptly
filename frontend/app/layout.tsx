@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Fraunces, Plus_Jakarta_Sans } from "next/font/google";
+import { Suspense } from "react";
 
+import { LoginModal } from "@/components/login-modal";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { AuthProvider } from "@/lib/auth-context";
@@ -82,6 +84,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </main>
             <SiteFooter />
           </div>
+          {/* Global sign-in modal — open state lives in the URL
+              (`?login=1`). Wrapped in Suspense because it reads
+              `useSearchParams`; the boundary keeps the rest of each
+              page statically renderable. */}
+          <Suspense fallback={null}>
+            <LoginModal />
+          </Suspense>
         </AuthProvider>
       </body>
     </html>

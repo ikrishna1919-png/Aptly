@@ -21,7 +21,7 @@ export function SiteFooter() {
           className="flex flex-col gap-2 text-xs sm:items-end"
         >
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 sm:justify-end">
-            <Link href="/get-started" className="hover:text-foreground">
+            <Link href="/?login=1" className="hover:text-foreground">
               Get started
             </Link>
             <Link href="/about" className="hover:text-foreground">
@@ -30,7 +30,7 @@ export function SiteFooter() {
             <Link href="/support" className="hover:text-foreground">
               Support
             </Link>
-            <Link href="/sign-in" className="hover:text-foreground">
+            <Link href="/?login=1" className="hover:text-foreground">
               Sign in
             </Link>
           </div>

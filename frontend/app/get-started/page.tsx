@@ -14,23 +14,21 @@ import {
 import { googleSignInUrl } from "@/lib/api";
 
 /**
- * `/get-started` — the landing page's "Get Started" CTA destination.
+ * `/get-started` — the manual "Create an account" page.
+ *
+ * ORPHANED ON PURPOSE: nothing in the current navigable flow links
+ * here. The live auth path is Google-only via the global login modal
+ * (`?login=1`), which is where the landing-page CTAs and the header
+ * "Sign in" now point. This page is the future home of email/password
+ * signup; it's kept in the codebase (not deleted) so it can be wired
+ * up to a manual-signup entry point when that ships.
+ *
  * A small, centred card that mirrors the create-account layouts most
  * modern SaaS sign-ups use: Google up top, a divider, then the
- * email-sign-up section underneath.
- *
- * Email/password sign-up is NOT implemented on the backend yet — the
- * current auth flow is Google-only. Per the brief: don't ship a
- * password field that doesn't actually create an account. So the
- * email section reads as "coming soon" rather than a fake form.
- * When email sign-up lands, swap the placeholder for the real
- * fields without changing anything else on the page.
- *
- * After Google auth completes the backend redirects through
- * `${FRONTEND_URL}/<next>` — we pass `next=/profile` so a fresh
- * sign-up lands on the profile editor (which is gated by
- * `RequireAuth`, not `RequireProfile`, so the empty seeded profile
- * doesn't bounce them back here).
+ * email-sign-up section underneath. Email/password sign-up is NOT
+ * implemented yet — per the brief, don't ship a password field that
+ * doesn't create an account, so the email section reads as
+ * "coming soon" rather than a fake form.
  */
 export default function GetStartedPage() {
   return (
@@ -46,7 +44,7 @@ function GetStartedInner() {
       <Card className="border-border/70 shadow-card">
         <CardHeader className="space-y-2 text-center">
           <CardTitle className="font-display text-2xl font-medium tracking-tight">
-            Create a profile
+            Create an account
           </CardTitle>
           <CardDescription>
             A minute to set up. Aptly only uses what you provide here — no

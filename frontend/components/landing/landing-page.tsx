@@ -31,6 +31,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useOpenLogin } from "@/lib/use-login-modal";
 
 /**
  * Public landing page rendered at `/` for logged-out visitors. The
@@ -304,7 +305,7 @@ function Hero() {
             variants={fadeUp}
             className="mt-7 flex flex-col items-center justify-center gap-3 sm:flex-row"
           >
-            <CtaButton href="/get-started" />
+            <CtaButton />
           </motion.div>
           <motion.p
             variants={fadeUp}
@@ -318,23 +319,23 @@ function Hero() {
   );
 }
 
-/** Primary CTA. Pulled out so the hover/tap motion is consistent
- * across the hero + the final CTA. */
-function CtaButton({ href }: { href: string }) {
+/** Primary CTA. Opens the global login modal (`?login=1`) — the live
+ * sign-up path is Google via that modal. Pulled out so the hover/tap
+ * motion is consistent across the hero + the final CTA. */
+function CtaButton() {
+  const openLogin = useOpenLogin();
   return (
     <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
       <Button
-        asChild
         size="lg"
+        onClick={() => openLogin()}
         className="group rounded-full px-7 text-base font-semibold shadow-sm transition-shadow hover:shadow-md"
       >
-        <Link href={href}>
-          Get Started
-          <ArrowRight
-            className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-0.5"
-            aria-hidden
-          />
-        </Link>
+        Get Started
+        <ArrowRight
+          className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-0.5"
+          aria-hidden
+        />
       </Button>
     </motion.div>
   );
@@ -752,12 +753,12 @@ function FinalCta() {
             <span className="italic text-primary">actually</span> hire you.
           </h2>
           <p className="mx-auto mt-5 max-w-xl text-base text-muted-foreground">
-            One click to create a profile. We&apos;ll surface the freshest
+            One click to create your account. We&apos;ll surface the freshest
             sponsorship-friendly jobs and tailor your application the moment
             your resume is in.
           </p>
           <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <CtaButton href="/get-started" />
+            <CtaButton />
           </div>
         </div>
       </SectionReveal>
