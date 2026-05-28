@@ -7,19 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { RequireAuth, useAuth } from "@/lib/auth-context";
+import { useAuth } from "@/lib/auth-context";
 
 const SUPPORT_EMAIL = "hello@aptly.fyi";
 
+// Public page — a contact form anyone can use. It prefills the signed-in
+// user's email when available, but works fine logged out.
 export default function ContactSettingsPage() {
-  return (
-    <RequireAuth>
-      <ContactInner />
-    </RequireAuth>
-  );
-}
-
-function ContactInner() {
   const { user } = useAuth();
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");

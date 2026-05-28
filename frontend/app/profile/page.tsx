@@ -3,6 +3,9 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { UserRound } from "lucide-react";
+
+import { SignInRequired } from "@/components/auth/sign-in-required";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,7 +42,7 @@ import {
   type ProfileSkillGroup,
   type ProfileVolunteer,
 } from "@/lib/api";
-import { RequireAuth, useAuth } from "@/lib/auth-context";
+import { useAuth } from "@/lib/auth-context";
 
 const EMPTY_PROFILE: Profile = {
   name: "",
@@ -146,18 +149,27 @@ const EMPTY_ADDITIONAL_SECTION: ProfileAdditionalSection = {
 };
 
 export default function ProfilePage() {
-  // The page itself is one big controlled form; gate the whole
-  // tree behind RequireAuth so the in-flight fetch doesn't 401
-  // before the redirect lands. The `?next=` param survives between
-  // the gate's redirect and the save handler — wrap in `<Suspense>`
-  // because `useSearchParams` opts the page out of static
-  // rendering and Next requires the boundary.
+  // The page is PUBLIC. Logged-out visitors get a "sign in" empty state
+  // instead of the editor (which needs their data); everyone else gets the
+  // editor. `<Suspense>` is required because `ProfileEditor` reads
+  // `useSearchParams` (for the `?next=` save redirect).
+  const { status } = useAuth();
+  if (status === "unauthenticated") {
+    return (
+      <SignInRequired
+        icon={UserRound}
+        title="Sign in to set up your profile"
+        body="Your profile powers resume tailoring. Sign in to build it and keep it in one place."
+        reason="profile"
+        cta="Sign in to set up your profile"
+      />
+    );
+  }
+  if (status === "loading") return null;
   return (
-    <RequireAuth>
-      <Suspense fallback={null}>
-        <ProfileEditor />
-      </Suspense>
-    </RequireAuth>
+    <Suspense fallback={null}>
+      <ProfileEditor />
+    </Suspense>
   );
 }
 

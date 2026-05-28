@@ -18,10 +18,7 @@ import {
 
 import { Logo } from "@/components/logo";
 import { SettingsMenu } from "@/components/settings-menu";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useAuth } from "@/lib/auth-context";
-import { useOpenLogin } from "@/lib/use-login-modal";
 
 /**
  * Top navigation for the app.
@@ -58,9 +55,7 @@ const APP_NAV: NavItem[] = [
 ];
 
 export function SiteHeader() {
-  const { status } = useAuth();
   const pathname = usePathname() || "/";
-  const openLogin = useOpenLogin();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
@@ -136,16 +131,9 @@ export function SiteHeader() {
             {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
           </button>
 
-          {status === "unauthenticated" && (
-            <Button
-              size="sm"
-              className="font-semibold"
-              onClick={() => openLogin()}
-            >
-              Sign in
-            </Button>
-          )}
-
+          {/* No top-right "Sign in" button — logged-out users sign in via the
+              Account menu's "Sign in" entry, the Get Started CTA, or any
+              gated action. */}
           <SettingsMenu />
         </div>
       </div>

@@ -1,16 +1,30 @@
 "use client";
 
+import { CreditCard } from "lucide-react";
+
+import { SignInRequired } from "@/components/auth/sign-in-required";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { RequireAuth } from "@/lib/auth-context";
+import { useAuth } from "@/lib/auth-context";
 
 export default function SubscriptionPage() {
-  return (
-    <RequireAuth>
-      <SubscriptionInner />
-    </RequireAuth>
-  );
+  // Public page. Logged-out visitors get a sign-in empty state (billing is
+  // personal); everyone else sees the plan.
+  const { status } = useAuth();
+  if (status === "unauthenticated") {
+    return (
+      <SignInRequired
+        icon={CreditCard}
+        title="Sign in to manage your subscription"
+        body="Aptly is free while in early access. Sign in to view your plan and manage billing when paid tiers arrive."
+        reason="subscription"
+        cta="Sign in to manage your subscription"
+      />
+    );
+  }
+  if (status === "loading") return null;
+  return <SubscriptionInner />;
 }
 
 function SubscriptionInner() {
