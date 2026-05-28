@@ -83,6 +83,20 @@ class Settings(BaseSettings):
     # now raises a clear 500 if this isn't set rather than silently
     # bouncing the user at localhost.
     frontend_url: str = Field(default="", alias="FRONTEND_URL")
+    # Optional `Domain` attribute for the session cookie. Set to a
+    # parent domain (e.g. `.aptly.fyi`) when the frontend and the
+    # backend live on sibling subdomains (`aptly.fyi` +
+    # `api.aptly.fyi`) and you want the SAME session cookie to be
+    # first-party for both. Leave empty for host-only cookies (the
+    # default — correct for local `next dev` and for the legacy
+    # Vercel-rewrite-proxy setup where the backend never sees a
+    # browser request directly).
+    #
+    # A leading `.` is preserved on set + on delete so the browser
+    # treats both operations as targeting the SAME cookie — without
+    # that, `delete_cookie` writes a different scope and the old
+    # cookie survives sign-out, breaking re-login.
+    cookie_domain: str = Field(default="", alias="COOKIE_DOMAIN")
     # Email of the operator who should inherit the existing
     # pre-multi-user data on first Google sign-in. The migration
     # writes this same value into `users.email` for the bootstrap

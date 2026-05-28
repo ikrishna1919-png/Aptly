@@ -252,6 +252,139 @@ def test_auth_logout_clears_session(factories, settings):
         config_module.get_settings.cache_clear()
 
 
+def test_session_middleware_configured_with_cookie_domain(monkeypatch):
+    """`create_app` MUST forward `COOKIE_DOMAIN` to SessionMiddleware
+    as the `domain` kwarg. Without it, the cookie is host-only on
+    `api.aptly.fyi` and the frontend on `aptly.fyi` never receives
+    it — sign-in completes silently but the next /me 401s and the
+    user is stuck on the sign-in page.
+
+    Inspect the middleware's actual `domain` attribute rather than
+    round-tripping a request, so the test pins the wiring directly
+    (and doesn't depend on any specific endpoint touching the
+    session)."""
+    import app.config as cfg  # noqa: PLC0415
+    from app.main import create_app  # noqa: PLC0415
+
+    with_domain = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test-session-secret",
+        GOOGLE_CLIENT_ID="x",
+        GOOGLE_CLIENT_SECRET="y",
+        GOOGLE_REDIRECT_URI="https://api.aptly.fyi/api/auth/google/callback",
+        FRONTEND_URL="https://aptly.fyi",
+        COOKIE_DOMAIN=".aptly.fyi",
+        ENVIRONMENT="production",
+        INITIAL_USER_EMAIL="owner@example.com",
+    )
+    cfg.get_settings.cache_clear()
+    monkeypatch.setattr(cfg, "get_settings", lambda: with_domain)
+    # `app.main` imported `get_settings` at module load — re-patch it
+    # there too so `create_app` reads the parent-domain config.
+    import app.main as main_module  # noqa: PLC0415
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: with_domain)
+
+    fresh_app = create_app()
+
+    # Walk the middleware stack and pick out SessionMiddleware. Starlette
+    # stores middleware as a list of `Middleware` records, each with
+    # `cls` + `kwargs`; we want the kwargs for the session entry.
+    session_kwargs = next(
+        (m.kwargs for m in fresh_app.user_middleware if m.cls.__name__ == "SessionMiddleware"),
+        None,
+    )
+    assert session_kwargs is not None, "SessionMiddleware not registered"
+    assert (
+        session_kwargs.get("domain") == ".aptly.fyi"
+    ), f"SessionMiddleware domain wiring missing: {session_kwargs}"
+    # Sanity-check the other attrs we always set, so this test also
+    # locks down the cookie's flag surface.
+    assert session_kwargs.get("same_site") == "lax"
+    assert session_kwargs.get("https_only") is True  # production env
+
+
+def test_session_middleware_omits_domain_when_env_unset(monkeypatch):
+    """When `COOKIE_DOMAIN` is empty (local dev OR the legacy
+    Vercel-rewrite-proxy setup), SessionMiddleware must NOT receive
+    a `domain` kwarg — Starlette would otherwise emit `Domain=` and
+    cause weird behaviour in some browsers. Host-only is the
+    correct default."""
+    import app.config as cfg  # noqa: PLC0415
+    from app.main import create_app  # noqa: PLC0415
+
+    no_domain = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test-session-secret",
+        ENVIRONMENT="development",
+        # COOKIE_DOMAIN deliberately unset.
+    )
+    cfg.get_settings.cache_clear()
+    monkeypatch.setattr(cfg, "get_settings", lambda: no_domain)
+    import app.main as main_module  # noqa: PLC0415
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: no_domain)
+    fresh_app = create_app()
+    session_kwargs = next(
+        (m.kwargs for m in fresh_app.user_middleware if m.cls.__name__ == "SessionMiddleware"),
+        None,
+    )
+    assert session_kwargs is not None
+    assert "domain" not in session_kwargs
+
+
+def test_auth_logout_carries_cookie_domain_when_configured(factories):
+    """When `COOKIE_DOMAIN=.aptly.fyi` is set, the logout's
+    delete-cookie header MUST carry the matching `Domain=.aptly.fyi`.
+    SessionMiddleware sets the cookie with that scope on sign-in so
+    it works first-party for both `aptly.fyi` and `api.aptly.fyi`;
+    deleting it requires the SAME scope or the browser keeps the
+    parent-domain cookie and the user can't sign back in.
+
+    This is the missing piece behind the "can't re-login after
+    sign-out" bug on the live `*.aptly.fyi` setup."""
+    with_domain = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test-session-secret",
+        GOOGLE_CLIENT_ID="test-client-id",
+        GOOGLE_CLIENT_SECRET="test-client-secret",
+        GOOGLE_REDIRECT_URI="https://api.aptly.fyi/api/auth/google/callback",
+        FRONTEND_URL="https://aptly.fyi",
+        COOKIE_DOMAIN=".aptly.fyi",
+        ENVIRONMENT="production",
+        INITIAL_USER_EMAIL="owner@example.com",
+    )
+    test_client = _client_with_user(factories, with_domain, user=None)
+    try:
+        res = test_client.post("/api/auth/logout")
+        assert res.status_code == 200
+        set_cookies = res.headers.get_list("set-cookie")
+        # Find the deletion entry (session cookie, with delete markers)
+        # and assert it carries the configured Domain.
+        deletes = [
+            c
+            for c in set_cookies
+            if c.lower().startswith("session=")
+            and ("max-age=0" in c.lower() or 'session=""' in c.lower() or "session=;" in c.lower())
+        ]
+        assert deletes, f"no session-cookie deletion in Set-Cookie: {set_cookies}"
+        header = deletes[0].lower()
+        # The scope MUST match what SessionMiddleware writes on set.
+        assert "domain=.aptly.fyi" in header, f"missing parent-domain scope: {deletes[0]}"
+        # And the rest of the cookie attributes still need to match
+        # so the browser treats this as the same cookie.
+        assert "path=/" in header
+        assert "samesite=lax" in header
+        assert "secure" in header  # production env
+        assert "httponly" in header
+    finally:
+        app.dependency_overrides.clear()
+        config_module.get_settings.cache_clear()
+
+
 def test_auth_logout_explicitly_deletes_cookie(factories, settings):
     """`POST /api/auth/logout` writes a Set-Cookie that DELETES the
     session cookie (empty value + Max-Age=0 / expired), not just
