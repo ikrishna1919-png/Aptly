@@ -102,7 +102,7 @@ export function JobFilters() {
       else next.set(key, String(value));
     }
     next.delete("offset");
-    startTransition(() => router.push(`/?${next.toString()}`));
+    startTransition(() => router.push(`/jobs?${next.toString()}`));
   }
 
   return (
@@ -268,7 +268,7 @@ export function JobFilters() {
           {activeCount > 0 && (
             <button
               type="button"
-              onClick={() => startTransition(() => router.push("/"))}
+              onClick={() => startTransition(() => router.push("/jobs"))}
               className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               Clear all

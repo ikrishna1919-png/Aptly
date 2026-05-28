@@ -132,7 +132,7 @@ export default function AdminPage() {
         <div className="flex items-center gap-2">
           <Badge variant="default">Admin</Badge>
           <Link
-            href="/"
+            href="/jobs"
             className="text-sm text-muted-foreground hover:text-foreground"
           >
             ← back to feed

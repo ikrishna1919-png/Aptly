@@ -66,7 +66,7 @@ export default async function JobDetailPage({
           breadcrumb context. */}
       <nav aria-label="Breadcrumb" className="mb-6 text-sm">
         <Link
-          href="/"
+          href="/jobs"
           className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <BackArrow />

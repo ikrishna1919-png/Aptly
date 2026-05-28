@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Fraunces, Manrope } from "next/font/google";
 
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
@@ -8,7 +8,23 @@ import { cn } from "@/lib/utils";
 
 import "./globals.css";
 
-const inter = Inter({
+// Display face for headlines + section titles. Fraunces is a
+// contemporary serif with optical-size + soft variable axes — it
+// reads modern but warm, which fits the landing page's "credible,
+// reassuring, not hypey" tone for an audience navigating visa
+// stress. Loaded with the variable suffix as a Tailwind CSS variable
+// so we can target it explicitly via the `font-display` utility.
+const fraunces = Fraunces({
+  subsets: ["latin"],
+  variable: "--font-display",
+  display: "swap",
+  axes: ["opsz", "SOFT"],
+});
+
+// Body face. Manrope is a humanist sans with rounded geometry — more
+// character than Inter / Roboto / system stacks (which the design
+// brief explicitly rules out as "generic AI aesthetic").
+const manrope = Manrope({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
@@ -16,11 +32,11 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: {
-    default: "Aptly — jobs that move",
+    default: "Aptly — jobs that actually sponsor visas",
     template: "%s · Aptly",
   },
   description:
-    "Fresh job postings from real ATS boards, filtered for what matters: visa sponsorship, location, skills. Updated every six hours.",
+    "Find the jobs that will actually sponsor your visa, and tailor your resume to land them — built for international students and H-1B candidates.",
   metadataBase: new URL("https://aptly.local"),
 };
 
@@ -30,7 +46,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body
         className={cn(
           "min-h-screen bg-background font-sans text-foreground antialiased",
-          inter.variable,
+          fraunces.variable,
+          manrope.variable,
         )}
       >
         <a

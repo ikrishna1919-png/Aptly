@@ -16,7 +16,7 @@ export default function JobNotFound() {
         is wrong. The feed always shows the freshest roles.
       </p>
       <Button asChild className="mt-6 rounded-full">
-        <Link href="/">Back to jobs</Link>
+        <Link href="/jobs">Back to jobs</Link>
       </Button>
     </div>
   );
