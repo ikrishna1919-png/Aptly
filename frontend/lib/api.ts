@@ -165,6 +165,18 @@ export type ProfileAchievement = {
   date?: string | null;
 };
 
+/** Distinct from `ProfileAchievement`: certifications are named
+ * credentials with an issuer (AWS, PMI, Microsoft, etc.) and
+ * sometimes a credential ID. Backend parser keeps them separate
+ * to fix a misclassification where every credential ended up in
+ * achievements. */
+export type ProfileCertification = {
+  name: string;
+  issuer?: string | null;
+  date?: string | null;
+  credential_id?: string | null;
+};
+
 export type Profile = {
   name: string;
   headline?: string | null;
@@ -178,6 +190,7 @@ export type Profile = {
   education: ProfileEducation[];
   projects: ProfileProject[];
   achievements: ProfileAchievement[];
+  certifications: ProfileCertification[];
   // Order the user's resume presents sections in (lowercase
   // identifiers). The tailor service mirrors this in the generated
   // resume. Defaulted to [] on the backend so the form always sees

@@ -184,6 +184,7 @@ def render_docx(resume: TailoredResume, candidate: dict[str, Any] | None = None)
         "projects",
         "education",
         "achievements",
+        "certifications",
     )
     order = [s for s in (condensed.section_order or []) if s in default_order]
     if not order:
@@ -253,6 +254,29 @@ def render_docx(resume: TailoredResume, candidate: dict[str, Any] | None = None)
                 )
                 if ach.description:
                     doc.add_paragraph(ach.description)
+        elif section == "certifications" and condensed.certifications:
+            _section_heading(doc, "Certifications")
+            for cert in condensed.certifications:
+                # Left line: certification name (+ issuer when present
+                # — recruiters skim the issuer to gauge weight). Right
+                # line: date in the same tab-stop column as the other
+                # entry types so the visual rhythm of the document
+                # holds.
+                left = cert.name
+                if cert.issuer:
+                    left = f"{cert.name}, {cert.issuer}"
+                _two_column_line(
+                    doc,
+                    left_text=left,
+                    right_text=cert.date or "",
+                    right_tab_pos=right_tab_pos,
+                    left_bold=True,
+                )
+                if cert.credential_id:
+                    p = doc.add_paragraph()
+                    cid_run = p.add_run(f"Credential ID: {cert.credential_id}")
+                    cid_run.font.size = Pt(10)
+                    cid_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
 
     buf = io.BytesIO()
     doc.save(buf)

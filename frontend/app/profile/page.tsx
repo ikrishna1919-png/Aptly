@@ -28,6 +28,7 @@ import {
   type ParseRunStatus,
   type Profile,
   type ProfileAchievement,
+  type ProfileCertification,
   type ProfileEducation,
   type ProfileExperience,
   type ProfileProject,
@@ -47,6 +48,7 @@ const EMPTY_PROFILE: Profile = {
   education: [],
   projects: [],
   achievements: [],
+  certifications: [],
   section_order: [],
 };
 
@@ -79,6 +81,13 @@ const EMPTY_ACHIEVEMENT: ProfileAchievement = {
   title: "",
   description: "",
   date: "",
+};
+
+const EMPTY_CERTIFICATION: ProfileCertification = {
+  name: "",
+  issuer: "",
+  date: "",
+  credential_id: "",
 };
 
 export default function ProfilePage() {
@@ -324,6 +333,32 @@ function ProfileEditor() {
     setProfile((p) => ({
       ...p,
       achievements: p.achievements.filter((_, idx) => idx !== i),
+    }));
+  }
+
+  function updateCertification(
+    i: number,
+    field: keyof ProfileCertification,
+    value: string,
+  ) {
+    setProfile((p) => {
+      const next = [...p.certifications];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, certifications: next };
+    });
+  }
+
+  function addCertification() {
+    setProfile((p) => ({
+      ...p,
+      certifications: [...p.certifications, { ...EMPTY_CERTIFICATION }],
+    }));
+  }
+
+  function removeCertification(i: number) {
+    setProfile((p) => ({
+      ...p,
+      certifications: p.certifications.filter((_, idx) => idx !== i),
     }));
   }
 
@@ -771,6 +806,85 @@ function ProfileEditor() {
 
             <Separator />
 
+            {/* Certifications — distinct from Achievements: this is
+                where named credentials with an issuer live (AWS,
+                PMP, CPA, Azure, etc.). The parser sorts these into
+                their own bucket; the form mirrors that distinction. */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Certifications</h3>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addCertification}
+                >
+                  + Add certification
+                </Button>
+              </div>
+              {profile.certifications.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  No certifications yet.
+                </p>
+              )}
+              {profile.certifications.map((cert, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Name" required>
+                      <Input
+                        required
+                        value={cert.name}
+                        onChange={(e) =>
+                          updateCertification(i, "name", e.target.value)
+                        }
+                        placeholder="AWS Certified Solutions Architect"
+                      />
+                    </Field>
+                    <Field label="Issuer">
+                      <Input
+                        value={cert.issuer ?? ""}
+                        onChange={(e) =>
+                          updateCertification(i, "issuer", e.target.value)
+                        }
+                        placeholder="Amazon Web Services"
+                      />
+                    </Field>
+                    <Field label="Date">
+                      <Input
+                        value={cert.date ?? ""}
+                        onChange={(e) =>
+                          updateCertification(i, "date", e.target.value)
+                        }
+                        placeholder="2024 or Mar 2024"
+                      />
+                    </Field>
+                    <Field label="Credential ID">
+                      <Input
+                        value={cert.credential_id ?? ""}
+                        onChange={(e) =>
+                          updateCertification(i, "credential_id", e.target.value)
+                        }
+                        placeholder="ABC-12345"
+                      />
+                    </Field>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removeCertification(i)}
+                    >
+                      Remove certification
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm">
                 {loading && <span className="text-muted-foreground">Loading…</span>}
@@ -916,6 +1030,12 @@ function normaliseProfile(p: Profile): Profile {
       description: a.description ?? "",
       date: a.date ?? "",
     })),
+    certifications: (p.certifications ?? []).map((c) => ({
+      name: c.name ?? "",
+      issuer: c.issuer ?? "",
+      date: c.date ?? "",
+      credential_id: c.credential_id ?? "",
+    })),
     section_order: p.section_order ?? [],
   };
 }
@@ -945,6 +1065,12 @@ function cleanForSave(p: Profile): Profile {
     achievements: p.achievements.map((a) => ({
       ...a,
       date: opt(a.date),
+    })),
+    certifications: p.certifications.map((c) => ({
+      ...c,
+      issuer: opt(c.issuer),
+      date: opt(c.date),
+      credential_id: opt(c.credential_id),
     })),
   };
 }
