@@ -88,7 +88,12 @@ export function SettingsMenu() {
 
   const handleItemClick =
     (item: Item) => (e: MouseEvent<HTMLAnchorElement>) => {
-      if (item.gated && !signedIn) {
+      // Intercept gated items ONLY when auth has resolved AND the user is
+      // logged out. While `loading` we let the click through (the route
+      // guard / client gate handles it); a logged-in user always navigates.
+      // Treating `loading` as logged-out here would wrongly pop the modal
+      // for authenticated users on first paint.
+      if (item.gated && !loading && !user) {
         e.preventDefault();
         setOpen(false);
         openLogin(item.href);

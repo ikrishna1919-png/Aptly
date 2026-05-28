@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, type ReactNode } from "react";
 import {
   motion,
@@ -32,6 +33,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useOpenLogin } from "@/lib/use-login-modal";
+import { useAuth } from "@/lib/auth-context";
 
 /**
  * Public landing page rendered at `/` for logged-out visitors. The
@@ -319,16 +321,33 @@ function Hero() {
   );
 }
 
-/** Primary CTA. Opens the global login modal (`?login=1`) — the live
- * sign-up path is Google via that modal. Pulled out so the hover/tap
- * motion is consistent across the hero + the final CTA. */
+/** Primary CTA. Honors auth state:
+ *   - loading   → disabled (don't act before we know who they are).
+ *   - logged-in → straight to the feed (`/jobs`).
+ *   - logged-out→ open the global login modal (`?login=1`).
+ * Pulled out so the hover/tap motion is consistent across the hero +
+ * the final CTA. */
 function CtaButton() {
+  const { user, loading } = useAuth();
   const openLogin = useOpenLogin();
+  const router = useRouter();
+
+  const onClick = () => {
+    if (loading) return;
+    if (user) {
+      router.push("/jobs");
+      return;
+    }
+    openLogin();
+  };
+
   return (
     <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
       <Button
         size="lg"
-        onClick={() => openLogin()}
+        onClick={onClick}
+        disabled={loading}
+        aria-busy={loading}
         className="group rounded-full px-7 text-base font-semibold shadow-sm transition-shadow hover:shadow-md"
       >
         Get Started
