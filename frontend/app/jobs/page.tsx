@@ -1,5 +1,10 @@
 import { Compass } from "lucide-react";
 
+// The jobs shell (in the layout) is client-driven and reads
+// `useSearchParams`; render this route dynamically so static export
+// doesn't bail on the CSR hook. The list is fetched client-side anyway.
+export const dynamic = "force-dynamic";
+
 /**
  * `/jobs` with no selection. Renders into the shell's right pane (desktop)
  * as a quiet empty state. On mobile, `/jobs` shows the list only and this

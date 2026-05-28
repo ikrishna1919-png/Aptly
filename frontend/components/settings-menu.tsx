@@ -41,17 +41,18 @@ type Item = {
   href: string;
   icon: LucideIcon;
   label: string;
-  /** Requires auth — intercepted to open the login modal when the
-   * visitor is signed out. */
-  gated: boolean;
 };
 
+// These are plain links. Profile/Subscription/Language/Contact live under
+// the still-gated `/profile` + `/settings` prefixes, so a logged-out click
+// navigates and the middleware redirects to the login modal — no per-item
+// interception needed here. About us is public.
 const ITEMS: Item[] = [
-  { href: "/profile", icon: UserIcon, label: "Profile", gated: true },
-  { href: "/settings/subscription", icon: CreditCard, label: "Subscription", gated: true },
-  { href: "/settings/language", icon: Globe2, label: "Language", gated: true },
-  { href: "/settings/contact", icon: Mail, label: "Contact us", gated: true },
-  { href: "/about", icon: Info, label: "About us", gated: false },
+  { href: "/profile", icon: UserIcon, label: "Profile" },
+  { href: "/settings/subscription", icon: CreditCard, label: "Subscription" },
+  { href: "/settings/language", icon: Globe2, label: "Language" },
+  { href: "/settings/contact", icon: Mail, label: "Contact us" },
+  { href: "/about", icon: Info, label: "About us" },
 ];
 
 export function SettingsMenu() {
@@ -86,20 +87,10 @@ export function SettingsMenu() {
   const signedIn = status === "authenticated" && !!user;
   const initials = user ? computeInitials(user.name, user.email) : null;
 
-  const handleItemClick =
-    (item: Item) => (e: MouseEvent<HTMLAnchorElement>) => {
-      // Intercept gated items ONLY when the user is DEFINITIVELY signed
-      // out (a real 401). During "loading"/"error" we let the click
-      // through and trust the cookie + server — never pop the modal for a
-      // signed-in user whose `/me` is slow or errored.
-      if (item.gated && status === "unauthenticated") {
-        e.preventDefault();
-        setOpen(false);
-        openLogin(item.href);
-        return;
-      }
-      setOpen(false);
-    };
+  // Plain links — just close the menu on click. Gated destinations
+  // (Profile/Subscription/…) are page-gated by middleware, which prompts
+  // sign-in for logged-out visitors.
+  const closeOnClick = () => setOpen(false);
 
   return (
     <div ref={containerRef} className="relative">
@@ -182,7 +173,7 @@ export function SettingsMenu() {
                       ? pathname === "/about"
                       : pathname === item.href
                   }
-                  onClick={handleItemClick(item)}
+                  onClick={closeOnClick}
                 />
               ))}
               {signedIn && user!.is_admin && (

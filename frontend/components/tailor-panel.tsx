@@ -24,10 +24,12 @@ import {
   downloadResume,
   generateTailoredResume,
 } from "@/lib/api";
+import { useAuthGate } from "@/lib/use-login-modal";
 
 type Step = "idle" | "analyzing" | "answering" | "generating" | "ready";
 
 export function TailorPanel({ job }: { job: Job }) {
+  const gate = useAuthGate();
   const [step, setStep] = useState<Step>("idle");
   const [demoMode, setDemoMode] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -131,7 +133,15 @@ export function TailorPanel({ job }: { job: Job }) {
             <p className="text-sm text-muted-foreground">
               Uses Claude Sonnet 4.6. Results are cached per job.
             </p>
-            <Button onClick={() => void onAnalyze()}>Tailor my resume</Button>
+            <Button
+              onClick={() => {
+                // Gate the action, not the page: logged-out users get the
+                // "Sign in to tailor your resume" modal instead of a 401.
+                if (gate("tailor")) void onAnalyze();
+              }}
+            >
+              Tailor my resume
+            </Button>
           </div>
         )}
 

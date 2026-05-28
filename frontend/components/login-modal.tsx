@@ -31,7 +31,34 @@ import { useAuth } from "@/lib/auth-context";
  * Google is the only working sign-in path for now (manual email/password
  * signup isn't built), so the "Create one" line is a disabled
  * placeholder, not a link.
+ *
+ * Copy adapts to the `?reason=` an action passed (via `useAuthGate`), so a
+ * gated "Apply" click reads "Sign in to apply", etc. Plain sign-ins get
+ * the generic default.
  */
+const DEFAULT_COPY = {
+  title: "Sign in to Aptly",
+  body: "Continue with Google to find jobs that sponsor visas and tailor your applications. We only read your name & email.",
+};
+const REASON_COPY: Record<string, { title: string; body: string }> = {
+  apply: {
+    title: "Sign in to apply",
+    body: "Sign in with Google to apply to this role and keep track of it. We only read your name & email.",
+  },
+  tailor: {
+    title: "Sign in to tailor your resume",
+    body: "Sign in with Google to tailor your resume to this job. We only read your name & email.",
+  },
+  track: {
+    title: "Sign in to track your applications",
+    body: "Sign in with Google to track your job applications in one place. We only read your name & email.",
+  },
+  save: {
+    title: "Sign in to save jobs",
+    body: "Sign in with Google to save jobs and come back to them later. We only read your name & email.",
+  },
+};
+
 export function LoginModal() {
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -41,6 +68,10 @@ export function LoginModal() {
   const open = searchParams.get("login") === "1";
   const nextParam = searchParams.get("next") || "/jobs";
   const hadError = searchParams.get("error") === "oauth";
+  // Contextual reason → copy. Set by `useAuthGate` when an action triggers
+  // the modal; absent for a plain sign-in (generic copy).
+  const reason = searchParams.get("reason");
+  const message = REASON_COPY[reason ?? ""] ?? DEFAULT_COPY;
 
   // Strip the modal's query params without touching the rest of the
   // URL. `replace` (not push) so closing doesn't add a history entry.
@@ -49,6 +80,7 @@ export function LoginModal() {
     params.delete("login");
     params.delete("next");
     params.delete("error");
+    params.delete("reason");
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   }, [router, pathname, searchParams]);
@@ -70,11 +102,8 @@ export function LoginModal() {
     >
       <DialogContent>
         <div className="space-y-2 text-center">
-          <DialogTitle>Sign in to Aptly</DialogTitle>
-          <DialogDescription>
-            Continue with Google to find jobs that sponsor visas and tailor
-            your applications. We only read your name &amp; email.
-          </DialogDescription>
+          <DialogTitle>{message.title}</DialogTitle>
+          <DialogDescription>{message.body}</DialogDescription>
         </div>
 
         <div className="mt-2 space-y-4">

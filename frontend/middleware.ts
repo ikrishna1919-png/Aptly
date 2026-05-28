@@ -45,14 +45,5 @@ export const config = {
    * static assets, the API proxy, and public pages. Kept in sync with
    * `GATED_PREFIXES` in `lib/routes.ts`.
    */
-  matcher: [
-    "/jobs/:path*",
-    "/applications/:path*",
-    "/interview-prep/:path*",
-    "/ats/:path*",
-    "/email-finder/:path*",
-    "/profile/:path*",
-    "/settings/:path*",
-    "/admin/:path*",
-  ],
+  matcher: ["/profile/:path*", "/settings/:path*", "/admin/:path*"],
 };
