@@ -278,8 +278,24 @@ def auth_logout(request: Request) -> dict[str, bool]:
 def _build_frontend_url(settings: Settings, path: str, **query: str) -> str:
     """Combine `settings.frontend_url` + a path + optional query
     args. Defensive against open-redirect: only the configured
-    frontend URL is ever the host."""
-    base = settings.frontend_url.rstrip("/")
+    frontend URL is ever the host.
+
+    Fails loud with a 500 when `FRONTEND_URL` isn't configured.
+    Previously this silently defaulted to `http://localhost:3000`
+    which caused `ERR_CONNECTION_REFUSED` for users signing in on
+    the live site — the misleading bounce-to-localhost was worse
+    than a clear error message.
+    """
+    base = (settings.frontend_url or "").rstrip("/")
+    if not base:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "FRONTEND_URL is not configured on the backend. Set it to the "
+                "deployed frontend origin (e.g. https://aptly-buvg.vercel.app) "
+                "so the OAuth callback knows where to send the user."
+            ),
+        )
     if not path.startswith("/"):
         path = "/" + path
     # Reject any absolute URL passed through `next=` — only same-origin

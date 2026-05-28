@@ -61,7 +61,9 @@ but `/api/auth/google/login` returns 503.
 | `GOOGLE_CLIENT_SECRET` | yes | Same place. |
 | `GOOGLE_REDIRECT_URI` | yes | Full URL of the callback, e.g. `https://api.aptly.app/api/auth/google/callback`. Must match what's registered in the console exactly. |
 | `SESSION_SECRET` | yes (prod) | Long random string — signs the session cookie. The default is an obvious placeholder so deploys can't accidentally ship without setting this. Rotate to invalidate every session. |
-| `FRONTEND_URL` | yes | Where to bounce the user after a successful OAuth callback. Local dev: `http://localhost:3000`. Prod: the Vercel deployment URL. |
+| `FRONTEND_URL` | **yes (no default)** | Where to bounce the user after a successful OAuth callback — e.g. `https://aptly-buvg.vercel.app` in prod, `http://localhost:3000` for local dev. **There is intentionally no default**: a missing value raises HTTP 500 from `/api/auth/google/login` so a misconfigured deploy fails loud instead of silently redirecting users at `localhost:3000` and showing `ERR_CONNECTION_REFUSED`. |
+| `CORS_ORIGINS` | yes | Comma-separated list of origins allowed to send credentialed requests. **Must explicitly include the frontend origin** (e.g. `https://aptly-buvg.vercel.app`) — browsers reject `Access-Control-Allow-Origin: *` when `allow_credentials=True`. |
+| `ENVIRONMENT` | yes (prod) | Set to `production` outside local dev so the session cookie picks up `SameSite=None; Secure` for cross-origin auth between Vercel and Render. Anything else (e.g. `development`) keeps `SameSite=Lax` + `Secure=False` so `next dev` over HTTP works. |
 | `INITIAL_USER_EMAIL` | yes (first deploy) | The Google address of the owner. Migration 0012 seeds a `users` row with this email + `google_subject_id=NULL`; on the owner's first sign-in the auth handler links the Google `sub` to that row, preserving the existing single-user data. After that this var is informational only. |
 
 Google Cloud setup (one-time):
@@ -80,6 +82,22 @@ Google Cloud setup (one-time):
 The frontend needs `NEXT_PUBLIC_API_URL` to point at the backend
 host so the session cookie rides correctly on cross-origin fetches
 (set on Vercel; `http://localhost:8000` for local dev).
+
+Cross-origin cookie sanity-check: the frontend (Vercel) and the
+backend (Render) are on different origins, so the session cookie
+crosses sites on every credentialed fetch. The combination that
+actually works in modern browsers is:
+
+  * Backend session cookie: `SameSite=None; Secure; HttpOnly` in
+    production (driven by `ENVIRONMENT=production`), `SameSite=Lax;
+    HttpOnly` in dev. `Secure` is required by browsers when
+    `SameSite=None`; `HttpOnly` is set unconditionally by Starlette's
+    `SessionMiddleware`.
+  * Backend CORS: `allow_credentials=True` AND `allow_origins`
+    listing the frontend origin explicitly — wildcards are rejected
+    by browsers when combined with credentials.
+  * Frontend `fetch` / `axios`: every call to the backend uses
+    `credentials: 'include'` (audited in `frontend/lib/api.ts`).
 
 ## Current phase
 **Phase 0 — Foundation.** Goal: clean monorepo, Postgres wired with one real

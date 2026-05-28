@@ -16,23 +16,39 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Aptly API", version="0.1.0")
 
     # SessionMiddleware must wrap the request before any handler that
-    # touches `request.session`. SameSite=lax is the right default
-    # for an OAuth callback flow: Google → /api/auth/google/callback
-    # is a cross-site GET and `lax` allows the cookie on that hop
-    # while blocking it on the more dangerous cross-site POST /
-    # script contexts. `https_only` is on outside development so the
-    # cookie can't ride along on plain-HTTP fetches in production;
-    # off in dev so `next dev` over HTTP works.
+    # touches `request.session`.
+    #
+    # Cookie attrs are environment-dependent:
+    #   * Production: SameSite=None + Secure=True. The Vercel
+    #     frontend and the Render backend are on different origins,
+    #     so the session cookie must be sent on cross-site fetches —
+    #     `Lax` silently drops the cookie on the cross-origin AJAX
+    #     call from the frontend's auth bootstrap, leaving the user
+    #     looking permanently signed out. `None` requires `Secure`,
+    #     which is fine on HTTPS.
+    #   * Local dev: SameSite=Lax + Secure=False so `next dev` over
+    #     plain HTTP at `http://localhost:3000` works. Cookies with
+    #     `Secure` won't ride on http:// hops; cookies with
+    #     `SameSite=none` REQUIRE Secure, so lax is the only option
+    #     that survives the localhost flow.
+    is_dev = settings.environment == "development"
+    same_site = "lax" if is_dev else "none"
+    https_only = not is_dev
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.session_secret,
-        same_site="lax",
-        https_only=settings.environment != "development",
+        same_site=same_site,
+        https_only=https_only,
         # Two-week sessions: long enough that a daily user rarely
         # re-auths, short enough that a lost device's cookie
         # eventually goes stale.
         max_age=60 * 60 * 24 * 14,
     )
+    # CORS must explicitly list the frontend origin — browsers reject
+    # `Access-Control-Allow-Origin: *` together with
+    # `Access-Control-Allow-Credentials: true`. The `cors_origin_list`
+    # property splits `CORS_ORIGINS` on commas; make sure
+    # `FRONTEND_URL` is in there for prod.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,

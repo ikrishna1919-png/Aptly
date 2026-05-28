@@ -231,3 +231,197 @@ def test_oauth_start_503s_when_unconfigured(factories):
     finally:
         app.dependency_overrides.clear()
         config_module.get_settings.cache_clear()
+
+
+# ── Post-login redirect target ─────────────────────────────────────────────
+
+
+def test_oauth_callback_500s_when_frontend_url_unset_via_build_url():
+    """The auth callback bounces the user back to `FRONTEND_URL`. If
+    it isn't configured the helper raises an explicit 500 instead of
+    falling back to `http://localhost:3000` — the localhost default
+    caused `ERR_CONNECTION_REFUSED` for prod sign-ins."""
+    from fastapi import HTTPException
+
+    from app.api.auth import _build_frontend_url
+
+    unconfigured = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test",
+        # No FRONTEND_URL.
+    )
+    with pytest.raises(HTTPException) as exc:
+        _build_frontend_url(unconfigured, "/")
+    assert exc.value.status_code == 500
+    assert "FRONTEND_URL" in exc.value.detail
+
+
+def test_oauth_start_503_includes_frontend_url_in_requirements():
+    """`has_google_oauth` now requires `frontend_url` too, so the
+    start endpoint won't kick off OAuth and 500 on callback — it
+    fails up front."""
+    settings = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test",
+        GOOGLE_CLIENT_ID="x",
+        GOOGLE_CLIENT_SECRET="y",
+        GOOGLE_REDIRECT_URI="https://api.example/api/auth/google/callback",
+        # Deliberately no FRONTEND_URL.
+    )
+    assert settings.has_google_oauth is False
+
+
+def test_oauth_fully_configured_requires_all_four_envs():
+    settings = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test",
+        GOOGLE_CLIENT_ID="x",
+        GOOGLE_CLIENT_SECRET="y",
+        GOOGLE_REDIRECT_URI="https://api.example/api/auth/google/callback",
+        FRONTEND_URL="https://aptly-buvg.vercel.app",
+    )
+    assert settings.has_google_oauth is True
+
+
+def test_build_frontend_url_strips_trailing_slash_and_assembles_path():
+    """Combining a `FRONTEND_URL` that ends in `/` with a path that
+    starts with `/` must NOT yield a double slash — the trailing
+    slash is stripped before composition."""
+    from app.api.auth import _build_frontend_url
+
+    settings = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test",
+        FRONTEND_URL="https://aptly-buvg.vercel.app/",
+    )
+    assert _build_frontend_url(settings, "/profile") == "https://aptly-buvg.vercel.app/profile"
+    assert (
+        _build_frontend_url(settings, "/sign-in", error="oauth")
+        == "https://aptly-buvg.vercel.app/sign-in?error=oauth"
+    )
+
+
+def test_build_frontend_url_rejects_absolute_next_path():
+    """Open-redirect mitigation: a `next=` that's an absolute URL
+    must NOT become the redirect target — only paths relative to
+    `FRONTEND_URL` are honoured."""
+    from app.api.auth import _build_frontend_url
+
+    settings = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        ADMIN_TOKEN="t",
+        SESSION_SECRET="test",
+        FRONTEND_URL="https://aptly-buvg.vercel.app",
+    )
+    # Absolute-URL `next` collapses to "/" — never lets the user be
+    # bounced to evil.com.
+    assert (
+        _build_frontend_url(settings, "https://evil.com/steal") == "https://aptly-buvg.vercel.app/"
+    )
+    assert _build_frontend_url(settings, "//evil.com/steal") == "https://aptly-buvg.vercel.app/"
+
+
+# ── Cross-origin session cookie attributes ─────────────────────────────────
+
+
+def test_session_cookie_uses_samesite_none_in_production():
+    """Cross-origin auth between Vercel (frontend) and Render
+    (backend) requires SameSite=None + Secure. `Lax` silently
+    drops the cookie on the cross-site /api/auth/me fetch the
+    frontend bootstraps with, leaving the user looking
+    permanently signed out."""
+    import os
+
+    from starlette.middleware.sessions import SessionMiddleware
+
+    from app.main import create_app
+
+    # Snapshot + override the environment so the app factory sees
+    # `production`.
+    prev_env = os.environ.get("ENVIRONMENT")
+    os.environ["ENVIRONMENT"] = "production"
+    try:
+        from app import config as cm
+
+        cm.get_settings.cache_clear()
+        app = create_app()
+        # Find the SessionMiddleware on the stack. Starlette stores
+        # user-middleware as `Middleware(cls, options)` entries on
+        # `app.user_middleware`.
+        session_mw = next(m for m in app.user_middleware if m.cls is SessionMiddleware)
+        kwargs = session_mw.kwargs
+        assert kwargs.get("same_site") == "none"
+        assert kwargs.get("https_only") is True
+    finally:
+        if prev_env is None:
+            os.environ.pop("ENVIRONMENT", None)
+        else:
+            os.environ["ENVIRONMENT"] = prev_env
+        cm.get_settings.cache_clear()
+
+
+def test_session_cookie_uses_samesite_lax_in_development():
+    """Local dev runs over HTTP at http://localhost:3000;
+    `SameSite=None` would require `Secure=True` which drops the
+    cookie on the plain-HTTP loopback. Keep `Lax` + no Secure flag
+    for dev so `next dev` keeps working."""
+    import os
+
+    from starlette.middleware.sessions import SessionMiddleware
+
+    from app.main import create_app
+
+    prev_env = os.environ.get("ENVIRONMENT")
+    os.environ["ENVIRONMENT"] = "development"
+    try:
+        from app import config as cm
+
+        cm.get_settings.cache_clear()
+        app = create_app()
+        session_mw = next(m for m in app.user_middleware if m.cls is SessionMiddleware)
+        kwargs = session_mw.kwargs
+        assert kwargs.get("same_site") == "lax"
+        assert kwargs.get("https_only") is False
+    finally:
+        if prev_env is None:
+            os.environ.pop("ENVIRONMENT", None)
+        else:
+            os.environ["ENVIRONMENT"] = prev_env
+        cm.get_settings.cache_clear()
+
+
+def test_cors_middleware_explicitly_lists_frontend_origin_with_credentials():
+    """Browsers reject `Access-Control-Allow-Origin: *` together
+    with `Access-Control-Allow-Credentials: true`. Pin that the
+    CORS middleware uses an allow-list AND has credentials on."""
+    import os
+
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from app.main import create_app
+
+    prev_cors = os.environ.get("CORS_ORIGINS")
+    os.environ["CORS_ORIGINS"] = "https://aptly-buvg.vercel.app"
+    try:
+        from app import config as cm
+
+        cm.get_settings.cache_clear()
+        app = create_app()
+        cors_mw = next(m for m in app.user_middleware if m.cls is CORSMiddleware)
+        kwargs = cors_mw.kwargs
+        assert kwargs.get("allow_credentials") is True
+        origins = kwargs.get("allow_origins", [])
+        # Wildcards forbidden — they'd be silently rejected by the
+        # browser when combined with credentials.
+        assert "*" not in origins
+        assert "https://aptly-buvg.vercel.app" in origins
+    finally:
+        if prev_cors is None:
+            os.environ.pop("CORS_ORIGINS", None)
+        else:
+            os.environ["CORS_ORIGINS"] = prev_cors
+        cm.get_settings.cache_clear()
