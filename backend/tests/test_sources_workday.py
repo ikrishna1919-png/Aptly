@@ -77,8 +77,7 @@ _DETAIL_DES = {
         "title": "Product Designer",
         # No externalUrl — adapter must fall back to the public-jobs URL.
         "jobDescription": (
-            "<p>Design the next-gen interior dashboard. "
-            "We do not sponsor visas for this role.</p>"
+            "<p>Design the next-gen interior dashboard. We do not sponsor visas for this role.</p>"
         ),
         "location": "Remote - US",
         "startDate": "2026-05-27",

@@ -137,7 +137,7 @@ def test_upload_endpoint_runs_parse_and_returns_run_id(upload_client):
     the status endpoint, get a `success` row with the extracted
     profile."""
     data = _make_minimal_docx(
-        "Jordan Singh\n" "Software Engineer\n" "Brooklyn, NY · jordan@example.com · 555-123-4567\n"
+        "Jordan Singh\nSoftware Engineer\nBrooklyn, NY · jordan@example.com · 555-123-4567\n"
     )
     files = {
         "file": (

@@ -28,20 +28,26 @@ import {
   type ParseRunStatus,
   type Profile,
   type ProfileAchievement,
+  type ProfileAdditionalSection,
+  type ProfileAffiliation,
   type ProfileCertification,
   type ProfileEducation,
   type ProfileExperience,
+  type ProfileLanguage,
   type ProfileProject,
+  type ProfilePublication,
+  type ProfileVolunteer,
 } from "@/lib/api";
 import { RequireAuth } from "@/lib/auth-context";
 
 const EMPTY_PROFILE: Profile = {
   name: "",
   headline: "",
+  headline_inferred: false,
   email: "",
   phone: "",
   location: "",
-  links: { linkedin: "", github: "" },
+  links: { linkedin: "", github: "", website: "" },
   summary: "",
   skills: [],
   experience: [],
@@ -49,6 +55,11 @@ const EMPTY_PROFILE: Profile = {
   projects: [],
   achievements: [],
   certifications: [],
+  languages: [],
+  volunteer: [],
+  publications: [],
+  affiliations: [],
+  additional_sections: [],
   section_order: [],
 };
 
@@ -64,8 +75,10 @@ const EMPTY_EXPERIENCE: ProfileExperience = {
 const EMPTY_EDUCATION: ProfileEducation = {
   school: "",
   degree: "",
+  field_of_study: "",
   location: "",
   graduation: "",
+  gpa: "",
 };
 
 const EMPTY_PROJECT: ProfileProject = {
@@ -88,6 +101,40 @@ const EMPTY_CERTIFICATION: ProfileCertification = {
   issuer: "",
   date: "",
   credential_id: "",
+};
+
+const EMPTY_LANGUAGE: ProfileLanguage = {
+  name: "",
+  proficiency: "",
+};
+
+const EMPTY_VOLUNTEER: ProfileVolunteer = {
+  organization: "",
+  role: "",
+  description: "",
+  location: "",
+  start_date: "",
+  end_date: "",
+  bullets: [],
+};
+
+const EMPTY_PUBLICATION: ProfilePublication = {
+  title: "",
+  venue: "",
+  date: "",
+  link: "",
+  authors: "",
+};
+
+const EMPTY_AFFILIATION: ProfileAffiliation = {
+  name: "",
+  role: "",
+  date: "",
+};
+
+const EMPTY_ADDITIONAL_SECTION: ProfileAdditionalSection = {
+  label: "",
+  content: "",
 };
 
 export default function ProfilePage() {
@@ -237,8 +284,15 @@ function ProfileEditor() {
     setProfile((p) => ({ ...p, [key]: value }));
   }
 
-  function updateLink(field: "linkedin" | "github", value: string) {
+  function updateLink(field: "linkedin" | "github" | "website", value: string) {
     setProfile((p) => ({ ...p, links: { ...p.links, [field]: value } }));
+  }
+
+  function updateHeadline(value: string) {
+    // Manually editing the headline implies the user has confirmed
+    // / overridden the inferred suggestion — flip the flag so the UI
+    // stops showing the "inferred" hint.
+    setProfile((p) => ({ ...p, headline: value, headline_inferred: false }));
   }
 
   function updateExperience(
@@ -362,6 +416,102 @@ function ProfileEditor() {
     }));
   }
 
+  function updateLanguage(i: number, field: keyof ProfileLanguage, value: string) {
+    setProfile((p) => {
+      const next = [...p.languages];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, languages: next };
+    });
+  }
+  function addLanguage() {
+    setProfile((p) => ({ ...p, languages: [...p.languages, { ...EMPTY_LANGUAGE }] }));
+  }
+  function removeLanguage(i: number) {
+    setProfile((p) => ({ ...p, languages: p.languages.filter((_, idx) => idx !== i) }));
+  }
+
+  function updateVolunteer(
+    i: number,
+    field: keyof ProfileVolunteer,
+    value: string | string[],
+  ) {
+    setProfile((p) => {
+      const next = [...p.volunteer];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, volunteer: next };
+    });
+  }
+  function addVolunteer() {
+    setProfile((p) => ({ ...p, volunteer: [...p.volunteer, { ...EMPTY_VOLUNTEER }] }));
+  }
+  function removeVolunteer(i: number) {
+    setProfile((p) => ({ ...p, volunteer: p.volunteer.filter((_, idx) => idx !== i) }));
+  }
+
+  function updatePublication(i: number, field: keyof ProfilePublication, value: string) {
+    setProfile((p) => {
+      const next = [...p.publications];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, publications: next };
+    });
+  }
+  function addPublication() {
+    setProfile((p) => ({
+      ...p,
+      publications: [...p.publications, { ...EMPTY_PUBLICATION }],
+    }));
+  }
+  function removePublication(i: number) {
+    setProfile((p) => ({
+      ...p,
+      publications: p.publications.filter((_, idx) => idx !== i),
+    }));
+  }
+
+  function updateAffiliation(i: number, field: keyof ProfileAffiliation, value: string) {
+    setProfile((p) => {
+      const next = [...p.affiliations];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, affiliations: next };
+    });
+  }
+  function addAffiliation() {
+    setProfile((p) => ({
+      ...p,
+      affiliations: [...p.affiliations, { ...EMPTY_AFFILIATION }],
+    }));
+  }
+  function removeAffiliation(i: number) {
+    setProfile((p) => ({
+      ...p,
+      affiliations: p.affiliations.filter((_, idx) => idx !== i),
+    }));
+  }
+
+  function updateAdditional(
+    i: number,
+    field: keyof ProfileAdditionalSection,
+    value: string,
+  ) {
+    setProfile((p) => {
+      const next = [...p.additional_sections];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, additional_sections: next };
+    });
+  }
+  function addAdditional() {
+    setProfile((p) => ({
+      ...p,
+      additional_sections: [...p.additional_sections, { ...EMPTY_ADDITIONAL_SECTION }],
+    }));
+  }
+  function removeAdditional(i: number) {
+    setProfile((p) => ({
+      ...p,
+      additional_sections: p.additional_sections.filter((_, idx) => idx !== i),
+    }));
+  }
+
   return (
     <div className="container max-w-3xl space-y-8 py-10">
       <header className="space-y-3">
@@ -447,10 +597,17 @@ function ProfileEditor() {
                   onChange={(e) => updateRoot("name", e.target.value)}
                 />
               </Field>
-              <Field label="Headline">
+              <Field
+                label="Headline"
+                hint={
+                  profile.headline_inferred
+                    ? "Inferred from your most recent role — edit if needed."
+                    : undefined
+                }
+              >
                 <Input
                   value={profile.headline ?? ""}
-                  onChange={(e) => updateRoot("headline", e.target.value)}
+                  onChange={(e) => updateHeadline(e.target.value)}
                   placeholder="Senior Software Engineer"
                 />
               </Field>
@@ -485,6 +642,13 @@ function ProfileEditor() {
                   value={profile.links.github ?? ""}
                   onChange={(e) => updateLink("github", e.target.value)}
                   placeholder="github.com/…"
+                />
+              </Field>
+              <Field label="Website / Portfolio">
+                <Input
+                  value={profile.links.website ?? ""}
+                  onChange={(e) => updateLink("website", e.target.value)}
+                  placeholder="https://yourname.dev"
                 />
               </Field>
             </div>
@@ -622,6 +786,16 @@ function ProfileEditor() {
                         required
                         value={ed.degree}
                         onChange={(e) => updateEducation(i, "degree", e.target.value)}
+                        placeholder="B.S."
+                      />
+                    </Field>
+                    <Field label="Field of study">
+                      <Input
+                        value={ed.field_of_study ?? ""}
+                        onChange={(e) =>
+                          updateEducation(i, "field_of_study", e.target.value)
+                        }
+                        placeholder="Computer Science"
                       />
                     </Field>
                     <Field label="Location">
@@ -637,6 +811,13 @@ function ProfileEditor() {
                           updateEducation(i, "graduation", e.target.value)
                         }
                         placeholder="2018"
+                      />
+                    </Field>
+                    <Field label="GPA">
+                      <Input
+                        value={ed.gpa ?? ""}
+                        onChange={(e) => updateEducation(i, "gpa", e.target.value)}
+                        placeholder="3.85/4.0"
                       />
                     </Field>
                   </div>
@@ -885,6 +1066,347 @@ function ProfileEditor() {
 
             <Separator />
 
+            {/* Languages — spoken / written natural languages.
+                Programming languages live in skills. */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Languages</h3>
+                <Button type="button" variant="outline" size="sm" onClick={addLanguage}>
+                  + Add language
+                </Button>
+              </div>
+              {profile.languages.length === 0 && (
+                <p className="text-sm text-muted-foreground">No languages yet.</p>
+              )}
+              {profile.languages.map((lang, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Language" required>
+                      <Input
+                        required
+                        value={lang.name}
+                        onChange={(e) => updateLanguage(i, "name", e.target.value)}
+                        placeholder="Spanish"
+                      />
+                    </Field>
+                    <Field label="Proficiency">
+                      <Input
+                        value={lang.proficiency ?? ""}
+                        onChange={(e) =>
+                          updateLanguage(i, "proficiency", e.target.value)
+                        }
+                        placeholder="Native, Fluent, B2…"
+                      />
+                    </Field>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removeLanguage(i)}
+                    >
+                      Remove language
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
+            {/* Volunteer experience — kept separate from paid Experience. */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Volunteer experience</h3>
+                <Button type="button" variant="outline" size="sm" onClick={addVolunteer}>
+                  + Add volunteer role
+                </Button>
+              </div>
+              {profile.volunteer.length === 0 && (
+                <p className="text-sm text-muted-foreground">No volunteer roles yet.</p>
+              )}
+              {profile.volunteer.map((vol, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Organization" required>
+                      <Input
+                        required
+                        value={vol.organization}
+                        onChange={(e) =>
+                          updateVolunteer(i, "organization", e.target.value)
+                        }
+                      />
+                    </Field>
+                    <Field label="Role">
+                      <Input
+                        value={vol.role ?? ""}
+                        onChange={(e) => updateVolunteer(i, "role", e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Location">
+                      <Input
+                        value={vol.location ?? ""}
+                        onChange={(e) =>
+                          updateVolunteer(i, "location", e.target.value)
+                        }
+                      />
+                    </Field>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="Start">
+                        <Input
+                          value={vol.start_date ?? ""}
+                          onChange={(e) =>
+                            updateVolunteer(i, "start_date", e.target.value)
+                          }
+                          placeholder="2022"
+                        />
+                      </Field>
+                      <Field label="End">
+                        <Input
+                          value={vol.end_date ?? ""}
+                          onChange={(e) =>
+                            updateVolunteer(i, "end_date", e.target.value)
+                          }
+                          placeholder="2023 or Present"
+                        />
+                      </Field>
+                    </div>
+                  </div>
+                  <Field label="Description">
+                    <Textarea
+                      rows={2}
+                      value={vol.description}
+                      onChange={(e) =>
+                        updateVolunteer(i, "description", e.target.value)
+                      }
+                    />
+                  </Field>
+                  <Field label="Bullets (one per line)">
+                    <Textarea
+                      rows={Math.max(2, vol.bullets.length + 1)}
+                      value={vol.bullets.join("\n")}
+                      onChange={(e) =>
+                        updateVolunteer(
+                          i,
+                          "bullets",
+                          e.target.value
+                            .split("\n")
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        )
+                      }
+                    />
+                  </Field>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removeVolunteer(i)}
+                    >
+                      Remove volunteer role
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
+            {/* Publications — papers, articles, book chapters. */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Publications</h3>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addPublication}
+                >
+                  + Add publication
+                </Button>
+              </div>
+              {profile.publications.length === 0 && (
+                <p className="text-sm text-muted-foreground">No publications yet.</p>
+              )}
+              {profile.publications.map((pub, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Title" required>
+                      <Input
+                        required
+                        value={pub.title}
+                        onChange={(e) => updatePublication(i, "title", e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Venue">
+                      <Input
+                        value={pub.venue ?? ""}
+                        onChange={(e) => updatePublication(i, "venue", e.target.value)}
+                        placeholder="ICML 2023"
+                      />
+                    </Field>
+                    <Field label="Date">
+                      <Input
+                        value={pub.date ?? ""}
+                        onChange={(e) => updatePublication(i, "date", e.target.value)}
+                        placeholder="2023"
+                      />
+                    </Field>
+                    <Field label="Link">
+                      <Input
+                        value={pub.link ?? ""}
+                        onChange={(e) => updatePublication(i, "link", e.target.value)}
+                        placeholder="https://arxiv.org/abs/…"
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Authors">
+                    <Input
+                      value={pub.authors ?? ""}
+                      onChange={(e) =>
+                        updatePublication(i, "authors", e.target.value)
+                      }
+                      placeholder="Jane Smith, John Doe, et al."
+                    />
+                  </Field>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removePublication(i)}
+                    >
+                      Remove publication
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
+            {/* Professional affiliations / memberships. */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Professional affiliations</h3>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addAffiliation}
+                >
+                  + Add affiliation
+                </Button>
+              </div>
+              {profile.affiliations.length === 0 && (
+                <p className="text-sm text-muted-foreground">No affiliations yet.</p>
+              )}
+              {profile.affiliations.map((aff, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Field label="Organization" required>
+                      <Input
+                        required
+                        value={aff.name}
+                        onChange={(e) => updateAffiliation(i, "name", e.target.value)}
+                        placeholder="IEEE, ACM, …"
+                      />
+                    </Field>
+                    <Field label="Role">
+                      <Input
+                        value={aff.role ?? ""}
+                        onChange={(e) => updateAffiliation(i, "role", e.target.value)}
+                        placeholder="Member"
+                      />
+                    </Field>
+                    <Field label="Date">
+                      <Input
+                        value={aff.date ?? ""}
+                        onChange={(e) => updateAffiliation(i, "date", e.target.value)}
+                        placeholder="2020 – Present"
+                      />
+                    </Field>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removeAffiliation(i)}
+                    >
+                      Remove affiliation
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
+            {/* Additional / custom sections — catch-all for content the
+                parser couldn't bucket (Hobbies, Patents, Conference Talks
+                etc.). Free-form label + body. */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Additional sections</h3>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addAdditional}
+                >
+                  + Add section
+                </Button>
+              </div>
+              {profile.additional_sections.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  No custom sections yet — use this for anything the standard
+                  buckets above don&apos;t cover (Hobbies, Patents, Conference
+                  Talks, etc.).
+                </p>
+              )}
+              {profile.additional_sections.map((sec, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <Field label="Section heading" required>
+                    <Input
+                      required
+                      value={sec.label}
+                      onChange={(e) => updateAdditional(i, "label", e.target.value)}
+                      placeholder="Hobbies, Patents, …"
+                    />
+                  </Field>
+                  <Field label="Content">
+                    <Textarea
+                      rows={3}
+                      value={sec.content}
+                      onChange={(e) =>
+                        updateAdditional(i, "content", e.target.value)
+                      }
+                    />
+                  </Field>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removeAdditional(i)}
+                    >
+                      Remove section
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm">
                 {loading && <span className="text-muted-foreground">Loading…</span>}
@@ -971,10 +1493,15 @@ function ResumeDropzone({
 function Field({
   label,
   required,
+  hint,
   children,
 }: {
   label: string;
   required?: boolean;
+  /** Optional helper text rendered under the label, before the
+   * input. Used e.g. to flag an inferred headline so the user
+   * knows to confirm or edit it. */
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -983,6 +1510,9 @@ function Field({
         {label}
         {required && <span className="ml-0.5 text-primary">*</span>}
       </span>
+      {hint && (
+        <span className="block text-xs text-muted-foreground">{hint}</span>
+      )}
       {children}
     </label>
   );
@@ -994,12 +1524,14 @@ function normaliseProfile(p: Profile): Profile {
   return {
     name: p.name ?? "",
     headline: p.headline ?? "",
+    headline_inferred: p.headline_inferred ?? false,
     email: p.email ?? "",
     phone: p.phone ?? "",
     location: p.location ?? "",
     links: {
       linkedin: p.links?.linkedin ?? "",
       github: p.links?.github ?? "",
+      website: p.links?.website ?? "",
     },
     summary: p.summary ?? "",
     skills: p.skills ?? [],
@@ -1014,8 +1546,10 @@ function normaliseProfile(p: Profile): Profile {
     education: (p.education ?? []).map((e) => ({
       school: e.school ?? "",
       degree: e.degree ?? "",
+      field_of_study: e.field_of_study ?? "",
       location: e.location ?? "",
       graduation: e.graduation ?? "",
+      gpa: e.gpa ?? "",
     })),
     projects: (p.projects ?? []).map((pr) => ({
       name: pr.name ?? "",
@@ -1036,6 +1570,35 @@ function normaliseProfile(p: Profile): Profile {
       date: c.date ?? "",
       credential_id: c.credential_id ?? "",
     })),
+    languages: (p.languages ?? []).map((l) => ({
+      name: l.name ?? "",
+      proficiency: l.proficiency ?? "",
+    })),
+    volunteer: (p.volunteer ?? []).map((v) => ({
+      organization: v.organization ?? "",
+      role: v.role ?? "",
+      description: v.description ?? "",
+      location: v.location ?? "",
+      start_date: v.start_date ?? "",
+      end_date: v.end_date ?? "",
+      bullets: v.bullets ?? [],
+    })),
+    publications: (p.publications ?? []).map((pb) => ({
+      title: pb.title ?? "",
+      venue: pb.venue ?? "",
+      date: pb.date ?? "",
+      link: pb.link ?? "",
+      authors: pb.authors ?? "",
+    })),
+    affiliations: (p.affiliations ?? []).map((af) => ({
+      name: af.name ?? "",
+      role: af.role ?? "",
+      date: af.date ?? "",
+    })),
+    additional_sections: (p.additional_sections ?? []).map((s) => ({
+      label: s.label ?? "",
+      content: s.content ?? "",
+    })),
     section_order: p.section_order ?? [],
   };
 }
@@ -1055,7 +1618,14 @@ function cleanForSave(p: Profile): Profile {
     links: {
       linkedin: opt(p.links.linkedin),
       github: opt(p.links.github),
+      website: opt(p.links.website),
     },
+    education: p.education.map((ed) => ({
+      ...ed,
+      field_of_study: opt(ed.field_of_study),
+      location: opt(ed.location),
+      gpa: opt(ed.gpa),
+    })),
     projects: p.projects.map((pr) => ({
       ...pr,
       link: opt(pr.link),
@@ -1072,6 +1642,40 @@ function cleanForSave(p: Profile): Profile {
       date: opt(c.date),
       credential_id: opt(c.credential_id),
     })),
+    languages: p.languages
+      .filter((l) => (l.name ?? "").trim())
+      .map((l) => ({
+        ...l,
+        proficiency: opt(l.proficiency),
+      })),
+    volunteer: p.volunteer
+      .filter((v) => (v.organization ?? "").trim())
+      .map((v) => ({
+        ...v,
+        role: opt(v.role),
+        location: opt(v.location),
+        start_date: opt(v.start_date),
+        end_date: opt(v.end_date),
+      })),
+    publications: p.publications
+      .filter((pb) => (pb.title ?? "").trim())
+      .map((pb) => ({
+        ...pb,
+        venue: opt(pb.venue),
+        date: opt(pb.date),
+        link: opt(pb.link),
+        authors: opt(pb.authors),
+      })),
+    affiliations: p.affiliations
+      .filter((af) => (af.name ?? "").trim())
+      .map((af) => ({
+        ...af,
+        role: opt(af.role),
+        date: opt(af.date),
+      })),
+    additional_sections: p.additional_sections.filter(
+      (s) => (s.label ?? "").trim() || (s.content ?? "").trim(),
+    ),
   };
 }
 

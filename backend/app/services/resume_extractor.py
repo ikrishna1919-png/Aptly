@@ -81,7 +81,7 @@ def extract_text(filename: str, data: bytes) -> str:
     suffix = _suffix(filename)
     if suffix not in SUPPORTED_SUFFIXES:
         raise UnsupportedResumeFile(
-            f"Unsupported file type {suffix!r}. Allowed: " f"{', '.join(SUPPORTED_SUFFIXES)}."
+            f"Unsupported file type {suffix!r}. Allowed: {', '.join(SUPPORTED_SUFFIXES)}."
         )
 
     if suffix == ".pdf":

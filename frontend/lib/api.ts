@@ -132,6 +132,9 @@ export async function fetchHealth(): Promise<Health | null> {
 export type ProfileLinks = {
   linkedin?: string | null;
   github?: string | null;
+  /** Personal site / portfolio (NOT LinkedIn or GitHub). Surfaced as
+   * a third link slot alongside the social profiles. */
+  website?: string | null;
 };
 
 export type ProfileExperience = {
@@ -146,8 +149,16 @@ export type ProfileExperience = {
 export type ProfileEducation = {
   school: string;
   degree: string;
+  /** Major / field of study. Lives separately from `degree` so the
+   * UI can edit the credential ("B.S.") and the major ("Computer
+   * Science") independently. Legacy rows that stored the major
+   * inside `degree` still render — the parser splits new rows. */
+  field_of_study?: string | null;
   location?: string | null;
   graduation: string;
+  /** Self-reported GPA when present on the resume ("3.85/4.0",
+   * "3.85"). Null when the resume doesn't surface one. */
+  gpa?: string | null;
 };
 
 export type ProfileProject = {
@@ -177,9 +188,58 @@ export type ProfileCertification = {
   credential_id?: string | null;
 };
 
+/** Spoken / written natural language. NOT for programming languages
+ * — those live in `skills`. */
+export type ProfileLanguage = {
+  name: string;
+  proficiency?: string | null;
+};
+
+/** Volunteer / community-service experience. Same shape as a paid
+ * job but lives in its own section so the user's actual employment
+ * history stays clean. */
+export type ProfileVolunteer = {
+  organization: string;
+  role?: string | null;
+  description: string;
+  location?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  bullets: string[];
+};
+
+export type ProfilePublication = {
+  title: string;
+  venue?: string | null;
+  date?: string | null;
+  link?: string | null;
+  /** Free-form author string — preserves the order + et-al
+   * formatting the candidate used on the resume. */
+  authors?: string | null;
+};
+
+export type ProfileAffiliation = {
+  name: string;
+  role?: string | null;
+  date?: string | null;
+};
+
+/** Catch-all for unrecognised section headings. Keeps unusual
+ * resume content (Hobbies, Patents, Conference Talks, etc.) editable
+ * rather than silently dropped. */
+export type ProfileAdditionalSection = {
+  label: string;
+  content: string;
+};
+
 export type Profile = {
   name: string;
   headline?: string | null;
+  /** True when the headline was derived by the parser (most recent
+   * role + years of experience) rather than pulled verbatim from
+   * the resume. The UI marks an inferred headline so the user knows
+   * to confirm or edit it. */
+  headline_inferred?: boolean;
   email?: string | null;
   phone?: string | null;
   location?: string | null;
@@ -191,6 +251,11 @@ export type Profile = {
   projects: ProfileProject[];
   achievements: ProfileAchievement[];
   certifications: ProfileCertification[];
+  languages: ProfileLanguage[];
+  volunteer: ProfileVolunteer[];
+  publications: ProfilePublication[];
+  affiliations: ProfileAffiliation[];
+  additional_sections: ProfileAdditionalSection[];
   // Order the user's resume presents sections in (lowercase
   // identifiers). The tailor service mirrors this in the generated
   // resume. Defaulted to [] on the backend so the form always sees

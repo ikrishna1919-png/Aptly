@@ -121,6 +121,10 @@ MODEL = "claude-sonnet-4-6"
 class ProfileLinks(BaseModel):
     linkedin: str | None = None
     github: str | None = None
+    # Personal site / portfolio. Surfaced as a third link slot
+    # alongside LinkedIn + GitHub — many resumes list it on the
+    # contact line.
+    website: str | None = None
 
 
 class ProfileExperience(BaseModel):
@@ -135,8 +139,13 @@ class ProfileExperience(BaseModel):
 class ProfileEducation(BaseModel):
     school: str
     degree: str
+    # Separate `field_of_study` and `gpa` slots so the UI can edit
+    # each independently. The parser used to fold the major into the
+    # degree blob; that's now split out.
+    field_of_study: str | None = None
     location: str | None = None
     graduation: str = Field(default="", description="YYYY")
+    gpa: str | None = None
 
 
 class ProfileProject(BaseModel):
@@ -184,6 +193,64 @@ class ProfileCertification(BaseModel):
     credential_id: str | None = None
 
 
+class ProfileLanguage(BaseModel):
+    """A spoken / written natural language plus the candidate's
+    self-reported proficiency. NOT for programming languages — those
+    live in `skills`."""
+
+    name: str
+    proficiency: str | None = None
+
+
+class ProfileVolunteer(BaseModel):
+    """Volunteer / community-service experience. Same shape as
+    `ProfileExperience` minus the strictness — volunteer entries
+    tend to have a single description rather than a bullet list,
+    but the parser accepts either."""
+
+    organization: str
+    role: str | None = None
+    description: str = ""
+    location: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    bullets: list[str] = Field(default_factory=list)
+
+
+class ProfilePublication(BaseModel):
+    """A published paper / article / book chapter. `authors` is a
+    free-form string so the parser doesn't have to fight ordering
+    or et-al formatting."""
+
+    title: str
+    venue: str | None = None
+    date: str | None = None
+    link: str | None = None
+    authors: str | None = None
+
+
+class ProfileAffiliation(BaseModel):
+    """Professional affiliation / membership — IEEE, ACM, a state
+    bar, an honour society, etc. `role` is `Member` / `Chair` /
+    `Treasurer` when the candidate held one."""
+
+    name: str
+    role: str | None = None
+    date: str | None = None
+
+
+class ProfileAdditionalSection(BaseModel):
+    """Catch-all for unrecognised section headings. Lets unusual
+    resumes still surface their content (e.g. `Hobbies`, `Patents`,
+    `Open-Source Contributions`, `Conference Talks`) rather than
+    silently dropping everything the parser doesn't know how to
+    file. `label` is the section heading from the resume; `content`
+    is the body as plain text."""
+
+    label: str
+    content: str = ""
+
+
 class Profile(BaseModel):
     """The candidate profile the tailor service runs against. Stored as
     JSON in `candidates.profile` — no migration is needed when fields
@@ -195,6 +262,11 @@ class Profile(BaseModel):
 
     name: str
     headline: str | None = None
+    # True when `headline` was derived by the parser (most recent
+    # role + years of experience) rather than pulled verbatim from
+    # the resume. The UI marks an inferred headline so the user
+    # knows to edit if it doesn't match how they pitch themselves.
+    headline_inferred: bool = False
     email: str | None = None
     phone: str | None = None
     location: str | None = None
@@ -206,6 +278,11 @@ class Profile(BaseModel):
     projects: list[ProfileProject] = Field(default_factory=list)
     achievements: list[ProfileAchievement] = Field(default_factory=list)
     certifications: list[ProfileCertification] = Field(default_factory=list)
+    languages: list[ProfileLanguage] = Field(default_factory=list)
+    volunteer: list[ProfileVolunteer] = Field(default_factory=list)
+    publications: list[ProfilePublication] = Field(default_factory=list)
+    affiliations: list[ProfileAffiliation] = Field(default_factory=list)
+    additional_sections: list[ProfileAdditionalSection] = Field(default_factory=list)
     # Order the user's resume presents its sections in, when known.
     # Populated by the LLM parser; the tailor service uses it to
     # mirror the user's section ordering. Free-form strings so a
@@ -251,6 +328,7 @@ class _LLMEducation(BaseModel):
     location: str | None = None
     start_date: str | None = None
     end_date: str | None = None
+    gpa: str | None = None
 
 
 class _LLMSkillGroup(BaseModel):
@@ -286,6 +364,40 @@ class _LLMCertification(BaseModel):
     credential_id: str | None = None
 
 
+class _LLMLanguage(BaseModel):
+    name: str | None = None
+    proficiency: str | None = None
+
+
+class _LLMVolunteer(BaseModel):
+    organization: str | None = None
+    role: str | None = None
+    description: str | None = None
+    location: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    bullets: list[str] = Field(default_factory=list)
+
+
+class _LLMPublication(BaseModel):
+    title: str | None = None
+    venue: str | None = None
+    date: str | None = None
+    link: str | None = None
+    authors: str | None = None
+
+
+class _LLMAffiliation(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    date: str | None = None
+
+
+class _LLMAdditionalSection(BaseModel):
+    label: str | None = None
+    content: str | None = None
+
+
 class _LLMStructuralExtract(BaseModel):
     """The structured output the resume-parse Claude call returns. The
     `skills` field can be either a flat list (most resumes) OR a list
@@ -306,17 +418,25 @@ class _LLMStructuralExtract(BaseModel):
     still round-trips."""
 
     name: str | None = None
+    headline: str | None = None
+    summary: str | None = None
     email: str | None = None
     phone: str | None = None
     location: str | None = None
     linkedin_url: str | None = None
     github_url: str | None = None
+    website_url: str | None = None
     experience: list[_LLMExperience] = Field(default_factory=list)
     education: list[_LLMEducation] = Field(default_factory=list)
     skills: list[str] | list[_LLMSkillGroup] = Field(default_factory=list)
     projects: list[_LLMProject] = Field(default_factory=list)
     achievements: list[_LLMAchievement] = Field(default_factory=list)
     certifications: list[_LLMCertification] = Field(default_factory=list)
+    languages: list[_LLMLanguage] = Field(default_factory=list)
+    volunteer: list[_LLMVolunteer] = Field(default_factory=list)
+    publications: list[_LLMPublication] = Field(default_factory=list)
+    affiliations: list[_LLMAffiliation] = Field(default_factory=list)
+    additional_sections: list[_LLMAdditionalSection] = Field(default_factory=list)
     section_order: list[str] = Field(default_factory=list)
 
 
@@ -531,7 +651,7 @@ def parse_resume(
         return regex_profile
 
     log.info("%s: Anthropic extract returned; merging with regex profile", tag)
-    return _merge(regex_profile, llm)
+    return _apply_headline_inference(_merge(regex_profile, llm))
 
 
 def _empty_profile() -> Profile:
@@ -611,7 +731,7 @@ def parse_resume_pdf(
         return _empty_profile()
 
     log.info("%s: Anthropic PDF extract returned; building profile from LLM-only result", tag)
-    return _llm_to_profile(llm)
+    return _apply_headline_inference(_llm_to_profile(llm))
 
 
 # ─── LLM extraction ─────────────────────────────────────────────────────────
@@ -633,7 +753,11 @@ _SYSTEM_PROMPT = (
     "── Completeness ──\n"
     "  * Capture EVERY section that appears in the resume — summary, "
     "    experience, education, skills, projects, achievements, "
-    "    certifications, AND record their order in `section_order`.\n"
+    "    certifications, languages, volunteer, publications, "
+    "    affiliations — AND record their order in `section_order`. "
+    "    Anything you can't fit into one of those buckets goes in "
+    "    `additional_sections` as `{label, content}` so the user can "
+    "    edit it manually; never silently drop content.\n"
     "  * In `experience`, return ONE entry for EVERY job listed — "
     "    never omit, never merge, never summarise multiple jobs into "
     "    one. If the resume lists six jobs, the experience array has "
@@ -652,10 +776,36 @@ _SYSTEM_PROMPT = (
     "  parent job. A bullet you can't confidently assign to a job is "
     "  dropped, not pasted onto the wrong one.\n"
     "\n"
+    "  Company vs. title is the single most-misclassified field "
+    "  pair. The COMPANY is the employer / organisation — "
+    "  ('Stripe', 'JPMorgan Chase', 'Google', 'Anduril Industries', "
+    "  'SMBC'). The TITLE is the role — ('Senior Software Engineer', "
+    "  'Data Analyst', 'Product Manager', 'Vice President'). Most "
+    "  resume templates put the title on one line and the company "
+    "  on the next; if they're on the same line the title is usually "
+    "  first (before a comma / pipe / dot) and the company second. "
+    "  Never swap them. If a header reads 'Senior Software Engineer "
+    "  · Stripe · 2022 – Present', `title` is 'Senior Software "
+    "  Engineer', `company` is 'Stripe'.\n"
+    "\n"
     "Field-by-field guidance:\n"
     "  - name: the candidate's full name, exactly as written at the "
     "    top of the resume. null if the resume doesn't start with a "
     "    clearly-formatted name.\n"
+    "  - headline: a one-line professional tagline from the top of "
+    "    the resume (e.g. 'Senior Software Engineer', 'ML Engineer "
+    "    · 8 years'). Pull it VERBATIM when the resume has one. "
+    "    Leave null when the resume has no headline — downstream "
+    "    code will infer one from the most recent role + years of "
+    "    experience.\n"
+    "  - summary: any 'Summary' / 'Profile' / 'About' / 'Objective' "
+    "    block at the top of the resume, verbatim (one paragraph, "
+    "    whitespace-normalised). Null when the resume has no such "
+    "    block.\n"
+    "  - email / phone / location / linkedin_url / github_url / "
+    "    website_url: the candidate's contact info, parsed out of "
+    "    the contact block (usually under the name). `website_url` "
+    "    is a personal site / portfolio (NOT LinkedIn or GitHub).\n"
     "  - experience: see the pairing + completeness rules above. "
     "    `company` is the employer name; `title` is the role; do NOT "
     "    swap them. `start_date` / `end_date` are free-form date "
@@ -670,12 +820,17 @@ _SYSTEM_PROMPT = (
     "  - education: one entry per institution. `school` is the "
     "    institution; `degree` is the credential (B.S., M.A., Ph.D., "
     "    etc.); `field_of_study` is the major (separate field — do "
-    "    not pack it into `degree`).\n"
-    "  - skills: a flat list of strings IF the resume lists skills as "
-    "    one ungrouped collection. If the resume groups skills by "
-    "    category (e.g. 'Languages: Python, Go; Cloud: AWS, GCP'), "
-    "    return a list of `{category, items}` objects so the "
-    "    structure is preserved.\n"
+    "    not pack it into `degree`); `gpa` is the GPA when stated "
+    "    (e.g. '3.85/4.0' or '3.85'), null otherwise.\n"
+    "  - skills: PREFER the grouped `{category, items}` shape when "
+    "    the resume groups skills by category. Examples: 'Cloud "
+    "    Platforms: Azure, AWS, GCP', 'Languages: Python, Go, Java', "
+    "    'Tools: Docker, Kubernetes'. Keep each group's items "
+    "    together — do NOT split a category mid-list (e.g. don't "
+    "    produce 'Cloud Platforms: Azure (Data Factory' / 'ADLS' as "
+    "    separate entries; preserve 'Cloud Platforms' → ['Azure', "
+    "    'AWS', 'GCP'] as one group). Only return a flat list of "
+    "    strings when the resume itself uses one ungrouped list.\n"
     "  - projects: personal or professional projects under a 'Projects' / "
     "    'Personal Projects' / 'Side Projects' / 'Selected Work' header. "
     "    `name` is the project title; `description` is one or two "
@@ -703,20 +858,59 @@ _SYSTEM_PROMPT = (
     "    appears (null if not stated); `credential_id` is the ID "
     "    string when the resume includes one. Omit the section if "
     "    the resume has none.\n"
+    "  - languages: SPOKEN / WRITTEN natural languages — English, "
+    "    Spanish, Mandarin, Hindi, etc. NOT programming languages "
+    "    (those live in `skills`). `name` is the language; "
+    "    `proficiency` is the candidate's self-reported level "
+    "    ('Native', 'Fluent', 'Conversational', 'B2', etc.) when "
+    "    stated. Found under headers like 'Languages', 'Language "
+    "    Skills', 'Language Proficiency'.\n"
+    "  - volunteer: community-service / non-profit / pro-bono "
+    "    experience under headers like 'Volunteer Experience', "
+    "    'Community Service', 'Volunteer Work'. Same shape as a job "
+    "    entry — `organization` (the org name), `role`, optional "
+    "    description / bullets / dates.\n"
+    "  - publications: papers, articles, book chapters, posters "
+    "    under headers like 'Publications', 'Papers', 'Selected "
+    "    Publications'. `title` is the paper title; `venue` is the "
+    "    journal / conference / book; `authors` is the verbatim "
+    "    author line (string, not a list — preserve the order and "
+    "    et-al formatting the candidate used).\n"
+    "  - affiliations: professional memberships / affiliations under "
+    "    headers like 'Professional Affiliations', 'Memberships', "
+    "    'Professional Memberships'. `name` is the organisation "
+    "    (IEEE, ACM, the local bar association, etc.); `role` is "
+    "    the candidate's role within the org if stated ('Member', "
+    "    'Treasurer', etc.).\n"
+    "  - additional_sections: any section heading that doesn't fit "
+    "    the buckets above (e.g. 'Hobbies', 'Patents', 'Conference "
+    "    Talks', 'Open-Source Contributions', 'Coursework'). One "
+    "    entry per section, `label` is the heading from the resume, "
+    "    `content` is the body as plain text. This is the catch-all "
+    "    so unusual resumes don't lose content silently.\n"
     "  - section_order: a list of the resume's section headings in "
     "    the order they appear, lowercased. Use the canonical names "
     "    where possible: 'summary', 'experience', 'projects', "
-    "    'skills', 'education', 'achievements', 'certifications'. "
-    "    Used by downstream tooling to mirror the candidate's "
+    "    'skills', 'education', 'achievements', 'certifications', "
+    "    'languages', 'volunteer', 'publications', 'affiliations'. "
+    "    Custom sections get their `label` (lowercased) in the same "
+    "    list. Used by downstream tooling to mirror the candidate's "
     "    preferred ordering.\n"
     "\n"
-    "Misclassification trap to avoid:\n"
+    "Misclassification traps to avoid:\n"
     "  * A certification (e.g. 'AWS Certified Cloud Practitioner') is "
     "    NOT an achievement. It goes in `certifications`, not "
     "    `achievements`. The rule of thumb: if it has an issuer "
     "    organisation or a credential ID, it's a certification.\n"
     "  * An award (e.g. 'Dean's List, Fall 2022') is NOT a "
     "    certification — it goes in `achievements`.\n"
+    "  * A spoken language (e.g. 'Spanish — Fluent') is NOT a skill "
+    "    — it goes in `languages`. A programming language IS a skill.\n"
+    "  * A volunteer role (e.g. 'Habitat for Humanity, Team Lead') "
+    "    is NOT a paid job — it goes in `volunteer`, not "
+    "    `experience`.\n"
+    "  * Never swap company and title. The title is the role; the "
+    "    company is the employer.\n"
     "\n"
     "Output strictly the JSON schema requested — no prose, no markdown."
 )
@@ -945,17 +1139,18 @@ def _first_text(response: Any) -> str:
 
 
 def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
-    """Build the final Profile: contact fields from `regex_profile`,
-    structural fields from `llm` where present (otherwise the regex
-    fallback). An empty experience list from the LLM keeps the regex
-    list — partial > empty.
+    """Build the final Profile from a regex contact-field pass + LLM
+    structural extract. Used by the TEXT-input path (paste / DOCX);
+    the PDF path uses `_llm_to_profile` because it skips pdfplumber
+    entirely.
 
-    Projects, achievements, certifications, and section_order come
-    from the LLM only — the regex extractor never tried to populate
-    them, so there's no fallback to merge against.
-
-    Used by the TEXT-input path. The PDF path uses `_llm_to_profile`
-    instead because it has no regex source to merge against."""
+    Contact fields preferred from the regex pass when present (cheap
+    and deterministic); LLM values fall in only as a last-resort
+    fallback. Every list-typed section comes from the LLM —
+    projects, achievements, certifications, languages, volunteer,
+    publications, affiliations, additional_sections — the regex
+    extractor doesn't populate any of those.
+    """
     name = (llm.name or regex_profile.name or "").strip()
 
     llm_experience = [_to_profile_experience(e) for e in llm.experience]
@@ -969,30 +1164,37 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
     llm_skills = _flatten_skills(llm.skills)
     skills = llm_skills or regex_profile.skills
 
-    projects = [p for p in (_to_profile_project(p) for p in llm.projects) if p is not None]
-    achievements = [
-        a for a in (_to_profile_achievement(a) for a in llm.achievements) if a is not None
-    ]
-    certifications = [
-        c for c in (_to_profile_certification(c) for c in llm.certifications) if c is not None
-    ]
-    section_order = [s.strip().lower() for s in llm.section_order if s and s.strip()]
+    profile_bits = _build_llm_only_sections(llm)
+    links = ProfileLinks(
+        linkedin=regex_profile.links.linkedin or profile_bits["linkedin"],
+        github=regex_profile.links.github or profile_bits["github"],
+        website=profile_bits["website"],  # regex doesn't extract website
+    )
+
+    headline = (llm.headline or "").strip() or regex_profile.headline
+    summary = (llm.summary or "").strip() or regex_profile.summary
 
     return Profile(
         name=name,
-        headline=regex_profile.headline,
-        email=regex_profile.email,
-        phone=regex_profile.phone,
-        location=regex_profile.location,
-        links=regex_profile.links,
-        summary=regex_profile.summary,
+        headline=headline,
+        headline_inferred=False,  # set below by `_apply_headline_inference`
+        email=regex_profile.email or profile_bits["email"],
+        phone=regex_profile.phone or profile_bits["phone"],
+        location=regex_profile.location or profile_bits["location"],
+        links=links,
+        summary=summary,
         skills=skills,
         experience=experience,
         education=education,
-        projects=projects,
-        achievements=achievements,
-        certifications=certifications,
-        section_order=section_order,
+        projects=profile_bits["projects"],
+        achievements=profile_bits["achievements"],
+        certifications=profile_bits["certifications"],
+        languages=profile_bits["languages"],
+        volunteer=profile_bits["volunteer"],
+        publications=profile_bits["publications"],
+        affiliations=profile_bits["affiliations"],
+        additional_sections=profile_bits["additional_sections"],
+        section_order=profile_bits["section_order"],
     )
 
 
@@ -1012,34 +1214,196 @@ def _llm_to_profile(llm: _LLMStructuralExtract) -> Profile:
     experience = [e for e in (_to_profile_experience(x) for x in llm.experience) if e is not None]
     education = [e for e in (_to_profile_education(x) for x in llm.education) if e is not None]
     skills = _flatten_skills(llm.skills)
-    projects = [p for p in (_to_profile_project(p) for p in llm.projects) if p is not None]
-    achievements = [
-        a for a in (_to_profile_achievement(a) for a in llm.achievements) if a is not None
-    ]
-    certifications = [
-        c for c in (_to_profile_certification(c) for c in llm.certifications) if c is not None
-    ]
-    section_order = [s.strip().lower() for s in llm.section_order if s and s.strip()]
-
-    linkedin = (llm.linkedin_url or "").strip() or None
-    github = (llm.github_url or "").strip() or None
+    profile_bits = _build_llm_only_sections(llm)
 
     return Profile(
         name=name,
-        headline=None,
-        email=(llm.email or "").strip() or None,
-        phone=(llm.phone or "").strip() or None,
-        location=(llm.location or "").strip() or None,
-        links=ProfileLinks(linkedin=linkedin, github=github),
-        summary="",
+        headline=(llm.headline or "").strip() or None,
+        headline_inferred=False,
+        email=profile_bits["email"],
+        phone=profile_bits["phone"],
+        location=profile_bits["location"],
+        links=ProfileLinks(
+            linkedin=profile_bits["linkedin"],
+            github=profile_bits["github"],
+            website=profile_bits["website"],
+        ),
+        summary=(llm.summary or "").strip() or "",
         skills=skills,
         experience=experience,
         education=education,
-        projects=projects,
-        achievements=achievements,
-        certifications=certifications,
-        section_order=section_order,
+        projects=profile_bits["projects"],
+        achievements=profile_bits["achievements"],
+        certifications=profile_bits["certifications"],
+        languages=profile_bits["languages"],
+        volunteer=profile_bits["volunteer"],
+        publications=profile_bits["publications"],
+        affiliations=profile_bits["affiliations"],
+        additional_sections=profile_bits["additional_sections"],
+        section_order=profile_bits["section_order"],
     )
+
+
+def _build_llm_only_sections(llm: _LLMStructuralExtract) -> dict:
+    """Single place that converts every LLM-only section into its
+    Profile-side counterpart. Both `_merge` (text path) and
+    `_llm_to_profile` (PDF path) read from this so the two paths
+    stay in lock-step — a section added here is automatically
+    surfaced on both inputs."""
+    return {
+        "projects": [p for p in (_to_profile_project(p) for p in llm.projects) if p is not None],
+        "achievements": [
+            a for a in (_to_profile_achievement(a) for a in llm.achievements) if a is not None
+        ],
+        "certifications": [
+            c for c in (_to_profile_certification(c) for c in llm.certifications) if c is not None
+        ],
+        "languages": [x for x in (_to_profile_language(x) for x in llm.languages) if x is not None],
+        "volunteer": [
+            v for v in (_to_profile_volunteer(v) for v in llm.volunteer) if v is not None
+        ],
+        "publications": [
+            p for p in (_to_profile_publication(p) for p in llm.publications) if p is not None
+        ],
+        "affiliations": [
+            a for a in (_to_profile_affiliation(a) for a in llm.affiliations) if a is not None
+        ],
+        "additional_sections": [
+            s for s in (_to_profile_additional(s) for s in llm.additional_sections) if s is not None
+        ],
+        "section_order": [s.strip().lower() for s in llm.section_order if s and s.strip()],
+        "email": (llm.email or "").strip() or None,
+        "phone": (llm.phone or "").strip() or None,
+        "location": (llm.location or "").strip() or None,
+        "linkedin": (llm.linkedin_url or "").strip() or None,
+        "github": (llm.github_url or "").strip() or None,
+        "website": (llm.website_url or "").strip() or None,
+    }
+
+
+def _to_profile_language(entry: _LLMLanguage) -> ProfileLanguage | None:
+    name = (entry.name or "").strip()
+    if not name:
+        return None
+    return ProfileLanguage(name=name, proficiency=(entry.proficiency or "").strip() or None)
+
+
+def _to_profile_volunteer(entry: _LLMVolunteer) -> ProfileVolunteer | None:
+    org = (entry.organization or "").strip()
+    role = (entry.role or "").strip()
+    if not org and not role:
+        # No anchor at all — drop the noise row.
+        return None
+    return ProfileVolunteer(
+        organization=org or role,  # at least one is non-empty per the check
+        role=role or None,
+        description=(entry.description or "").strip(),
+        location=(entry.location or "").strip() or None,
+        start_date=(entry.start_date or "").strip() or None,
+        end_date=(entry.end_date or "").strip() or None,
+        bullets=_normalise_bullets(entry.bullets),
+    )
+
+
+def _to_profile_publication(entry: _LLMPublication) -> ProfilePublication | None:
+    title = (entry.title or "").strip()
+    if not title:
+        return None
+    return ProfilePublication(
+        title=title,
+        venue=(entry.venue or "").strip() or None,
+        date=(entry.date or "").strip() or None,
+        link=(entry.link or "").strip() or None,
+        authors=(entry.authors or "").strip() or None,
+    )
+
+
+def _to_profile_affiliation(entry: _LLMAffiliation) -> ProfileAffiliation | None:
+    name = (entry.name or "").strip()
+    if not name:
+        return None
+    return ProfileAffiliation(
+        name=name,
+        role=(entry.role or "").strip() or None,
+        date=(entry.date or "").strip() or None,
+    )
+
+
+def _to_profile_additional(entry: _LLMAdditionalSection) -> ProfileAdditionalSection | None:
+    label = (entry.label or "").strip()
+    content = (entry.content or "").strip()
+    if not label and not content:
+        return None
+    return ProfileAdditionalSection(label=label or "Additional", content=content)
+
+
+# ── Headline inference ─────────────────────────────────────────────────────
+
+
+def _apply_headline_inference(profile: Profile) -> Profile:
+    """If the resume didn't surface a headline, derive a suggested
+    one from the most recent role + years of experience. Mark it as
+    inferred so the UI flags it for the user to confirm or edit.
+
+    Rule: NEVER add seniority adjectives or specialisations that
+    aren't on the resume — only restate what's already there. The
+    inference output is shape `'<title> · N years experience'`
+    (e.g. `'Senior Data Engineer · 7 years experience'`). If the
+    candidate has no usable experience data, leave the headline
+    null — better to ship nothing than to fabricate.
+    """
+    if profile.headline and profile.headline.strip():
+        # User-provided headline — leave it alone. `headline_inferred`
+        # stays False, which is the truthful state.
+        return profile
+
+    if not profile.experience:
+        # Nothing to infer from.
+        return profile
+
+    # Most-recent role: the first entry in `experience` (parser
+    # preserves resume order, and resumes are reverse-chronological).
+    most_recent = profile.experience[0]
+    title = (most_recent.title or "").strip()
+    if not title:
+        return profile
+
+    years = _estimate_total_experience_years(profile.experience)
+    if years is None or years <= 0:
+        headline = title
+    else:
+        headline = f"{title} · {years} year{'s' if years != 1 else ''} experience"
+    return profile.model_copy(update={"headline": headline, "headline_inferred": True})
+
+
+_DATE_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+def _estimate_total_experience_years(experience: list[ProfileExperience]) -> int | None:
+    """Crude estimate: subtract the earliest start year from the
+    latest end year (treating 'Present' as the current year). Good
+    enough for a headline — within ±1 year — and the user edits if
+    it's off. Returns None when no usable dates are found."""
+    starts: list[int] = []
+    ends: list[int] = []
+    for entry in experience:
+        for raw in (entry.start, entry.end):
+            if not raw:
+                continue
+            if raw.lower() in {"present", "current", "now"}:
+                ends.append(datetime.now(UTC).year)
+                continue
+            m = _DATE_YEAR_RE.search(raw)
+            if m:
+                year = int(m.group(0))
+                # Heuristic: the EARLIER date is a start; the LATER
+                # is an end. We don't bother distinguishing here —
+                # we want the overall min and max.
+                starts.append(year)
+                ends.append(year)
+    if not starts or not ends:
+        return None
+    return max(ends) - min(starts)
 
 
 def _to_profile_project(entry: _LLMProject) -> ProfileProject | None:
@@ -1146,20 +1510,19 @@ def _to_profile_education(entry: _LLMEducation) -> ProfileEducation | None:
     field = (entry.field_of_study or "").strip()
     if not school and not degree and not field:
         return None
-    # Combine degree + field of study into the single `degree` slot the
-    # downstream Profile model carries. "B.S." + "Computer Science" →
-    # "B.S. Computer Science".
-    if degree and field:
-        degree_full = f"{degree} {field}"
-    else:
-        degree_full = degree or field
     location = (entry.location or "").strip() or None
     graduation = _extract_graduation_year(entry.end_date or entry.start_date or "")
     return ProfileEducation(
         school=school,
-        degree=degree_full,
+        # Keep `degree` to just the credential — `field_of_study`
+        # has its own slot now so the UI can edit each
+        # independently. Legacy rows with a combined "B.S. Computer
+        # Science" string still load cleanly via Pydantic.
+        degree=degree,
+        field_of_study=field or None,
         location=location,
         graduation=graduation,
+        gpa=(entry.gpa or "").strip() or None,
     )
 
 

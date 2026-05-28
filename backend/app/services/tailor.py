@@ -611,9 +611,7 @@ def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]
 
     summary = candidate["summary"]
     if confirmed_gaps:
-        summary = (
-            f"{summary} (demo: also confirmed via user answers — " f"{', '.join(confirmed_gaps)})"
-        )
+        summary = f"{summary} (demo: also confirmed via user answers — {', '.join(confirmed_gaps)})"
 
     return TailoredResume(
         summary=summary,

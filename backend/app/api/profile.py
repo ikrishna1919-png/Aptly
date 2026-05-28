@@ -147,6 +147,14 @@ def parse_profile_text(
     background-job + polling shape stays so the frontend code path is
     unchanged. `settings` is captured at request time and forwarded to
     the worker so the LLM call uses the request-scoped configuration."""
+    # Diagnosability: log the input format + size at the API edge so a
+    # short / empty paste is visible from the Render logs without
+    # needing to inspect the worker's per-run trace.
+    log.info(
+        "profile/parse: text paste accepted (chars=%d, user_id=%s)",
+        len(payload.text or ""),
+        user.id,
+    )
     run_id = start_background_parse(payload.text, user_id=user.id, settings=settings)
     status_url = f"/api/profile/parse/{run_id}"
     response.headers["Location"] = status_url
@@ -201,9 +209,7 @@ async def parse_profile_upload(
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=(
-                f"Resume too large. Maximum size is " f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-            ),
+            detail=(f"Resume too large. Maximum size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."),
         )
 
     filename = file.filename or ""
@@ -226,6 +232,18 @@ async def parse_profile_upload(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Couldn't read PDF: file is not a PDF.",
             )
+        # Diagnosability: log byte count at the edge so an undersized
+        # / oversized PDF is detectable from the logs without
+        # spelunking into the worker. (We deliberately don't log the
+        # text length here because the PDF path skips the upfront
+        # extract — bytes is the only measurement we have until the
+        # LLM sees it.)
+        log.info(
+            "profile/parse/upload: PDF accepted (bytes=%d, filename=%s, user_id=%s)",
+            len(data),
+            filename,
+            user.id,
+        )
         # Direct-to-LLM path: hand the PDF bytes to the worker.
         # `parse_resume_pdf` runs pdfplumber for the regex contact
         # pass and Anthropic for the structural extract — the
@@ -264,7 +282,7 @@ async def parse_profile_upload(
     # Anything else: clear, immediate 400.
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail=(f"Unsupported file type {suffix!r}. Allowed: " f"{', '.join(SUPPORTED_SUFFIXES)}."),
+        detail=(f"Unsupported file type {suffix!r}. Allowed: {', '.join(SUPPORTED_SUFFIXES)}."),
     )
 
 
