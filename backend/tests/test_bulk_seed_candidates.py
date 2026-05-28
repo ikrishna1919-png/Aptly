@@ -121,10 +121,13 @@ def test_total_row_count_matches_seed_plus_existing(migrated_db):
     # 0008 → ~834 candidates (greenhouse + lever)
     # 0009 → 1 row (GM workday)
     # 0010 → ~417 candidates (ashby) + 17 known-Ashby tokens
+    # 0014 → ~450 new rows across all 5 platforms (greenhouse + lever
+    #        partially overlap with 0008's slugified fan-out)
     # 0007 → 38 existing seed rows (some overlap with 0008/0010)
-    # Total lands around 1250-1350 in practice.
-    assert len(total) > 1100
-    assert len(total) < 1500
+    # Total lands around 1600-1800 in practice — re-bump when the
+    # next bulk-load migration ships.
+    assert len(total) > 1500
+    assert len(total) < 2000
 
 
 def test_bulk_seed_is_idempotent_across_downgrade_upgrade(migrated_db):
