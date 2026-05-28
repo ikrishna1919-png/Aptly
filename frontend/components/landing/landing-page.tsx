@@ -328,13 +328,16 @@ function Hero() {
  * Pulled out so the hover/tap motion is consistent across the hero +
  * the final CTA. */
 function CtaButton() {
-  const { user, loading } = useAuth();
+  const { status } = useAuth();
   const openLogin = useOpenLogin();
   const router = useRouter();
 
   const onClick = () => {
-    if (loading) return;
-    if (user) {
+    // loading → wait (button is disabled). authenticated → straight to
+    // the feed. unauthenticated/error → open the sign-in modal (the safe
+    // default for an explicit "Get Started" action).
+    if (status === "loading") return;
+    if (status === "authenticated") {
       router.push("/jobs");
       return;
     }
@@ -346,8 +349,8 @@ function CtaButton() {
       <Button
         size="lg"
         onClick={onClick}
-        disabled={loading}
-        aria-busy={loading}
+        disabled={status === "loading"}
+        aria-busy={status === "loading"}
         className="group rounded-full px-7 text-base font-semibold shadow-sm transition-shadow hover:shadow-md"
       >
         Get Started
