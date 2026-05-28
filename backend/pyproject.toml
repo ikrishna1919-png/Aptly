@@ -19,6 +19,11 @@ dependencies = [
   "httpx>=0.27",
   "anthropic>=0.45.0",
   "python-docx>=1.1.2",
+  # Tailored-resume PDF rendering. Pure-Python (no system libs), so it
+  # installs cleanly on the Render free tier and lets us measure exact
+  # page count for the 2-page hard cap. DOCX (python-docx) and PDF
+  # (reportlab) render IDENTICAL text from the shared `resume_layout`.
+  "reportlab>=4.0",
   # Resume-upload text extraction. `pdfplumber` handles the common
   # text-layer PDF; it pulls in `pdfminer.six`. Scanned / image-only
   # PDFs produce no text — the upload endpoint surfaces that as a

@@ -2,18 +2,22 @@
 
   POST /api/tailor/analyze   { job_id }                  -> Analysis
   POST /api/tailor/generate  { job_id, answers }         -> TailoredResume
-  POST /api/tailor/docx      { resume }                  -> streamed DOCX
+  POST /api/tailor/docx      { resume, mode? }           -> streamed DOCX
+  POST /api/tailor/pdf       { resume, mode? }           -> streamed PDF
 
-All endpoints require a signed-in user (`get_current_user`). The
-candidate profile + the per-job analysis cache are now scoped per
-user — two people tailoring against the same job get independent
-results. The endpoints fall through to deterministic demo-mode data
-when ANTHROPIC_API_KEY isn't configured.
+`mode` is "visual" (default) or "plain" (max ATS compatibility). The DOCX
+and PDF carry identical text; only the styling differs.
+
+All endpoints require a signed-in user (`get_current_user`). The candidate
+profile + the per-job analysis cache are scoped per user. The endpoints
+fall through to deterministic demo-mode data when ANTHROPIC_API_KEY isn't
+configured.
 """
 
 from __future__ import annotations
 
 import io
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -26,6 +30,7 @@ from app.database import get_db
 from app.models.job import Job
 from app.models.user import User
 from app.services.docx_export import render_docx
+from app.services.pdf_export import render_pdf
 from app.services.tailor import (
     Analysis,
     TailoredResume,
@@ -34,6 +39,10 @@ from app.services.tailor import (
 )
 
 router = APIRouter()
+
+# "visual" (default, richer styling) or "plain" (max ATS parser
+# compatibility — no rules, dates inline).
+RenderMode = Literal["visual", "plain"]
 
 
 def _load_job(db: Session, job_id: int) -> Job:
@@ -108,32 +117,53 @@ def tailor_generate(
 # ── DOCX export ─────────────────────────────────────────────────────────────
 
 
-class DocxRequest(BaseModel):
+class RenderRequest(BaseModel):
     resume: TailoredResume
+    mode: RenderMode = Field(
+        default="visual",
+        description='Render style: "visual" (default) or "plain" (max ATS compatibility).',
+    )
     filename: str | None = Field(
         default=None, max_length=128, description="Override the suggested filename"
     )
 
 
+def _filename(raw: str | None, ext: str) -> str:
+    name = (raw or "tailored-resume").strip() or "tailored-resume"
+    if not name.lower().endswith(f".{ext}"):
+        name = f"{name}.{ext}"
+    return name
+
+
 @router.post("/tailor/docx")
 def tailor_docx(
-    payload: DocxRequest,
+    payload: RenderRequest,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    """Stream the tailored resume as a DOCX file. The candidate's
-    header (name / email / phone / location) is read from the
-    signed-in user's profile row so a recent edit shows up in the
-    download without re-running the LLM."""
-    from app.services.demo_candidate import get_candidate  # noqa: PLC0415
-
-    raw = render_docx(payload.resume, candidate=get_candidate(db, user_id=user.id))
-    name = (payload.filename or "tailored-resume").strip() or "tailored-resume"
-    if not name.lower().endswith(".docx"):
-        name = f"{name}.docx"
-
+    """Stream the tailored resume as a DOCX file in the requested `mode`.
+    Contact details live on the resume itself (reconciled server-side from
+    the profile at generate time), so the download reflects the saved
+    profile without re-running the LLM."""
+    raw = render_docx(payload.resume, mode=payload.mode)
+    name = _filename(payload.filename, "docx")
     return StreamingResponse(
         io.BytesIO(raw),
         media_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@router.post("/tailor/pdf")
+def tailor_pdf(
+    payload: RenderRequest,
+    user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """Stream the tailored resume as a PDF in the requested `mode`. Same
+    text content as the DOCX — only the styling differs."""
+    raw = render_pdf(payload.resume, mode=payload.mode)
+    name = _filename(payload.filename, "pdf")
+    return StreamingResponse(
+        io.BytesIO(raw),
+        media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )

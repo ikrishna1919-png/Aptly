@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
@@ -104,61 +105,274 @@ class Analysis(BaseModel):
     )
 
 
-class ExperienceBullet(BaseModel):
-    company: str
-    title: str
-    location: str | None = None
-    dates: str
-    bullets: list[str]
+class ContactLink(BaseModel):
+    label: str = ""
+    url: str = ""
 
 
-class TailoredProject(BaseModel):
-    name: str
-    description: str = ""
-    technologies: list[str] = Field(default_factory=list)
-    link: str | None = None
-    dates: str | None = None
+class Contact(BaseModel):
+    name: str = ""
+    headline: str = ""
+    location: str = ""
+    email: str = ""
+    phone: str = ""
+    links: list[ContactLink] = Field(default_factory=list)
 
 
-class TailoredAchievement(BaseModel):
-    title: str
-    description: str = ""
-    date: str | None = None
+class ResumeMeta(BaseModel):
+    """Render metadata. `mode` is chosen by the USER (frontend toggle),
+    NOT the model; the server fills it in. `pages_estimate` is the
+    measured rendered page count (1 or 2 after the hard cap)."""
+
+    mode: str = "visual"
+    pages_estimate: int = 1
 
 
-class TailoredCertification(BaseModel):
-    name: str
-    issuer: str | None = None
-    date: str | None = None
-    credential_id: str | None = None
+class SkillGroup(BaseModel):
+    category: str = ""
+    items: list[str] = Field(default_factory=list)
 
 
-class TailoredResume(BaseModel):
-    """The structured output of POST /api/tailor/generate."""
-
-    summary: str = Field(description="2-4 sentence ATS-optimized professional summary")
-    skills: list[str] = Field(description="Reordered + filtered skills relevant to this JD")
-    experience: list[ExperienceBullet]
-    education: list[str] = Field(description="One line per education entry")
-    projects: list[TailoredProject] = Field(default_factory=list)
-    achievements: list[TailoredAchievement] = Field(default_factory=list)
-    certifications: list[TailoredCertification] = Field(default_factory=list)
-    # The order sections appear in the final document, lowercased.
-    # The renderer walks this list to decide which sections to emit
-    # and in what order; sections with no content are skipped. Empty
-    # list → renderer falls back to the default order.
-    section_order: list[str] = Field(default_factory=list)
-    ats_notes: str = Field(
-        description="Short note (2-4 sentences) explaining the tailoring choices."
+class ExperienceEntry(BaseModel):
+    title: str = ""
+    company: str = ""
+    location: str = ""
+    start_date: str = Field(default="", description='Start date as "Mon YYYY", e.g. "Jan 2023"')
+    end_date: str = Field(
+        default="", description='End date as "Mon YYYY", or "Present" for the current role'
     )
+    bullets: list[str] = Field(default_factory=list)
+
+
+class EducationEntry(BaseModel):
+    degree: str = ""
+    field: str = ""
+    institution: str = ""
+    location: str = ""
+    graduation_date: str = Field(default="", description='Graduation date as "Mon YYYY"')
+
+
+class ProjectEntry(BaseModel):
+    name: str = ""
+    description: str = ""
+    bullets: list[str] = Field(default_factory=list)
+
+
+class CertificationEntry(BaseModel):
+    name: str = ""
+    issuer: str = ""
+    date: str = Field(default="", description='Date as "Mon YYYY"')
+
+
+class AtsBlock(BaseModel):
+    matched_keywords: list[str] = Field(
+        default_factory=list,
+        description="JD keywords the tailored resume genuinely covers.",
+    )
+    missing_keywords: list[str] = Field(
+        default_factory=list,
+        description="JD keywords still not covered (reported honestly; not a target to fix by inventing content).",
+    )
+    score_estimate: int = Field(
+        default=0,
+        description=(
+            "Rough, honest self-estimate of keyword coverage, 0-100. This is "
+            "an observation, NOT a goal to maximize. Never invent content to "
+            "raise it."
+        ),
+    )
+
+
+class GeneratedResume(BaseModel):
+    """What the model returns — the resume CONTENT. The server wraps this
+    into a `TailoredResume` by attaching render `meta`. Sections with no
+    content are returned as empty lists and omitted at render time."""
+
+    contact: Contact = Field(default_factory=Contact)
+    summary: str = Field(default="", description="2-4 sentence professional summary, no first person")
+    skills: list[SkillGroup] = Field(default_factory=list)
+    experience: list[ExperienceEntry] = Field(default_factory=list)
+    education: list[EducationEntry] = Field(default_factory=list)
+    projects: list[ProjectEntry] = Field(default_factory=list)
+    certifications: list[CertificationEntry] = Field(default_factory=list)
+    ats: AtsBlock = Field(default_factory=AtsBlock)
+
+
+class TailoredResume(GeneratedResume):
+    """The full tailored resume returned by the API + handed to the
+    renderers: the generated content plus render `meta`."""
+
+    meta: ResumeMeta = Field(default_factory=ResumeMeta)
 
 
 # Precompute once at import time so the rendered request bytes are stable
 # (good for prompt caching too). The two schema-prep passes
 # (additionalProperties:false + dropping unsupported range keywords) live in
 # `app.services._anthropic_schema` and are shared with the profile parser.
+#
+# The model is asked for `GeneratedResume` (content only) — `meta` is
+# server-owned, so it's deliberately NOT in the schema sent to Anthropic.
 ANALYSIS_SCHEMA: dict[str, Any] = prepare_schema(Analysis)
-TAILORED_RESUME_SCHEMA: dict[str, Any] = prepare_schema(TailoredResume)
+GENERATED_RESUME_SCHEMA: dict[str, Any] = prepare_schema(GeneratedResume)
+# Kept under the historical name for any external importer; same object.
+TAILORED_RESUME_SCHEMA: dict[str, Any] = GENERATED_RESUME_SCHEMA
+
+
+# ─── Defensive sanitization ───────────────────────────────────────────────────
+#
+# The prompt forbids en/em dashes, decorative bullets, and smart quotes, but
+# models slip. We walk every output string and replace them, logging a
+# counter so we can see how often the rules are violated. Belt-and-suspenders
+# with the prompt; the renderers should never see a disallowed character.
+
+_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+# char → replacement. en/em/figure/minus dashes → hyphen; decorative bullet
+# glyphs → hyphen; smart quotes / primes → straight quotes.
+_CHAR_REPLACEMENTS: dict[str, str] = {
+    "–": "-", "—": "-", "‒": "-", "―": "-", "−": "-",
+    "•": "-", "‣": "-", "◦": "-", "⁃": "-", "∙": "-",
+    "·": "-", "●": "-", "▪": "-", "‧": "-",
+    "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
+    "“": '"', "”": '"', "„": '"', "″": '"',
+}
+_TRANSLATE_TABLE = {ord(k): v for k, v in _CHAR_REPLACEMENTS.items()}
+
+
+def _sanitize_text(text: str, counter: dict[str, int]) -> str:
+    """Replace every disallowed character, tallying each into `counter`."""
+    for ch in text:
+        if ord(ch) in _TRANSLATE_TABLE:
+            counter[ch] = counter.get(ch, 0) + 1
+    return text.translate(_TRANSLATE_TABLE)
+
+
+def _sanitize_obj(obj: Any, counter: dict[str, int]) -> Any:
+    if isinstance(obj, str):
+        return _sanitize_text(obj, counter)
+    if isinstance(obj, list):
+        return [_sanitize_obj(x, counter) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize_obj(v, counter) for k, v in obj.items()}
+    return obj
+
+
+def sanitize_generated(gen: GeneratedResume) -> GeneratedResume:
+    """Walk the generated resume's strings, replacing en/em dashes,
+    decorative bullets, and smart quotes. Logs a counter when anything
+    fired so we can see how often the model violates the character rules."""
+    counter: dict[str, int] = {}
+    cleaned = _sanitize_obj(gen.model_dump(), counter)
+    if counter:
+        total = sum(counter.values())
+        detail = {f"U+{ord(k):04X}": v for k, v in counter.items()}
+        log.info(
+            "tailor: sanitized %d disallowed character(s) from model output: %s",
+            total,
+            detail,
+        )
+    return GeneratedResume.model_validate(cleaned)
+
+
+def _fmt_month(value: str | None) -> str:
+    """Normalise a date to "Mon YYYY". Leaves a bare year ("2018") or an
+    already-formatted value untouched, and maps Present/Current → "Present".
+    Never fabricates a month the source doesn't have."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.lower() in {"present", "current", "now"}:
+        return "Present"
+    m = re.match(r"^(\d{4})-(\d{1,2})$", v)
+    if m:
+        year, mo = m.group(1), int(m.group(2))
+        if 1 <= mo <= 12:
+            return f"{_MONTHS[mo - 1]} {year}"
+    return v
+
+
+def _links_from_candidate(candidate: dict[str, Any]) -> list[ContactLink]:
+    """Build contact links from the authoritative profile. Handles both
+    the `{linkedin, github, website}` dict shape and a list of
+    `{label, url}` entries."""
+    raw = candidate.get("links") or {}
+    out: list[ContactLink] = []
+    if isinstance(raw, dict):
+        for key, label in (("linkedin", "LinkedIn"), ("github", "GitHub"), ("website", "Website")):
+            url = raw.get(key)
+            if url and str(url).strip():
+                out.append(ContactLink(label=label, url=str(url).strip()))
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and item.get("url"):
+                out.append(
+                    ContactLink(label=str(item.get("label") or "").strip(), url=str(item["url"]).strip())
+                )
+    return out
+
+
+def _reconcile_contact(gen: GeneratedResume, candidate: dict[str, Any]) -> GeneratedResume:
+    """Force the factual contact fields from the authoritative candidate
+    profile so the model can never fabricate or drift contact details.
+    The model's tailored `headline` is kept (falling back to the profile's)."""
+    c = gen.contact
+    contact = Contact(
+        name=(candidate.get("name") or c.name or "").strip(),
+        headline=(c.headline or candidate.get("headline") or "").strip(),
+        location=(candidate.get("location") or c.location or "").strip(),
+        email=(candidate.get("email") or c.email or "").strip(),
+        phone=(candidate.get("phone") or c.phone or "").strip(),
+        links=_links_from_candidate(candidate) or c.links,
+    )
+    return gen.model_copy(update={"contact": contact})
+
+
+# ─── Two-page hard cap ─────────────────────────────────────────────────────────
+
+
+def _measure_pages(resume: TailoredResume) -> int:
+    """Exact rendered page count via the PDF renderer (lazy import to
+    avoid a cycle — pdf_export imports TailoredResume from here). We
+    measure the VISUAL mode because it's the taller of the two, so a
+    resume that fits visual also fits plain."""
+    from app.services.pdf_export import count_pages  # noqa: PLC0415
+
+    try:
+        return count_pages(resume, mode="visual")
+    except Exception as e:  # never let measurement break generation
+        log.warning("tailor: page measurement failed, assuming 1 page: %s", e)
+        return 1
+
+
+def _truncate_to_two_pages(resume: TailoredResume) -> TailoredResume:
+    """Deterministic last-resort trim when the model still overflows after
+    the retry. Per spec: truncate the oldest role's bullets first, then
+    drop the oldest role. Never touches the most recent role's existence
+    and never invents content."""
+    out = resume.model_copy(deep=True)
+    guard = 0
+    while _measure_pages(out) > 2 and guard < 200:
+        guard += 1
+        # Trim a bullet off the oldest role that still has more than one
+        # (experience is reverse-chronological, so the last entry is oldest).
+        trimmed = False
+        for exp in reversed(out.experience):
+            if len(exp.bullets) > 1:
+                exp.bullets.pop()
+                trimmed = True
+                break
+        if trimmed:
+            continue
+        # Every role is down to one bullet — drop the oldest role outright,
+        # keeping at least one.
+        if len(out.experience) > 1:
+            out.experience.pop()
+            continue
+        break  # nothing left to safely trim
+    return out
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
@@ -228,14 +442,48 @@ def generate_resume(
     settings: Settings | None = None,
     client: Anthropic | None = None,
 ) -> TailoredResume:
-    """Produce an ATS-optimized resume for `(user, job)`, incorporating
-    the user's answers to the tailoring questions. Not cached —
-    answers vary per call."""
+    """Produce an ATS-standard resume for `(user, job)`, incorporating the
+    user's answers to the tailoring questions. Not cached — answers vary
+    per call.
+
+    Pipeline: generate content → sanitize disallowed characters →
+    reconcile contact from the authoritative profile → enforce the 2-page
+    hard cap (one model retry with a tighten addendum, then deterministic
+    trimming) → stamp measured `meta.pages_estimate`.
+    """
     settings = settings or get_settings()
     candidate = get_candidate(db, user_id=user_id)
-    if not settings.has_anthropic_key:
-        return _demo_resume(job, answers, candidate=candidate)
-    return _llm_generate(job, answers, candidate, client=client, settings=settings)
+    has_key = settings.has_anthropic_key
+
+    def _produce(addendum: str = "") -> TailoredResume:
+        if not has_key:
+            gen = _demo_resume(job, answers, candidate=candidate)
+        else:
+            gen = _llm_generate(
+                job, answers, candidate, client=client, settings=settings, addendum=addendum
+            )
+        gen = sanitize_generated(gen)
+        gen = _reconcile_contact(gen, candidate)
+        return TailoredResume(**gen.model_dump(), meta=ResumeMeta(mode="visual"))
+
+    resume = _produce()
+    pages = _measure_pages(resume)
+
+    # Over budget: ask the model to tighten ONCE (only when we have a key —
+    # the demo path is deterministic, so a retry would return the same thing).
+    if pages > 2 and has_key:
+        retry = _produce(addendum=_TIGHTEN_ADDENDUM)
+        retry_pages = _measure_pages(retry)
+        if retry_pages < pages:
+            resume, pages = retry, retry_pages
+
+    # Still over: deterministic trim (oldest role's bullets, then oldest role).
+    if pages > 2:
+        resume = _truncate_to_two_pages(resume)
+        pages = _measure_pages(resume)
+
+    resume.meta.pages_estimate = max(1, min(2, pages))
+    return resume
 
 
 # ─── LLM paths ────────────────────────────────────────────────────────────────
@@ -288,114 +536,96 @@ _SYSTEM_ANALYZE = (
 )
 
 _SYSTEM_GENERATE = (
-    "You are an ATS optimization expert performing step 4 of the tailoring "
-    "flow: rewriting the candidate's resume against the target JD. You will "
-    "be shown the CANDIDATE PROFILE, the TARGET JOB, and the USER ANSWERS to "
-    "the gap questions from the analyze step. The CANDIDATE PROFILE may "
-    "also include `section_order` — the order the candidate's own resume "
-    "presents its sections in. Mirror that order in the output's "
-    "`section_order` field; default to "
-    "`['summary','skills','experience','projects','education','achievements']` "
-    "when the profile doesn't pin one.\n"
+    "You are an ATS resume writer. You rewrite a candidate's resume so it is "
+    "tailored to a target job, follows strict ATS formatting standards, and "
+    "stays 100% truthful. You will be shown the CANDIDATE PROFILE, the TARGET "
+    "JOB, and the USER ANSWERS to the gap questions from the analyze step. "
+    "Return ONLY JSON matching the provided schema — no prose.\n"
     "\n"
-    "CONFIRMED SKILLS = (1) every skill already in the candidate profile, "
+    "CONFIRMED CONTENT = (1) everything already in the candidate profile, "
     "PLUS (2) every gap-question skill the user answered AFFIRMATIVELY in "
-    'USER ANSWERS. A blank, empty, or "no" answer means the skill is NOT '
-    "confirmed — do NOT add it.\n"
+    'USER ANSWERS. A blank, empty, or "no" answer means it is NOT confirmed '
+    "— do NOT add it.\n"
     "\n"
-    "── Hard rules. Break any of these and you fail the task. ──\n"
+    "════════ NON-NEGOTIABLE: NEVER FABRICATE ════════\n"
+    "Use ONLY confirmed skills, employers, titles, dates, schools, project "
+    "names, and outcomes. NEVER invent skills, metrics, numbers, "
+    "achievements, employers, or roles the candidate does not have on file. "
+    "If a bullet has no number in the profile, do not add one. Facts "
+    "(company names, titles, dates, school names, degrees) must appear "
+    "EXACTLY as in the profile. The `ats.score_estimate` is an honest "
+    "observation, NOT a target — never invent content to raise it.\n"
     "\n"
-    "1. NEVER FABRICATE. Use only confirmed skills, employers, titles, "
-    "   dates, schools, project names, and outcomes from the candidate "
-    "   profile. Never invent metrics or numbers. If the candidate's "
-    "   bullet doesn't give a number, do not add one — keep the bullet "
-    "   concrete-but-unquantified.\n"
-    "   The candidate's facts (titles, companies, dates, schools, "
-    "   project names) must appear EXACTLY as in the profile. Don't "
-    "   tweak company names, don't shorten titles, don't restate degree "
-    "   names. These are the facts; everything else is allowed to be "
-    "   reframed.\n"
+    "════════ CONTENT RULES ════════\n"
+    "- Reverse-chronological order in Experience and Education (most recent "
+    "  first).\n"
+    "- Naturally weave in keywords from the JOB DESCRIPTION, mirroring the "
+    '  job\'s EXACT terminology (use "CI/CD" if the JD says "CI/CD"). No '
+    "  keyword stuffing.\n"
+    "- Each Experience bullet starts with a strong past-tense action verb "
+    "  and, where the profile supports it, includes a quantified result. "
+    "  3 to 5 bullets per role.\n"
+    "- Group Skills into labeled categories (Languages, Frameworks, Tools, "
+    "  Cloud, etc.). Each category is {\"category\": \"...\", \"items\": [...]}.\n"
+    '  - LANGUAGES the candidate speaks go in a Skills category named '
+    '    "Languages" (e.g. {"category":"Languages","items":["English","Hindi"]}).\n'
+    "- Dates as \"Mon YYYY\" (e.g. \"Jan 2023\"). The current role's "
+    '  end_date is "Present".\n'
+    "- Past tense for prior roles; present tense ONLY for the current role.\n"
+    "- No first-person pronouns. No filler ('responsible for', 'duties "
+    "  included', 'team player', 'results-driven', 'proven track record', "
+    "  'self-starter', 'detail-oriented').\n"
+    "- ACHIEVEMENTS from the profile (awards, honours, recognitions): fold "
+    "  them into the bullets of the Experience entry where they occurred. "
+    "  NEVER create an Achievements section.\n"
+    "- Profile data that has no natural home in the schema: OMIT it. Do not "
+    "  invent a section for it.\n"
     "\n"
-    "2. NO AI / RECRUITER CLICHÉS. Any of these phrases (or close "
-    "   paraphrases) in the output is an automatic failure:\n"
-    "      results-driven · results-oriented · proven track record · "
-    "      hard-working · self-starter · go-getter · team player · "
-    "      synergies · leveraged synergies · responsible for · "
-    "      tasked with · duties included · helped with · "
-    "      passionate about · proactive · detail-oriented · "
-    "      think outside the box · go above and beyond · "
-    "      dynamic professional · cross-functional collaboration "
-    "      (as a stand-alone bullet) · in a fast-paced environment\n"
-    "   Replace them with concrete specifics — what the candidate "
-    "   actually did, what shipped, what changed.\n"
+    "════════ CHARACTER & STYLE RULES (STRICT) ════════\n"
+    "- NO en dashes (the U+2013 character) or em dashes (the U+2014 "
+    '  character) anywhere in ANY output string. Use a hyphen "-" or '
+    '  rewrite. For ranges use the word "to" (e.g. "2021 to 2024").\n'
+    "- No emojis, no decorative symbols, no special unicode bullet "
+    "  characters. Do not put bullet glyphs inside the bullet strings — "
+    "  each bullet is plain text and the renderer adds the marker.\n"
+    "- Use straight quotes (' and \") only. Every string must be clean "
+    "  plain text, safe for both DOCX and PDF encoding.\n"
     "\n"
-    "3. EVERY BULLET IS SPECIFIC. Lead with a strong active verb (built, "
-    "   shipped, designed, led, migrated, scaled, reduced, automated, "
-    "   debugged, architected, deployed, owned). State what they did + "
-    "   how + the resulting change. Use real metrics from the candidate "
-    "   profile where they exist; never invent metrics. A bullet that "
-    "   could appear unchanged on any engineer's resume is a bad bullet "
-    "   — rewrite it until it could only describe this person.\n"
+    "════════ SECTIONS (CLOSED LIST) ════════\n"
+    "The ONLY sections that exist are, in this order: Professional Summary, "
+    "Skills, Experience, Education, Projects, Certifications. There is no "
+    "other section. Map profile data into these; return an empty array for "
+    "any the candidate has no content for (it will be omitted).\n"
+    "  - contact: name, a short tailored headline, location, email, phone, "
+    "    and links (label + url) drawn from the profile. Do not invent "
+    "    contact details.\n"
+    "  - summary: 2-4 sentences, no first person. Concrete role + focus + "
+    "    1-2 standout, real accomplishments.\n"
+    "  - skills: confirmed skills only, grouped into labeled categories, "
+    "    JD-relevant categories first.\n"
+    "  - experience: every relevant role. 3-5 reframed bullets each, "
+    "    achievements folded in.\n"
+    "  - education / projects / certifications: from the profile; omit when "
+    "    empty. Never fabricate an issuer or date.\n"
     "\n"
-    "4. PROFESSIONAL BUT HUMAN. Direct, confident, declarative. No "
-    "   marketing voice, no superlatives, no overclaiming. Don't write "
-    '   "spearheaded transformational initiatives" — write what was '
-    "   actually built and what it did.\n"
+    "════════ LENGTH ════════\n"
+    "Target a clean 1-2 page resume. Be concise: cut bullets the JD doesn't "
+    "care about, and give older roles fewer bullets than recent ones.\n"
     "\n"
-    "5. ATS FORMATTING. Standard section headers (Summary, Skills, "
-    "   Experience, Education, Projects, Achievements as applicable). "
-    "   Single-column, linearly-parseable. NO tables, columns, graphics, "
-    "   text boxes, or icons — the DOCX renderer enforces this, but "
-    "   your output must already be that shape.\n"
-    "\n"
-    "6. JD KEYWORDS WOVEN IN NATURALLY. Mirror the JD's exact "
-    '   terminology for confirmed skills ("Amazon Web Services" if the '
-    '   JD says that; "AWS" if the JD says that). Weave keywords into '
-    "   the bullets where they truthfully describe the work — never "
-    "   stuff a skills list with terms the candidate hasn't confirmed.\n"
-    "\n"
-    "7. STRUCTURE MIRRORS THE CANDIDATE. Use the candidate's "
-    "   `section_order` from the profile when present; fall back to the "
-    "   default order otherwise. Section naming and approximate length "
-    "   should track the candidate's existing resume — if they wrote a "
-    "   one-line summary, don't expand it to five. If they had no "
-    "   Projects section, output an empty `projects` array.\n"
-    "\n"
-    "8. MAX 2 PAGES when rendered with standard ATS formatting. Be "
-    "   ruthless about cutting irrelevant bullets and dropping skills "
-    "   the JD doesn't screen for. Older roles get fewer bullets.\n"
-    "\n"
-    "── Section guidance ──\n"
-    "  - summary: 2-3 sentences. Concrete role + years + 1-2 standout "
-    "    accomplishments. Skip if the candidate's profile has no summary "
-    "    AND no obvious distillation possible (better to omit than to "
-    "    write a clichéd one).\n"
-    "  - skills: confirmed skills only, reordered with the JD's keywords "
-    "    first. Don't add skills the candidate hasn't confirmed.\n"
-    "  - experience: every role from the profile. Dates verbatim. "
-    "    `bullets` reframed against the JD using the rules above.\n"
-    "  - projects: include when the profile has any. `dates` is a free-"
-    "    form string like 'Jan 2023 – Mar 2023' or '2023', or null.\n"
-    "  - education: one line per entry; the candidate's profile is the "
-    "    source of truth.\n"
-    "  - achievements: include awards / honours / recognitions when "
-    "    the profile has any. Distinct from certifications — see "
-    "    next field.\n"
-    "  - certifications: include named credentials / licences from "
-    "    the profile when present. Each entry carries `name` "
-    "    (required), `issuer`, `date`, and `credential_id` — fill in "
-    "    what the profile provides, leave the rest null. Do NOT "
-    "    fabricate a missing issuer or date.\n"
-    "  - section_order: lowercase identifiers in the order the document "
-    "    should render sections in. Valid values include: 'summary', "
-    "    'skills', 'experience', 'projects', 'education', "
-    "    'achievements', 'certifications'.\n"
-    "\n"
-    "In `ats_notes`, briefly explain (a) which JD-terminology choices "
-    "you made, (b) which user-confirmed gaps you incorporated, and (c) "
-    "any JD requirement that remains genuinely unmet so the user knows.\n"
-    "\n"
-    "Output strictly the JSON schema requested — no prose."
+    "In `ats.matched_keywords` list JD keywords the resume genuinely covers; "
+    "in `ats.missing_keywords` list JD keywords still not covered (reported "
+    "honestly). Output strictly the JSON schema requested — no prose."
+)
+
+# Appended to the user message on the single retry when the first render
+# came out over the 2-page cap. Asks the model to tighten rather than the
+# server bluntly truncating.
+_TIGHTEN_ADDENDUM = (
+    "\n\nIMPORTANT: the previous version rendered to more than 2 pages. "
+    "Tighten it to fit 2 pages: shorten wordy bullets, keep 3-4 bullets on "
+    "recent roles and 2-3 on older ones, and trim the oldest, least-relevant "
+    "roles' detail first. Do NOT remove the most recent role and do NOT "
+    "invent anything. Same JSON schema."
 )
 
 
@@ -503,11 +733,20 @@ def _llm_generate(
     *,
     client: Anthropic | None,
     settings: Settings,
-) -> TailoredResume:
+    addendum: str = "",
+) -> GeneratedResume:
     api = _build_client(settings, client)
+    user_content = (
+        _job_block(job)
+        + "\n\nUser answers to tailoring questions (may be partial):\n"
+        + json.dumps(answers, indent=2)
+        + "\n\nReturn the tailored resume as JSON matching the provided schema. "
+        "Never invent facts not present in the candidate profile."
+        + addendum
+    )
     response = api.messages.create(
         model=MODEL,
-        max_tokens=3000,
+        max_tokens=4000,
         system=[
             {"type": "text", "text": _SYSTEM_GENERATE},
             {
@@ -516,27 +755,16 @@ def _llm_generate(
                 "cache_control": {"type": "ephemeral"},
             },
         ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    _job_block(job)
-                    + "\n\nUser answers to tailoring questions (may be partial):\n"
-                    + json.dumps(answers, indent=2)
-                    + "\n\nReturn the tailored resume as JSON matching the provided schema. "
-                    "Never invent facts not present in the candidate profile."
-                ),
-            }
-        ],
+        messages=[{"role": "user", "content": user_content}],
         output_config={
             "format": {
                 "type": "json_schema",
-                "schema": TAILORED_RESUME_SCHEMA,
+                "schema": GENERATED_RESUME_SCHEMA,
             }
         },
     )
     text = _first_text(response)
-    return TailoredResume.model_validate_json(text)
+    return GeneratedResume.model_validate_json(text)
 
 
 def _first_text(response: Any) -> str:
@@ -604,12 +832,13 @@ def _is_affirmative(answer: str | None) -> bool:
     return True
 
 
-def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]) -> TailoredResume:
-    """Echo the canonical candidate back, plus any gap skills the user
-    confirmed via their answers. Skills the user didn't confirm are never
-    added — same rule the live prompt enforces."""
-    # Pull confirmed gaps out of the answer keys (they were generated by
-    # `_question_for_gap`, so we can recover the skill name).
+def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]) -> GeneratedResume:
+    """Deterministic mock in the new ATS schema. Echoes the candidate
+    profile, folds in any gap skills the user confirmed, and emits the
+    spec's categorized-skills / dated-entry / ats shapes. Skills the user
+    didn't confirm are never added — same rule the live prompt enforces."""
+    # Recover confirmed gaps from the answer keys (generated by
+    # `_question_for_gap`, so the skill name is parseable back out).
     confirmed_gaps: list[str] = []
     for question, answer in answers.items():
         if not _is_affirmative(answer):
@@ -617,44 +846,92 @@ def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]
         prefix = "[demo] Have you used "
         suffix = " in production?"
         if question.startswith(prefix) and question.endswith(suffix):
-            skill = question[len(prefix) : -len(suffix)]
-            confirmed_gaps.append(skill)
+            confirmed_gaps.append(question[len(prefix) : -len(suffix)])
 
-    # Lead with user-confirmed gaps (the JD specifically asked about
-    # them), then the candidate's existing skills. Otherwise the [:18]
-    # truncate below could drop a freshly-confirmed skill while keeping
-    # ones the JD doesn't even screen for.
     candidate_skills = _flat_skills(candidate)
     candidate_lower = {x.lower() for x in candidate_skills}
-    skills = [s for s in confirmed_gaps if s.lower() not in candidate_lower] + candidate_skills
+    # Lead with user-confirmed gaps (the JD asked about them), then the
+    # candidate's existing skills.
+    ordered_skills = [s for s in confirmed_gaps if s.lower() not in candidate_lower] + candidate_skills
 
-    summary = candidate["summary"]
-    if confirmed_gaps:
-        summary = f"{summary} (demo: also confirmed via user answers — {', '.join(confirmed_gaps)})"
+    skill_groups: list[SkillGroup] = []
+    if ordered_skills:
+        skill_groups.append(SkillGroup(category="Skills", items=ordered_skills[:24]))
+    # Spoken languages → their own Skills category (spec routing rule).
+    spoken = [
+        str(lang.get("name")).strip()
+        for lang in (candidate.get("languages") or [])
+        if isinstance(lang, dict) and lang.get("name")
+    ]
+    if spoken:
+        skill_groups.append(SkillGroup(category="Languages", items=spoken))
 
-    return TailoredResume(
-        summary=summary,
-        skills=skills[:18],
-        experience=[
-            ExperienceBullet(
-                company=e["company"],
-                title=e["title"],
-                location=e.get("location"),
-                dates=f"{e['start']} – {e['end']}",
-                bullets=list(e["bullets"]),
-            )
-            for e in candidate["experience"]
-        ],
-        education=[
-            f"{ed['degree']}, {ed['school']} ({ed['graduation']})" for ed in candidate["education"]
-        ],
-        ats_notes=(
-            "[demo mode] No ANTHROPIC_API_KEY is configured, so this resume is "
-            f"the canonical candidate profile tailored against “{job.title}” "
-            "using a deterministic mock. Skills the user confirmed via answers "
-            "are folded in; unconfirmed gap skills are NOT added. Set "
-            "ANTHROPIC_API_KEY on the backend to get a real Claude-generated rewrite."
+    experience = [
+        ExperienceEntry(
+            title=e.get("title", ""),
+            company=e.get("company", ""),
+            location=e.get("location") or "",
+            start_date=_fmt_month(e.get("start")),
+            end_date=_fmt_month(e.get("end")),
+            bullets=list(e.get("bullets") or []),
+        )
+        for e in (candidate.get("experience") or [])
+    ]
+
+    education = [
+        EducationEntry(
+            degree=ed.get("degree", ""),
+            field=ed.get("field") or "",
+            institution=ed.get("school") or ed.get("institution") or "",
+            location=ed.get("location") or "",
+            graduation_date=_fmt_month(ed.get("graduation") or ed.get("graduation_date")),
+        )
+        for ed in (candidate.get("education") or [])
+    ]
+
+    projects = [
+        ProjectEntry(
+            name=p.get("name", ""),
+            description=p.get("description") or "",
+            bullets=list(p.get("bullets") or []),
+        )
+        for p in (candidate.get("projects") or [])
+        if isinstance(p, dict) and p.get("name")
+    ]
+
+    certifications = [
+        CertificationEntry(
+            name=c.get("name", ""),
+            issuer=c.get("issuer") or "",
+            date=_fmt_month(c.get("date")),
+        )
+        for c in (candidate.get("certifications") or [])
+        if isinstance(c, dict) and c.get("name")
+    ]
+
+    # ATS keyword coverage from the job's detected skills.
+    job_skills = list(job.skills or [])
+    confirmed_lower = candidate_lower | {g.lower() for g in confirmed_gaps}
+    matched = [s for s in job_skills if s.lower() in confirmed_lower]
+    missing = [s for s in job_skills if s.lower() not in confirmed_lower]
+    score = max(0, min(100, round(100 * len(matched) / len(job_skills)))) if job_skills else 0
+
+    return GeneratedResume(
+        contact=Contact(
+            name=candidate.get("name", ""),
+            headline=candidate.get("headline") or "",
+            location=candidate.get("location") or "",
+            email=candidate.get("email") or "",
+            phone=candidate.get("phone") or "",
+            links=_links_from_candidate(candidate),
         ),
+        summary=candidate.get("summary") or "",
+        skills=skill_groups,
+        experience=experience,
+        education=education,
+        projects=projects,
+        certifications=certifications,
+        ats=AtsBlock(matched_keywords=matched, missing_keywords=missing, score_estimate=score),
     )
 
 

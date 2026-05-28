@@ -596,20 +596,62 @@ export type Analysis = {
   genuine_lacks?: string[];
 };
 
-export type ExperienceBullet = {
-  company: string;
+/** Render style for the tailored resume export. */
+export type ResumeMode = "visual" | "plain";
+
+export type ContactLink = { label: string; url: string };
+
+export type ResumeContact = {
+  name: string;
+  headline: string;
+  location: string;
+  email: string;
+  phone: string;
+  links: ContactLink[];
+};
+
+export type SkillGroup = { category: string; items: string[] };
+
+export type ExperienceEntry = {
   title: string;
-  location: string | null;
-  dates: string;
+  company: string;
+  location: string;
+  start_date: string;
+  end_date: string;
   bullets: string[];
 };
 
+export type EducationEntry = {
+  degree: string;
+  field: string;
+  institution: string;
+  location: string;
+  graduation_date: string;
+};
+
+export type ProjectEntry = { name: string; description: string; bullets: string[] };
+
+export type CertificationEntry = { name: string; issuer: string; date: string };
+
+export type ResumeAts = {
+  matched_keywords: string[];
+  missing_keywords: string[];
+  score_estimate: number;
+};
+
+export type ResumeMeta = { mode: ResumeMode; pages_estimate: number };
+
+/** The ATS-standard tailored resume (matches the backend `TailoredResume`). */
 export type TailoredResume = {
+  meta: ResumeMeta;
+  contact: ResumeContact;
   summary: string;
-  skills: string[];
-  experience: ExperienceBullet[];
-  education: string[];
-  ats_notes: string;
+  skills: SkillGroup[];
+  experience: ExperienceEntry[];
+  education: EducationEntry[];
+  projects: ProjectEntry[];
+  certifications: CertificationEntry[];
+  ats: ResumeAts;
 };
 
 export type AnalyzeResponse = {
@@ -649,15 +691,21 @@ export async function generateTailoredResume(
   return (await res.json()) as GenerateResponse;
 }
 
-export async function downloadResumeDocx(
+/** Download the tailored resume as a file. `format` picks the endpoint
+ * (.docx or .pdf); `mode` picks the render style ("visual" default or
+ * "plain" for maximum ATS compatibility). Both formats carry identical
+ * text — only the styling differs. */
+export async function downloadResume(
   resume: TailoredResume,
   filename: string,
+  format: "docx" | "pdf",
+  mode: ResumeMode = "visual",
 ): Promise<Blob> {
-  const res = await fetch(`${API_URL}/api/tailor/docx`, {
+  const res = await fetch(`${API_URL}/api/tailor/${format}`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ resume, filename }),
+    body: JSON.stringify({ resume, filename, mode }),
   });
   if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   return await res.blob();

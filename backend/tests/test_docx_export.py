@@ -1,10 +1,11 @@
-"""DOCX renderer tests — covers the ATS rules the layout MUST follow:
+"""DOCX + PDF renderer tests — covers the ATS rendering contract:
 
-- Right-aligned dates/location via a real right-aligned TAB STOP, NOT a
-  table, column, or text box.
-- No tables, no columns, no text boxes anywhere in the document.
-- Standard headings.
-- 2-page max — verified via the line-count estimate.
+- Single column; no tables, columns, text boxes, or images.
+- Closed-list section headings.
+- Visual mode: right-aligned date TAB STOP + heading rules.
+- Plain mode: no rules; dates inline after the company line via " | ".
+- Both modes carry identical wording (only styling differs).
+- No en/em dashes or decorative bullet glyphs anywhere.
 """
 
 from __future__ import annotations
@@ -15,215 +16,160 @@ import zipfile
 
 from docx import Document
 
-from app.services.docx_export import (
-    _condense_for_two_pages,
-    _estimate_line_count,
-    render_docx,
+from app.services.docx_export import render_docx
+from app.services.pdf_export import count_pages, render_pdf
+from app.services.tailor import (
+    Contact,
+    EducationEntry,
+    ExperienceEntry,
+    ResumeMeta,
+    SkillGroup,
+    TailoredResume,
 )
-from app.services.tailor import ExperienceBullet, TailoredResume
 
 
-def _resume(experience: list[ExperienceBullet], **overrides) -> TailoredResume:
+def _resume(**overrides) -> TailoredResume:
     defaults: dict = {
-        "summary": "Senior backend engineer with strong Python + AWS background.",
-        "skills": ["Python", "AWS", "Kafka", "PostgreSQL"],
-        "experience": experience,
-        "education": ["B.S. CS, CMU (2018)"],
-        "ats_notes": "Tailored for ATS — kept relevant skills only.",
+        "meta": ResumeMeta(mode="visual"),
+        "contact": Contact(
+            name="Alex Rivera",
+            headline="Senior Software Engineer",
+            location="San Francisco, CA",
+            email="alex@example.com",
+            phone="+1 (555) 123-4567",
+        ),
+        "summary": "Senior backend engineer with a strong Python and AWS background.",
+        "skills": [
+            SkillGroup(category="Languages", items=["Python", "TypeScript"]),
+            SkillGroup(category="Cloud", items=["AWS", "Kubernetes"]),
+        ],
+        "experience": [
+            ExperienceEntry(
+                title="Senior Software Engineer",
+                company="Forge Labs",
+                location="San Francisco, CA",
+                start_date="Feb 2023",
+                end_date="Present",
+                bullets=[
+                    "Led migration of billing service to event-driven Kafka; cut p95 latency to 110ms.",
+                    "Designed a feature-flag platform (FastAPI, Postgres) used by 6 teams.",
+                ],
+            ),
+            ExperienceEntry(
+                title="Software Engineer",
+                company="Northwind Analytics",
+                location="Remote",
+                start_date="Jun 2020",
+                end_date="Jan 2023",
+                bullets=["Built a data ingestion pipeline (Airflow, Snowflake) for 4B events per day."],
+            ),
+        ],
+        "education": [
+            EducationEntry(
+                degree="B.S. Computer Science",
+                institution="Carnegie Mellon University",
+                location="Pittsburgh, PA",
+                graduation_date="May 2018",
+            )
+        ],
     }
     defaults.update(overrides)
     return TailoredResume(**defaults)
 
 
-def _basic_experience() -> list[ExperienceBullet]:
-    return [
-        ExperienceBullet(
-            company="Forge Labs",
-            title="Senior Software Engineer",
-            location="San Francisco, CA",
-            dates="2023 – Present",
-            bullets=[
-                "Led migration of billing service to event-driven Kafka; p95 480ms→110ms.",
-                "Designed feature-flag platform (FastAPI + Postgres) used by 6 teams.",
-            ],
-        ),
-        ExperienceBullet(
-            company="Northwind Analytics",
-            title="Software Engineer",
-            location="Remote",
-            dates="2020 – 2023",
-            bullets=["Built data ingestion pipeline (Airflow, Snowflake) — 4B events/day."],
-        ),
-    ]
-
-
-# ── Tab-stop / no-tables/columns/text-boxes ────────────────────────────────
-
-
 def _xml_blob(buf: bytes) -> str:
-    """Pull document.xml out of the .docx (which is a zip) so we can grep
-    the actual word-processing XML."""
     with zipfile.ZipFile(io.BytesIO(buf)) as zf:
         return zf.read("word/document.xml").decode("utf-8")
 
 
+def _docx_text(buf: bytes) -> str:
+    return "\n".join(p.text for p in Document(io.BytesIO(buf)).paragraphs)
+
+
+# ── No tables / columns / text boxes / images ──────────────────────────────
+
+
 def test_no_tables_columns_or_text_boxes():
-    buf = render_docx(_resume(_basic_experience()))
-    xml = _xml_blob(buf)
-    # Tables — `<w:tbl>` is the table element name.
-    assert "<w:tbl>" not in xml and "<w:tbl " not in xml
-    # Columns — `<w:cols w:num="2"/>` or higher.
-    cols_match = re.search(r'<w:cols[^>]*w:num="(\d+)"', xml)
-    if cols_match:
-        assert int(cols_match.group(1)) == 1, "document must be single-column"
-    # Text boxes — `<w:txbxContent>` is the text-box-content element.
-    assert "txbxContent" not in xml
-    # No images either.
-    assert "<w:drawing" not in xml and "<pic:pic" not in xml
+    for mode in ("visual", "plain"):
+        xml = _xml_blob(render_docx(_resume(), mode=mode))
+        assert "<w:tbl>" not in xml and "<w:tbl " not in xml
+        cols_match = re.search(r'<w:cols[^>]*w:num="(\d+)"', xml)
+        if cols_match:
+            assert int(cols_match.group(1)) == 1, "document must be single-column"
+        assert "txbxContent" not in xml
+        assert "<w:drawing" not in xml and "<pic:pic" not in xml
 
 
-def test_experience_uses_right_tab_stop_for_dates_and_location():
-    buf = render_docx(_resume(_basic_experience()))
-    xml = _xml_blob(buf)
+# ── Visual mode: right tab stop + heading rules ────────────────────────────
 
-    # A right-aligned tab stop is `<w:tab>` (inside `<w:tabs>`) carrying
-    # `w:val="right"` AND a numeric `w:pos`. Attribute order isn't fixed in
-    # python-docx's output, so match either ordering.
+
+def test_visual_mode_uses_right_tab_stop_for_dates():
+    xml = _xml_blob(render_docx(_resume(), mode="visual"))
     right_tab_stops = [
         m
         for m in re.findall(r"<w:tab\b[^>]*/>", xml)
         if 'w:val="right"' in m and re.search(r'w:pos="\d+"', m)
     ]
-    assert (
-        len(right_tab_stops) >= 2
-    ), f"expected ≥1 right-aligned tab stop per experience entry; got {len(right_tab_stops)}"
-
-    # The `\t` between left and right runs becomes a `<w:tab/>` element
-    # (no `w:val`/`w:pos`). At least one per experience entry header.
-    inline_tabs = re.findall(r"<w:tab\s*/>", xml)
-    assert len(inline_tabs) >= 2
-
-    # Verify both the title/company text and the date string appear in the
-    # rendered DOCX — confirms left+right halves are present.
-    doc = Document(io.BytesIO(buf))
-    text_blob = "\n".join(p.text for p in doc.paragraphs)
-    assert "Senior Software Engineer, Forge Labs" in text_blob
-    assert "San Francisco, CA · 2023 – Present" in text_blob
-    # And: title appears BEFORE the dates on the same paragraph (left/right
-    # split, not separate paragraphs).
-    for p in doc.paragraphs:
-        if "Forge Labs" in p.text:
-            assert p.text.index("Forge Labs") < p.text.index("2023 – Present")
-            break
+    # One per experience + education entry (2 + 1 = 3 here).
+    assert len(right_tab_stops) >= 3, f"expected right-aligned tab stops; got {len(right_tab_stops)}"
+    # Inline `\t` between the company and the date run.
+    assert re.findall(r"<w:tab\s*/>", xml)
+    # Visual mode draws heading rules (paragraph bottom borders).
+    assert "w:pBdr" in xml
 
 
-def test_standard_ats_section_headings_present():
-    buf = render_docx(_resume(_basic_experience()))
-    doc = Document(io.BytesIO(buf))
-    text = "\n".join(p.text for p in doc.paragraphs)
-    for heading in ("SUMMARY", "SKILLS", "EXPERIENCE", "EDUCATION"):
+def test_plain_mode_has_no_rules_and_inline_dates():
+    buf = render_docx(_resume(), mode="plain")
+    xml = _xml_blob(buf)
+    # No heading rules, no right-aligned tab stops in plain mode.
+    assert "w:pBdr" not in xml
+    assert not [m for m in re.findall(r"<w:tab\b[^>]*/>", xml) if 'w:val="right"' in m]
+    # Dates inline after the company/location, joined by " | ".
+    text = _docx_text(buf)
+    assert "Forge Labs, San Francisco, CA | Feb 2023 to Present" in text
+
+
+# ── Headings (closed list) ─────────────────────────────────────────────────
+
+
+def test_closed_list_headings_present():
+    text = _docx_text(render_docx(_resume(), mode="visual"))
+    for heading in ("Professional Summary", "Skills", "Experience", "Education"):
         assert heading in text
+    # Skills render as labeled categories.
+    assert "Languages: Python, TypeScript" in text
 
 
-# ── 2-page max ─────────────────────────────────────────────────────────────
+# ── Identical wording across modes ─────────────────────────────────────────
 
 
-def test_estimate_under_two_pages_for_typical_resume():
-    resume = _resume(_basic_experience())
-    assert _estimate_line_count(resume) <= 100  # 2 pages * 50 lines
+def test_modes_share_identical_words():
+    """Visual and plain must contain the same words — only the date join
+    differs ("\\t" vs " | "), which we normalise before comparing."""
+    def words(buf: bytes) -> list[str]:
+        norm = _docx_text(buf).replace("\t", " ").replace(" | ", " ")
+        return re.findall(r"\S+", norm)
 
-
-def test_estimate_flags_overstuffed_resume():
-    """A resume with 6 roles × 8 long bullets each is obviously over."""
-    overstuffed = _resume(
-        [
-            ExperienceBullet(
-                company=f"Company {i}",
-                title="Senior Software Engineer",
-                location="San Francisco, CA",
-                dates=f"{2010 + i} – {2010 + i + 2}",
-                bullets=[
-                    "Long bullet text that goes on for a while describing a "
-                    "complex achievement with multiple metrics and outcomes that "
-                    f"should wrap to two lines in the final document (#{j})."
-                    for j in range(8)
-                ],
-            )
-            for i in range(6)
-        ],
-        skills=[f"Skill{n}" for n in range(40)],
-    )
-    assert _estimate_line_count(overstuffed) > 100
-
-
-def test_condense_brings_overstuffed_within_budget():
-    """`_condense_for_two_pages` should drop until estimate ≤ budget,
-    starting with extra bullets, then oldest roles."""
-    overstuffed = _resume(
-        [
-            ExperienceBullet(
-                company=f"Company {i}",
-                title="Senior Software Engineer",
-                location="San Francisco, CA",
-                dates=f"{2010 + i} – {2010 + i + 2}",
-                bullets=[f"Bullet {j} describing a meaningful achievement." for j in range(8)],
-            )
-            for i in range(6)
-        ],
+    assert words(render_docx(_resume(), mode="visual")) == words(
+        render_docx(_resume(), mode="plain")
     )
 
-    condensed = _condense_for_two_pages(overstuffed)
-    assert _estimate_line_count(condensed) <= 100
-    # Must not have invented new content.
-    seen_companies = {e.company for e in condensed.experience}
-    assert seen_companies.issubset({e.company for e in overstuffed.experience})
+
+# ── No disallowed characters survive to the rendered DOCX ──────────────────
 
 
-def test_condense_preserves_most_recent_role():
-    """Recency is signal — drop oldest first, never the most recent."""
-    overstuffed = _resume(
-        [
-            ExperienceBullet(
-                company=f"Company {i}",
-                title="Engineer",
-                dates=f"{2010 + i}",
-                bullets=[f"b{j}" for j in range(6)],
-            )
-            for i in range(6)
-        ],
-    )
-    condensed = _condense_for_two_pages(overstuffed)
-    # The first (most recent) entry must survive.
-    assert condensed.experience[0].company == "Company 0"
+def test_no_dashes_or_bullet_glyphs_in_docx():
+    text = _docx_text(render_docx(_resume(), mode="visual"))
+    for bad in ("–", "—", "•", "‘", "’", "“", "”"):
+        assert bad not in text
 
 
-def test_render_docx_honours_two_page_max_under_pressure():
-    """End-to-end through render_docx — an overstuffed resume should
-    produce a small-enough DOCX. Use realistic-length bullets so the
-    line estimate reflects a real-world page count, not a degenerate
-    "all bullets are 20 chars long" toy case."""
-    long_bullet = (
-        "Led a complex multi-quarter platform migration that reduced infrastructure "
-        "cost by 30% while improving latency and reliability across services."
-    )
-    overstuffed = _resume(
-        [
-            ExperienceBullet(
-                company=f"Company {i}",
-                title="Senior Engineer",
-                location="SF",
-                dates=f"{2010 + i} – {2012 + i}",
-                bullets=[f"{long_bullet} (#{j})" for j in range(8)],
-            )
-            for i in range(5)
-        ],
-        skills=[f"Skill{n}" for n in range(40)],
-    )
-    # The fixture is well over the budget pre-condensation.
-    assert _estimate_line_count(overstuffed) > 100
-    buf = render_docx(overstuffed)
-    # After render_docx → condense → re-render, the estimate of the
-    # surviving (truncated) content must fit.
-    doc = Document(io.BytesIO(buf))
-    non_empty = sum(1 for p in doc.paragraphs if p.text.strip())
-    assert non_empty <= 45, f"expected ≤45 non-empty paragraphs, got {non_empty}"
+# ── PDF renderer ───────────────────────────────────────────────────────────
+
+
+def test_pdf_renders_both_modes():
+    for mode in ("visual", "plain"):
+        pdf = render_pdf(_resume(), mode=mode)
+        assert pdf[:4] == b"%PDF"
+        assert len(pdf) > 1000
+        assert count_pages(_resume(), mode=mode) in (1, 2)

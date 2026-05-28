@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,10 +16,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import {
   type Analysis,
+  type ExperienceEntry,
   type Job,
+  type ResumeMode,
   type TailoredResume,
   analyzeJob,
-  downloadResumeDocx,
+  downloadResume,
   generateTailoredResume,
 } from "@/lib/api";
 
@@ -32,7 +34,11 @@ export function TailorPanel({ job }: { job: Job }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [resume, setResume] = useState<TailoredResume | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState(false);
+  // Which file is currently being prepared ("docx"/"pdf"), or null.
+  const [downloading, setDownloading] = useState<"docx" | "pdf" | null>(null);
+  // Render style for the export. Default "visual"; "plain" strips
+  // flourishes for maximum ATS parser compatibility.
+  const [mode, setMode] = useState<ResumeMode>("visual");
 
   async function onAnalyze() {
     setError(null);
@@ -65,21 +71,22 @@ export function TailorPanel({ job }: { job: Job }) {
     }
   }
 
-  async function onDownload() {
+  async function onDownload(format: "docx" | "pdf") {
     if (!resume) return;
-    setDownloading(true);
+    setDownloading(format);
     setError(null);
     try {
-      const filename = `${job.company}-${job.title}`
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .slice(0, 80);
-      const blob = await downloadResumeDocx(resume, filename || "tailored-resume");
+      const filename =
+        `${job.company}-${job.title}`
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 80) || "tailored-resume";
+      const blob = await downloadResume(resume, filename, format, mode);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${filename || "tailored-resume"}.docx`;
+      a.download = `${filename}.${format}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -87,7 +94,7 @@ export function TailorPanel({ job }: { job: Job }) {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Download failed");
     } finally {
-      setDownloading(false);
+      setDownloading(null);
     }
   }
 
@@ -182,12 +189,36 @@ export function TailorPanel({ job }: { job: Job }) {
           <>
             <Separator />
             <ResumeView resume={resume} />
+
+            <div className="space-y-2 rounded-lg border border-border/70 bg-secondary/30 p-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  Style
+                </span>
+                <ModeToggle mode={mode} onChange={setMode} disabled={downloading !== null} />
+              </div>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Plain mode strips visual flourishes for maximum ATS parser
+                compatibility. Try this if a system rejects the visual version.
+              </p>
+            </div>
+
             <div className="flex flex-wrap items-center justify-end gap-2">
               <Button variant="ghost" onClick={reset}>
                 Start over
               </Button>
-              <Button onClick={() => void onDownload()} disabled={downloading}>
-                {downloading ? "Preparing…" : "Download .docx"}
+              <Button
+                variant="outline"
+                onClick={() => void onDownload("pdf")}
+                disabled={downloading !== null}
+              >
+                {downloading === "pdf" ? "Preparing…" : "Download .pdf"}
+              </Button>
+              <Button
+                onClick={() => void onDownload("docx")}
+                disabled={downloading !== null}
+              >
+                {downloading === "docx" ? "Preparing…" : "Download .docx"}
               </Button>
             </div>
           </>
@@ -335,73 +366,176 @@ function ScoreRing({ score }: { score: number }) {
   );
 }
 
+function ModeToggle({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: ResumeMode;
+  onChange: (m: ResumeMode) => void;
+  disabled?: boolean;
+}) {
+  const opts: { value: ResumeMode; label: string }[] = [
+    { value: "visual", label: "Visual" },
+    { value: "plain", label: "Plain (max ATS)" },
+  ];
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Resume render style"
+      className="inline-flex rounded-md border border-border bg-card p-0.5"
+    >
+      {opts.map((o) => {
+        const active = mode === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            disabled={disabled}
+            onClick={() => onChange(o.value)}
+            className={
+              "rounded px-3 py-1 text-xs font-medium transition-colors duration-fast disabled:opacity-50 " +
+              (active
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground")
+            }
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function ResumeView({ resume }: { resume: TailoredResume }) {
+  const dates = (e: ExperienceEntry) =>
+    [e.start_date, e.end_date].filter(Boolean).join(" to ");
+
   return (
     <div className="space-y-5">
-      <section className="rounded-md border border-highlight/20 bg-highlight-soft/40 p-3">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-highlight-foreground">
-          ATS notes
+      <section className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-primary/15 bg-primary-soft/40 p-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-primary-soft-foreground">
+          ATS keywords
         </p>
-        <p className="mt-1 text-sm text-foreground/90">{resume.ats_notes}</p>
+        <p className="text-xs text-foreground/80">
+          <span className="font-medium text-foreground">{resume.ats.matched_keywords.length}</span>{" "}
+          matched
+          {resume.ats.missing_keywords.length > 0 && (
+            <>
+              {" · "}
+              <span className="font-medium text-foreground">
+                {resume.ats.missing_keywords.length}
+              </span>{" "}
+              still missing
+            </>
+          )}
+          {" · ~"}
+          {resume.ats.score_estimate}% coverage
+        </p>
       </section>
 
-      <section>
-        <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Summary
-        </p>
-        <p className="mt-1.5 text-sm leading-relaxed text-foreground/90">
-          {resume.summary}
-        </p>
-      </section>
+      {resume.summary && (
+        <section>
+          <SectionLabel>Professional Summary</SectionLabel>
+          <p className="mt-1.5 text-sm leading-relaxed text-foreground/90">{resume.summary}</p>
+        </section>
+      )}
 
-      <section>
-        <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Skills
-        </p>
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {resume.skills.map((s) => (
-            <span
-              key={s}
-              className="rounded-md bg-secondary px-1.5 py-0.5 text-xs font-medium text-secondary-foreground"
-            >
-              {s}
-            </span>
-          ))}
-        </div>
-      </section>
-
-      <section className="space-y-3">
-        <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Experience
-        </p>
-        {resume.experience.map((e, i) => (
-          <div key={`${e.company}-${i}`} className="space-y-1">
-            <p className="text-sm font-medium">
-              {e.title}, {e.company}
-              <span className="ml-2 text-xs font-normal text-muted-foreground">
-                {e.location ? `${e.location} · ` : ""}
-                {e.dates}
-              </span>
+      {resume.skills.length > 0 && (
+        <section className="space-y-1.5">
+          <SectionLabel>Skills</SectionLabel>
+          {resume.skills.map((g, i) => (
+            <p key={`${g.category}-${i}`} className="text-sm text-foreground/90">
+              {g.category && <span className="font-medium">{g.category}: </span>}
+              {g.items.join(", ")}
             </p>
-            <ul className="ml-4 list-disc space-y-1 text-sm text-foreground/90">
-              {e.bullets.map((b, j) => (
-                <li key={j}>{b}</li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </section>
-
-      <section>
-        <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Education
-        </p>
-        <ul className="mt-1.5 space-y-1 text-sm text-foreground/90">
-          {resume.education.map((line, i) => (
-            <li key={i}>{line}</li>
           ))}
-        </ul>
-      </section>
+        </section>
+      )}
+
+      {resume.experience.length > 0 && (
+        <section className="space-y-3">
+          <SectionLabel>Experience</SectionLabel>
+          {resume.experience.map((e, i) => (
+            <div key={`${e.company}-${i}`} className="space-y-1">
+              <p className="text-sm font-medium">{e.title}</p>
+              <p className="text-xs text-muted-foreground">
+                {[e.company, e.location].filter(Boolean).join(", ")}
+                {dates(e) ? ` | ${dates(e)}` : ""}
+              </p>
+              <ul className="ml-4 list-disc space-y-1 text-sm text-foreground/90">
+                {e.bullets.map((b, j) => (
+                  <li key={j}>{b}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {resume.education.length > 0 && (
+        <section className="space-y-1">
+          <SectionLabel>Education</SectionLabel>
+          {resume.education.map((ed, i) => (
+            <div key={i} className="text-sm text-foreground/90">
+              <span className="font-medium">
+                {[ed.degree, ed.field].filter(Boolean).join(", ")}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {" — "}
+                {[ed.institution, ed.location].filter(Boolean).join(", ")}
+                {ed.graduation_date ? ` | ${ed.graduation_date}` : ""}
+              </span>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {resume.projects.length > 0 && (
+        <section className="space-y-2">
+          <SectionLabel>Projects</SectionLabel>
+          {resume.projects.map((p, i) => (
+            <div key={`${p.name}-${i}`} className="space-y-1">
+              <p className="text-sm font-medium">{p.name}</p>
+              {p.description && (
+                <p className="text-sm text-foreground/90">{p.description}</p>
+              )}
+              {p.bullets.length > 0 && (
+                <ul className="ml-4 list-disc space-y-1 text-sm text-foreground/90">
+                  {p.bullets.map((b, j) => (
+                    <li key={j}>{b}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
+
+      {resume.certifications.length > 0 && (
+        <section className="space-y-1">
+          <SectionLabel>Certifications</SectionLabel>
+          {resume.certifications.map((c, i) => (
+            <p key={`${c.name}-${i}`} className="text-sm text-foreground/90">
+              <span className="font-medium">
+                {[c.name, c.issuer].filter(Boolean).join(", ")}
+              </span>
+              {c.date ? <span className="text-xs text-muted-foreground"> | {c.date}</span> : null}
+            </p>
+          ))}
+        </section>
+      )}
     </div>
+  );
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+      {children}
+    </p>
   );
 }
