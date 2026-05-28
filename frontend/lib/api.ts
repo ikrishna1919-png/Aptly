@@ -208,12 +208,16 @@ export async function saveProfile(profile: Profile): Promise<Profile> {
 // API contract.
 
 export const PARSE_POLL_INTERVAL_MS = 2_000;
-// Worst-case wait. The parser itself takes milliseconds; this ceiling
-// only fires if the worker thread is genuinely stuck (DB down, etc.),
-// in which case showing the user a "still working…" message
-// indefinitely is worse than surfacing `ParseTimeoutError` and letting
-// them retry.
-export const PARSE_MAX_WAIT_MS = 30_000;
+// Worst-case wait for the polling loop. The backend's hard
+// wall-clock ceiling on the Anthropic call is 60s; the worker can
+// then take a couple of seconds to write the terminal status. 120s
+// gives the worker plenty of headroom while still surfacing a clear
+// timeout to the user when the row really is stuck.
+export const PARSE_MAX_WAIT_MS = 120_000;
+// How long to wait before swapping the spinner copy from "Parsing
+// your resume…" to a calmer "still working…" message — gives the
+// user a signal that a long parse is normal and not stuck.
+export const PARSE_STILL_WORKING_AFTER_MS = 15_000;
 
 export type ParseRunStatus = "pending" | "running" | "success" | "failed";
 
@@ -229,7 +233,9 @@ export type ParseRun = {
 export class ParseTimeoutError extends Error {
   constructor() {
     super(
-      "Parse is taking longer than expected. Reload and try again.",
+      "Parse is still running after two minutes — the worker may be stuck. " +
+        "Reload the page and try again, and if the problem persists paste " +
+        "your resume as text instead.",
     );
     this.name = "ParseTimeoutError";
   }

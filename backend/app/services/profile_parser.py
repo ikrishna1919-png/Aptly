@@ -29,6 +29,27 @@ the structural fields too. Partial extraction is better than no
 extraction — the frontend renders whatever fields came back and lets
 the user fill the rest in by hand.
 
+**Background-worker contract (don't break it):**
+
+  * `_execute_parse_run` MUST write a terminal status — `success` or
+    `failed` — on every code path. The try/except/finally below is
+    structured so the `finally` clause writes a defensive `failed`
+    row if the success + error branches both fail somehow. A row
+    that sits at `running` forever is the failure mode this module
+    is built to prevent.
+  * Every step the worker takes emits an `INFO` log line keyed on
+    `run_id`. The operator can grep one run_id in Render's logs and
+    see exactly where the worker stopped if a row ever did get
+    stuck.
+  * The Anthropic call has a hard wall-clock ceiling (see
+    `_LLM_HARD_TIMEOUT_SECONDS`) enforced by running the SDK call
+    inside `concurrent.futures.ThreadPoolExecutor` and reading the
+    future with `.result(timeout=…)`. The SDK's own `timeout=` is
+    per-phase (connect / read / pool); a slow-stream or stuck pool
+    can blow past it. The wall-clock ceiling guarantees control
+    returns to the worker even when the underlying HTTP socket
+    hangs.
+
 Public API and the Pydantic shapes are unchanged so the frontend
 autofill UI keeps working:
 
@@ -38,6 +59,7 @@ autofill UI keeps working:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import threading
@@ -74,11 +96,21 @@ _MAX_RESUME_CHARS = 200_000
 # truncation keeps token spend bounded.
 _LLM_MAX_CHARS = 14_000
 
-# Hard ceiling on the LLM call. The parser is in the user-facing
-# request path (via the background worker + polling), so a stuck
-# Anthropic call shouldn't hang the run indefinitely — we want a clear
-# "fall back to regex" path instead.
+# Per-phase HTTP timeout passed to the Anthropic SDK. The SDK
+# enforces this on connect / read / write / pool independently —
+# it's NOT a wall-clock total. See `_LLM_HARD_TIMEOUT_SECONDS`
+# below for the wall-clock ceiling that actually guarantees
+# control returns.
 _LLM_TIMEOUT_SECONDS = 30.0
+
+# Hard wall-clock cap on the LLM call. Enforced via
+# `concurrent.futures.Future.result(timeout=…)` around the SDK
+# invocation — this is the failsafe that keeps a slow-streaming or
+# stuck-pool HTTP connection from blocking the worker forever and
+# leaving a parse run at `status=running`. Tuned generously (60s)
+# so a real, slow but live Anthropic call still completes; we'd
+# rather wait an extra 30s than wrongly fail a slow run.
+_LLM_HARD_TIMEOUT_SECONDS = 60.0
 
 MODEL = "claude-sonnet-4-6"
 
@@ -382,6 +414,7 @@ def parse_resume(
     *,
     settings: Settings | None = None,
     client: Anthropic | None = None,
+    run_id: str | None = None,
 ) -> Profile:
     """Best-effort parse of pasted resume text. Always returns a Profile.
 
@@ -394,11 +427,18 @@ def parse_resume(
       3. Contact fields (email, phone, links, location) always come
          from regex — the LLM result for those is ignored.
 
-    On any Anthropic error or timeout, we log the full error and
+    On any Anthropic error or timeout (including the wall-clock
+    `_LLM_HARD_TIMEOUT_SECONDS` ceiling), we log the full error and
     return the regex-only result. Partial > empty.
+
+    `run_id` is optional — when set, every log line includes it so
+    the operator can grep one parse run in Render's logs without
+    cross-talk from other concurrent parses.
     """
+    tag = f"parse_run={run_id}" if run_id else "parse_run=adhoc"
     settings = settings or get_settings()
     if not isinstance(text, str) or not text.strip():
+        log.info("%s: empty input, returning empty profile", tag)
         return _empty_profile()
 
     text = text[:_MAX_RESUME_CHARS]
@@ -408,21 +448,42 @@ def parse_resume(
 
     # Regex pass — runs unconditionally. Provides every contact field
     # AND the structural fallback.
+    log.info("%s: running regex extract (input %d chars)", tag, len(text))
     regex_profile = _regex_extract(text, lines, sections, header_lines)
+    log.info(
+        "%s: regex extract complete (name=%r, experience=%d, education=%d)",
+        tag,
+        bool(regex_profile.name),
+        len(regex_profile.experience),
+        len(regex_profile.education),
+    )
 
     if not settings.has_anthropic_key:
+        log.info("%s: no ANTHROPIC_API_KEY — returning regex-only profile", tag)
         return regex_profile
 
     # LLM pass for structural fields. Failures don't propagate; we just
-    # return the regex result.
+    # return the regex result. Three failure modes are caught here:
+    #   1. The Anthropic SDK raises (auth error, rate limit, 500, etc.)
+    #   2. The wall-clock ceiling fires (`TimeoutError`).
+    #   3. The response doesn't parse as the expected schema.
+    log.info("%s: starting Anthropic structural extract", tag)
     try:
-        llm = _llm_extract_structural(text, settings=settings, client=client)
+        llm = _llm_extract_structural(text, settings=settings, client=client, run_id=tag)
+    except concurrent.futures.TimeoutError:
+        log.warning(
+            "%s: LLM call exceeded wall-clock %.1fs; falling back to regex",
+            tag,
+            _LLM_HARD_TIMEOUT_SECONDS,
+        )
+        return regex_profile
     except Exception as exc:  # noqa: BLE001 — broad on purpose, fall through to regex
         # Log the full error so the operator has something to debug
         # with. `log.exception` includes the traceback.
-        log.exception("resume LLM extraction failed; falling back to regex: %s", exc)
+        log.exception("%s: LLM extraction failed; falling back to regex: %s", tag, exc)
         return regex_profile
 
+    log.info("%s: Anthropic extract returned; merging with regex profile", tag)
     return _merge(regex_profile, llm)
 
 
@@ -491,6 +552,7 @@ def _llm_extract_structural(
     *,
     settings: Settings,
     client: Anthropic | None = None,
+    run_id: str | None = None,
 ) -> _LLMStructuralExtract:
     api = _build_client(settings, client)
     # Truncate the input that goes to the model. Past ~14k characters
@@ -498,22 +560,64 @@ def _llm_extract_structural(
     # bullets, references, hobbies) and the LLM accuracy on the head of
     # the resume matters far more.
     payload = text[:_LLM_MAX_CHARS]
-    response = api.messages.create(
-        model=MODEL,
-        max_tokens=4000,
-        system=_SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Raw resume text:\n---\n"
-                    + payload
-                    + "\n---\n\nReturn the extracted fields as JSON matching the schema."
-                ),
-            }
-        ],
-        output_config={"format": {"type": "json_schema", "schema": _LLM_SCHEMA}},
+
+    def _call() -> Any:
+        return api.messages.create(
+            model=MODEL,
+            max_tokens=4000,
+            system=_SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Raw resume text:\n---\n"
+                        + payload
+                        + "\n---\n\nReturn the extracted fields as JSON matching the schema."
+                    ),
+                }
+            ],
+            output_config={"format": {"type": "json_schema", "schema": _LLM_SCHEMA}},
+        )
+
+    # Hard wall-clock ceiling. The Anthropic SDK's `timeout=` is
+    # per-phase and a slow-streaming response can blow past it; this
+    # wrapper guarantees control returns to the caller after at most
+    # `_LLM_HARD_TIMEOUT_SECONDS`. `concurrent.futures.TimeoutError`
+    # propagates up to `parse_resume`, which catches it + falls
+    # back to the regex result.
+    #
+    # The pool is shut down with `wait=False` on timeout. That way
+    # we don't wait for the stuck SDK call's thread to finish — it
+    # gets abandoned as a daemon-style background thread that'll
+    # eventually finish on its own when the underlying HTTP call's
+    # per-phase timeout (`_LLM_TIMEOUT_SECONDS`) fires. The worker
+    # we care about already moved on.
+    tag = run_id or "parse_run=adhoc"
+    log.info(
+        "%s: messages.create starting (model=%s, payload=%d chars, hard_timeout=%.1fs)",
+        tag,
+        MODEL,
+        len(payload),
+        _LLM_HARD_TIMEOUT_SECONDS,
     )
+    # `thread_name_prefix` makes a stuck worker easy to spot in
+    # py-spy / thread dumps.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="resume-llm")
+    try:
+        future = pool.submit(_call)
+        try:
+            response = future.result(timeout=_LLM_HARD_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            log.warning(
+                "%s: messages.create exceeded %.1fs wall clock — abandoning thread",
+                tag,
+                _LLM_HARD_TIMEOUT_SECONDS,
+            )
+            # Don't block on the stuck thread; abandon it.
+            raise
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    log.info("%s: messages.create returned", tag)
     return _LLMStructuralExtract.model_validate_json(_first_text(response))
 
 
@@ -1112,7 +1216,7 @@ def _finish_parse(
     with SessionLocal() as db:
         run = db.execute(select(ParseRun).where(ParseRun.run_id == run_id)).scalar_one_or_none()
         if run is None:
-            log.warning("parse run %s row not found at finish", run_id)
+            log.warning("parse_run=%s: row not found at finish — was it deleted?", run_id)
             return
         run.status = status
         run.profile = profile
@@ -1122,29 +1226,82 @@ def _finish_parse(
 
 
 def _execute_parse_run(run_id: str, text: str, settings: Settings | None = None) -> None:
-    """Worker entrypoint. `parse_resume` itself never raises on input —
-    the LLM failure path is caught internally and falls back to the
-    regex extractor. The only failure surface is something underneath
-    (DB unreachable, etc.), which the outer `except` catches."""
+    """Background-worker entrypoint.
+
+    Contract: this function MUST write a terminal `ParseRun.status`
+    (either `success` or `failed`) on every code path before
+    returning. A row that sits at `running` forever is the failure
+    mode the worker exists to prevent, and the `try/except/finally`
+    structure below is what guarantees it:
+
+      * Happy path → `status=success` with the parsed profile.
+      * Caught exception (LLM hang, schema error, anything) →
+        `status=failed` with the real exception message.
+      * Defensive fallback in `finally` → if neither branch above
+        managed to write a terminal status (e.g. the DB blip
+        recovered between the two writes), one final write attempts
+        to mark the run failed so the polling client doesn't wait
+        forever.
+
+    Every step emits an INFO log line tagged with `parse_run=<id>`
+    so the operator can grep one run's lifecycle in the Render
+    logs.
+    """
+    tag = f"parse_run={run_id}"
+    log.info("%s: worker started (input %d chars)", tag, len(text or ""))
+    terminal_written = False
     try:
-        profile = parse_resume(text, settings=settings)
+        profile = parse_resume(text, settings=settings, run_id=tag)
+        log.info("%s: parse_resume returned — writing success", tag)
         _finish_parse(
             run_id,
             status=PARSE_STATUS_SUCCESS,
             profile=profile.model_dump(mode="json"),
             error=None,
         )
+        terminal_written = True
+        log.info("%s: terminal status=success written", tag)
     except Exception as e:  # noqa: BLE001
-        log.exception("parse run %s unexpected failure", run_id)
+        # Surface the REAL exception message to the user — they
+        # need to know whether the API key is wrong, the file
+        # couldn't be read, or the model returned bad JSON.
+        log.exception("%s: worker caught unhandled exception", tag)
+        message = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         try:
             _finish_parse(
                 run_id,
                 status=PARSE_STATUS_FAILED,
                 profile=None,
-                error=f"Unexpected parse failure: {e}",
+                error=f"Parse failed — {message}",
             )
+            terminal_written = True
+            log.info("%s: terminal status=failed written", tag)
         except Exception:  # noqa: BLE001
-            log.exception("failed to record parse-run %s failure — DB unreachable?", run_id)
+            log.exception("%s: failed to record failed status (DB unreachable?)", tag)
+    finally:
+        # Defensive last-resort write. If BOTH the success and the
+        # error branches above somehow didn't write a terminal
+        # status (e.g. the success-path DB commit raised AND the
+        # error-path commit also raised), this is the row's last
+        # chance to leave `running` before the worker thread exits.
+        if not terminal_written:
+            log.warning("%s: no terminal status was written — writing defensive failed row", tag)
+            try:
+                _finish_parse(
+                    run_id,
+                    status=PARSE_STATUS_FAILED,
+                    profile=None,
+                    error=(
+                        "Parse worker exited without recording a result. "
+                        "See backend logs for details."
+                    ),
+                )
+                log.info("%s: defensive failed row written from finally", tag)
+            except Exception:  # noqa: BLE001
+                # Truly unrecoverable — DB is down. The row stays at
+                # `running` but the polling client will hit its own
+                # ceiling and surface a retry to the user.
+                log.exception("%s: even the defensive write failed; row stays at running", tag)
 
 
 def start_background_parse(
