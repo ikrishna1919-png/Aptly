@@ -49,7 +49,10 @@ const EMPTY_PROFILE: Profile = {
   location: "",
   links: { linkedin: "", github: "", website: "" },
   summary: "",
-  skills: [],
+  // Default to flat shape so the comma-separated editor is the
+  // initial UX; `SkillsEditor`'s "Convert to categorised" button
+  // promotes to the grouped shape when the user wants labels.
+  skills: [] as string[],
   experience: [],
   education: [],
   projects: [],
@@ -77,13 +80,17 @@ const EMPTY_EDUCATION: ProfileEducation = {
   degree: "",
   field_of_study: "",
   location: "",
+  start: "",
+  end: "",
   graduation: "",
   gpa: "",
+  coursework: [],
 };
 
 const EMPTY_PROJECT: ProfileProject = {
   name: "",
   description: "",
+  bullets: [],
   technologies: [],
   link: "",
   start_date: "",
@@ -310,7 +317,7 @@ function ProfileEditor() {
   function updateEducation(
     i: number,
     field: keyof ProfileEducation,
-    value: string,
+    value: string | string[],
   ) {
     setProfile((p) => {
       const next = [...p.education];
@@ -661,21 +668,10 @@ function ProfileEditor() {
               />
             </Field>
 
-            <Field label="Skills (comma-separated)">
-              <Input
-                value={profile.skills.join(", ")}
-                onChange={(e) =>
-                  updateRoot(
-                    "skills",
-                    e.target.value
-                      .split(",")
-                      .map((s) => s.trim())
-                      .filter(Boolean),
-                  )
-                }
-                placeholder="Python, FastAPI, React, AWS"
-              />
-            </Field>
+            <SkillsEditor
+              skills={profile.skills}
+              onChange={(next) => updateRoot("skills", next)}
+            />
 
             <Separator />
 
@@ -804,13 +800,22 @@ function ProfileEditor() {
                         onChange={(e) => updateEducation(i, "location", e.target.value)}
                       />
                     </Field>
-                    <Field label="Graduation year">
+                    <Field label="Start">
                       <Input
-                        value={ed.graduation}
+                        value={ed.start ?? ""}
                         onChange={(e) =>
-                          updateEducation(i, "graduation", e.target.value)
+                          updateEducation(i, "start", e.target.value)
                         }
-                        placeholder="2018"
+                        placeholder="2014-08"
+                      />
+                    </Field>
+                    <Field label="End / Graduation">
+                      <Input
+                        value={ed.end ?? ed.graduation ?? ""}
+                        onChange={(e) =>
+                          updateEducation(i, "end", e.target.value)
+                        }
+                        placeholder="2018-05"
                       />
                     </Field>
                     <Field label="GPA">
@@ -821,6 +826,22 @@ function ProfileEditor() {
                       />
                     </Field>
                   </div>
+                  <Field label="Relevant coursework (comma-separated)">
+                    <Input
+                      value={(ed.coursework ?? []).join(", ")}
+                      onChange={(e) =>
+                        updateEducation(
+                          i,
+                          "coursework",
+                          e.target.value
+                            .split(",")
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        )
+                      }
+                      placeholder="Algorithms, Distributed Systems, Linear Algebra"
+                    />
+                  </Field>
                   <div className="flex justify-end">
                     <Button
                       type="button"
@@ -892,6 +913,22 @@ function ProfileEditor() {
                       rows={2}
                       value={proj.description}
                       onChange={(e) => updateProject(i, "description", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Bullets (one per line)">
+                    <Textarea
+                      rows={Math.max(2, (proj.bullets ?? []).length + 1)}
+                      value={(proj.bullets ?? []).join("\n")}
+                      onChange={(e) =>
+                        updateProject(
+                          i,
+                          "bullets",
+                          e.target.value
+                            .split("\n")
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        )
+                      }
                     />
                   </Field>
                   <Field label="Technologies (comma-separated)">
@@ -1490,6 +1527,139 @@ function ResumeDropzone({
   );
 }
 
+/** Detect whether the loaded skills are in categorised-group shape
+ * (`{category, items}`) vs. the legacy flat string list. Empty arrays
+ * default to flat — the user explicitly opts in to grouped via the
+ * "Add category" button below. */
+function isGroupedSkills(
+  skills: Profile["skills"],
+): skills is import("@/lib/api").ProfileSkillGroup[] {
+  return (
+    Array.isArray(skills) &&
+    skills.length > 0 &&
+    typeof skills[0] === "object" &&
+    skills[0] !== null &&
+    "items" in (skills[0] as object)
+  );
+}
+
+/** Skills editor — handles both flat and grouped shapes.
+ *
+ * Flat (legacy / ungrouped resumes): single comma-separated input
+ * + "Convert to categorised" button.
+ *
+ * Grouped (categorised resumes): N rows, each with a category label
+ * input and a comma-separated items input. "+ Add category" creates
+ * a new empty row; the per-row "Remove" button drops a category and,
+ * when removing the last grouped row, reverts to the flat shape so
+ * the empty state is clean. */
+function SkillsEditor({
+  skills,
+  onChange,
+}: {
+  skills: Profile["skills"];
+  onChange: (next: Profile["skills"]) => void;
+}) {
+  if (isGroupedSkills(skills)) {
+    const groups = skills;
+    function updateGroup(i: number, patch: Partial<(typeof groups)[number]>) {
+      const next = groups.map((g, idx) => (idx === i ? { ...g, ...patch } : g));
+      onChange(next);
+    }
+    function addGroup() {
+      onChange([...groups, { category: "", items: [] }]);
+    }
+    function removeGroup(i: number) {
+      const next = groups.filter((_, idx) => idx !== i);
+      // Empty grouped → fall back to the flat shape so the editor
+      // starts fresh next time without an orphan empty group.
+      if (next.length === 0) {
+        onChange([]);
+      } else {
+        onChange(next);
+      }
+    }
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">Skills (by category)</span>
+          <Button type="button" variant="outline" size="sm" onClick={addGroup}>
+            + Add category
+          </Button>
+        </div>
+        {groups.map((g, i) => (
+          <div key={i} className="grid gap-3 sm:grid-cols-[1fr_2fr_auto]">
+            <Input
+              value={g.category ?? ""}
+              onChange={(e) => updateGroup(i, { category: e.target.value })}
+              placeholder="Cloud Platforms"
+            />
+            <Input
+              value={g.items.join(", ")}
+              onChange={(e) =>
+                updateGroup(i, {
+                  items: e.target.value
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                })
+              }
+              placeholder="AWS, Azure, GCP"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+              onClick={() => removeGroup(i)}
+            >
+              Remove
+            </Button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  // Flat shape: single comma-separated input + opt-in to grouped.
+  const flat = skills as string[];
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">Skills (comma-separated)</span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            // Convert current flat list into a single un-named group
+            // so the user can label it. Empty flat → seed an empty
+            // group so the inputs render.
+            onChange(
+              flat.length > 0
+                ? [{ category: "", items: flat }]
+                : [{ category: "", items: [] }],
+            );
+          }}
+        >
+          Convert to categorised
+        </Button>
+      </div>
+      <Input
+        value={flat.join(", ")}
+        onChange={(e) =>
+          onChange(
+            e.target.value
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean),
+          )
+        }
+        placeholder="Python, FastAPI, React, AWS"
+      />
+    </div>
+  );
+}
+
 function Field({
   label,
   required,
@@ -1548,12 +1718,16 @@ function normaliseProfile(p: Profile): Profile {
       degree: e.degree ?? "",
       field_of_study: e.field_of_study ?? "",
       location: e.location ?? "",
-      graduation: e.graduation ?? "",
+      start: e.start ?? "",
+      end: e.end ?? "",
+      graduation: e.graduation ?? e.end ?? "",
       gpa: e.gpa ?? "",
+      coursework: e.coursework ?? [],
     })),
     projects: (p.projects ?? []).map((pr) => ({
       name: pr.name ?? "",
       description: pr.description ?? "",
+      bullets: pr.bullets ?? [],
       technologies: pr.technologies ?? [],
       link: pr.link ?? "",
       start_date: pr.start_date ?? "",
@@ -1620,11 +1794,27 @@ function cleanForSave(p: Profile): Profile {
       github: opt(p.links.github),
       website: opt(p.links.website),
     },
+    // Skills: drop empty groups + per-group empty items; preserve
+    // whichever shape (flat vs. grouped) is currently active.
+    skills: isGroupedSkills(p.skills)
+      ? (p.skills
+          .map((g) => ({
+            category: (g.category ?? "").trim() || null,
+            items: g.items.filter((s) => s.trim()),
+          }))
+          .filter(
+            (g) => g.items.length > 0 || (g.category ?? "").trim().length > 0,
+          ) as Profile["skills"])
+      : ((p.skills as string[]).filter((s) => s && s.trim()) as Profile["skills"]),
     education: p.education.map((ed) => ({
       ...ed,
       field_of_study: opt(ed.field_of_study),
       location: opt(ed.location),
       gpa: opt(ed.gpa),
+      // Mirror end → graduation so the legacy tailor-service field
+      // stays populated even when the UI edits `end`.
+      graduation: (ed.end || ed.graduation || "").trim(),
+      coursework: (ed.coursework ?? []).filter((c) => c.trim()),
     })),
     projects: p.projects.map((pr) => ({
       ...pr,

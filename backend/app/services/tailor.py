@@ -405,6 +405,26 @@ def _candidate_block(candidate: dict[str, Any]) -> str:
     )
 
 
+def _flat_skills(candidate: dict[str, Any]) -> list[str]:
+    """Flatten the candidate's `skills` field to a list of strings.
+
+    The Profile model accepts either the legacy flat list OR a
+    list of `{category, items[]}` groups (the new categorised shape
+    the parser emits). This helper is the only place tailor code
+    needs to know about the union — every consumer below reads from
+    here so the gap-matching logic stays simple."""
+    raw = candidate.get("skills") or []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, dict):
+            for s in item.get("items") or []:
+                if isinstance(s, str) and s.strip():
+                    out.append(s.strip())
+        elif isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out
+
+
 def _clean_jd(job: Job) -> str:
     """Sanitize + truncate the JD before it goes into the prompt.
 
@@ -553,7 +573,7 @@ def _demo_analysis(job: Job, *, candidate: dict[str, Any]) -> Analysis:
     surfaced explicitly). Questions are **one-per-gap and ONLY about gaps** —
     matches the spec.
     """
-    candidate_skills_lower = {s.lower() for s in candidate["skills"]}
+    candidate_skills_lower = {s.lower() for s in _flat_skills(candidate)}
     job_skills = list(job.skills or [])
     matched = [s for s in job_skills if s.lower() in candidate_skills_lower]
     gaps = [s for s in job_skills if s.lower() not in candidate_skills_lower]
@@ -604,10 +624,9 @@ def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]
     # them), then the candidate's existing skills. Otherwise the [:18]
     # truncate below could drop a freshly-confirmed skill while keeping
     # ones the JD doesn't even screen for.
-    candidate_lower = {x.lower() for x in candidate["skills"]}
-    skills = [s for s in confirmed_gaps if s.lower() not in candidate_lower] + list(
-        candidate["skills"]
-    )
+    candidate_skills = _flat_skills(candidate)
+    candidate_lower = {x.lower() for x in candidate_skills}
+    skills = [s for s in confirmed_gaps if s.lower() not in candidate_lower] + candidate_skills
 
     summary = candidate["summary"]
     if confirmed_gaps:

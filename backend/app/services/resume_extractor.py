@@ -222,13 +222,55 @@ def _docx_paragraph_text(para: Any) -> str:
     """Render one DOCX paragraph as plain text, prefixing list-
     styled lines with `- ` so the downstream parser can spot bullets.
     Empty paragraphs return ``""`` — the caller decides whether to
-    preserve the blank line or skip it."""
-    raw = para.text or ""
+    preserve the blank line or skip it.
+
+    `para.text` from python-docx silently drops `<w:tab/>` and
+    `<w:br/>` elements; resume templates lean on those for "company
+    on the left, location on the right" / "title on the left, dates
+    on the right" layouts, and losing them confuses the LLM's
+    company-vs-location pairing. Walk the runs explicitly so a
+    tab in the XML becomes a `\\t` in the output.
+    """
+    raw = _paragraph_text_with_tabs(para)
     if not raw.strip():
         return ""
     if _is_list_paragraph(para):
+        # Strip leading/trailing whitespace but keep INTERNAL tabs —
+        # bullets that themselves use tab columns (rare but real)
+        # round-trip cleanly.
         return f"- {raw.strip()}"
     return raw
+
+
+def _paragraph_text_with_tabs(para: Any) -> str:
+    """Concatenate a paragraph's run text, materialising
+    `<w:tab/>` as `\\t` and `<w:br/>` as `\\n`. Returns ``""`` for an
+    empty paragraph. Falls back to `para.text` on any error so a
+    weird XML shape doesn't crash the parse."""
+    try:
+        out: list[str] = []
+        # Walk every child of every run element. Each run is a `<w:r>`
+        # whose children alternate between `<w:t>` (text), `<w:tab/>`,
+        # `<w:br/>`, `<w:cr/>`, etc.
+        for run in para.runs:
+            r_el = run._r
+            for child in r_el:
+                tag = child.tag.split("}", 1)[-1]  # strip namespace
+                if tag == "t":
+                    out.append(child.text or "")
+                elif tag == "tab":
+                    out.append("\t")
+                elif tag in ("br", "cr"):
+                    out.append("\n")
+        joined = "".join(out)
+        if joined:
+            return joined
+        # Fallback for paragraphs whose text lives outside `<w:r>`
+        # (rare but possible — e.g. fields, smart-tags). `para.text`
+        # at least surfaces the literal content.
+        return para.text or ""
+    except Exception:  # noqa: BLE001
+        return para.text or ""
 
 
 def _docx_cell_text(cell: Any) -> str:

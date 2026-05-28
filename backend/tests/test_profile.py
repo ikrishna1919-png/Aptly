@@ -807,12 +807,12 @@ def test_parse_does_not_call_anthropic_without_key(client_no_key, monkeypatch):
     assert calls == [], "Anthropic must not be called when key is unset"
 
 
-def test_parse_flattens_skill_groups_from_llm(client_with_key, monkeypatch):
-    """The LLM schema lets the model return categorised skill groups
-    (`[{category, items}]`) when the resume groups skills by category.
-    Downstream the Profile model carries a flat list, so the parser
-    flattens the groups (categories are dropped — there's nowhere to
-    store them on the Profile)."""
+def test_parse_preserves_skill_groups_from_llm(client_with_key, monkeypatch):
+    """Categorised skills MUST round-trip end-to-end (`[{category,
+    items}]`). The earlier behaviour flattened groups and dropped the
+    category labels; the new contract keeps them so the UI can render
+    'Cloud Platforms: AWS, Azure' as a labelled row instead of
+    shredding it across the flat list."""
     test_client, _ = client_with_key
     payload = {
         "name": "Dana Sponsor",
@@ -821,7 +821,7 @@ def test_parse_flattens_skill_groups_from_llm(client_with_key, monkeypatch):
         "skills": [
             {"category": "Languages", "items": ["Python", "Go"]},
             {"category": "Cloud", "items": ["AWS", "GCP"]},
-            {"category": "Tools", "items": ["Docker", "Python"]},  # dupe across groups
+            {"category": "Tools", "items": ["Docker", "Python"]},  # dupe within-group
         ],
     }
     mock = _mock_anthropic_client(payload)
@@ -830,8 +830,11 @@ def test_parse_flattens_skill_groups_from_llm(client_with_key, monkeypatch):
     start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
     body = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH).json()
     skills = body["profile"]["skills"]
-    # Flattened, deduped (case-insensitive), order preserved.
-    assert skills == ["Python", "Go", "AWS", "GCP", "Docker"]
+    assert skills == [
+        {"category": "Languages", "items": ["Python", "Go"]},
+        {"category": "Cloud", "items": ["AWS", "GCP"]},
+        {"category": "Tools", "items": ["Docker", "Python"]},
+    ]
 
 
 def test_parse_llm_partial_fields_keep_regex_for_others(client_with_key, monkeypatch):
