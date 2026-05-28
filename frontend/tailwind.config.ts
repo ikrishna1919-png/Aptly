@@ -14,6 +14,10 @@ const config: Config = {
       screens: { "2xl": "1280px" },
     },
     extend: {
+      // `xs` (420px) lets us keep the icon-only brand mark on the
+      // narrowest phones and switch to the full icon+wordmark lockup
+      // once there's room — without disturbing the default scale.
+      screens: { xs: "420px" },
       fontFamily: {
         sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
         // `font-display` reaches the headline serif loaded in

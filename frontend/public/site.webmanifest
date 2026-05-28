@@ -1,0 +1,29 @@
+{
+  "name": "Aptly",
+  "short_name": "Aptly",
+  "description": "Find tech jobs that sponsor visas and tailor your resume to land them — built for international students who need H-1B sponsorship.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f8fb",
+  "theme_color": "#1E6FE0",
+  "icons": [
+    {
+      "src": "/assets/aptly-icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ]
+}

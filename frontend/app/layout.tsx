@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Fraunces, Plus_Jakarta_Sans } from "next/font/google";
 
 import { SiteFooter } from "@/components/site-footer";
@@ -44,7 +44,18 @@ export const metadata: Metadata = {
   },
   description:
     "Find the jobs that will actually sponsor your visa, and tailor your resume to land them — built for international students and H-1B candidates.",
-  metadataBase: new URL("https://aptly.local"),
+  metadataBase: new URL("https://aptly.fyi"),
+  manifest: "/site.webmanifest",
+  // The browser-tab icons come from the App Router file convention:
+  // app/icon.svg (modern browsers), app/favicon.ico (16/32/48
+  // fallback), and app/apple-icon.png (home-screen). Next injects
+  // the <link> tags automatically, so no manual `icons` config —
+  // that would only duplicate them.
+};
+
+// Brand light blue — drives the mobile browser chrome / PWA theme.
+export const viewport: Viewport = {
+  themeColor: "#1E6FE0",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

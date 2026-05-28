@@ -16,7 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { BrandMark } from "@/components/brand-mark";
+import { Logo } from "@/components/logo";
 import { SettingsMenu } from "@/components/settings-menu";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -81,10 +81,16 @@ export function SiteHeader() {
         <Link
           href="/"
           aria-label="Aptly home"
-          className="flex items-center gap-2 rounded-md font-semibold tracking-tight transition-colors duration-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="group flex items-center rounded-md transition-opacity duration-base hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
-          <BrandMark />
-          <span className="font-display text-base">Aptly</span>
+          {/* Full lockup once there's room; icon alone on the
+              tightest mobile widths so the brand never crowds the
+              nav controls. */}
+          <Logo
+            wordmark={false}
+            markClassName="h-8 w-8 transition-transform duration-base group-hover:scale-[1.04] xs:hidden"
+          />
+          <Logo className="hidden xs:inline-flex [&_svg]:transition-transform [&_svg]:duration-base group-hover:[&_svg]:scale-[1.04]" />
         </Link>
 
         {!loading && user && (

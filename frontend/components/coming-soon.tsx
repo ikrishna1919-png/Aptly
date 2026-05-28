@@ -47,13 +47,23 @@ export function ComingSoon({
 }) {
   return (
     <main className="container max-w-4xl space-y-8 py-12 sm:py-16">
-      <header className="space-y-3">
-        <Badge
-          variant="outline"
-          className="border-primary/30 bg-primary/5 text-xs font-medium uppercase tracking-[0.16em] text-primary"
-        >
-          {eyebrow} · coming soon
-        </Badge>
+      <header className="space-y-4">
+        {/* Two labels, on purpose: the page/category eyebrow, plus a
+            consistent amber "Coming soon" pill that matches the
+            landing-page roadmap treatment — so the distinction reads
+            the same everywhere. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            variant="outline"
+            className="border-primary/30 bg-primary/5 text-xs font-medium uppercase tracking-[0.16em] text-primary"
+          >
+            {eyebrow}
+          </Badge>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-highlight/40 bg-highlight-soft px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-highlight-foreground">
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-highlight" />
+            Coming soon
+          </span>
+        </div>
         <h1 className="font-display text-3xl font-medium tracking-tight text-foreground sm:text-4xl md:text-[2.75rem]">
           {title}
         </h1>
