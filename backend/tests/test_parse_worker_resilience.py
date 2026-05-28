@@ -121,11 +121,11 @@ class TestWorkerAlwaysWritesTerminalStatus:
         real_finish = parser_module._finish_parse
         calls: list[int] = []
 
-        def _flaky_finish(run_id, *, status, profile, error):
+        def _flaky_finish(run_id, *, status, profile, error, **extra):
             calls.append(1)
             if len(calls) == 1:
                 raise RuntimeError("DB blip on success write")
-            return real_finish(run_id, status=status, profile=profile, error=error)
+            return real_finish(run_id, status=status, profile=profile, error=error, **extra)
 
         monkeypatch.setattr(parser_module, "_finish_parse", _flaky_finish)
         parser_module._execute_parse_run("flaky", "Alex Rivera\n")
@@ -146,10 +146,10 @@ class TestWorkerAlwaysWritesTerminalStatus:
         finish_calls = 0
         real_finish = parser_module._finish_parse
 
-        def _counted(run_id, *, status, profile, error):
+        def _counted(run_id, *, status, profile, error, **extra):
             nonlocal finish_calls
             finish_calls += 1
-            return real_finish(run_id, status=status, profile=profile, error=error)
+            return real_finish(run_id, status=status, profile=profile, error=error, **extra)
 
         monkeypatch.setattr(parser_module, "_finish_parse", _counted)
         parser_module._execute_parse_run("happy", "Alex Rivera\n")

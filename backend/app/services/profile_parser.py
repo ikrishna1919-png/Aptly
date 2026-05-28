@@ -448,6 +448,7 @@ def parse_resume(
     settings: Settings | None = None,
     client: Anthropic | None = None,
     run_id: str | None = None,
+    raw_sink: list[str] | None = None,
 ) -> Profile:
     """Best-effort parse of pasted resume text. Always returns a Profile.
 
@@ -502,7 +503,9 @@ def parse_resume(
     #   3. The response doesn't parse as the expected schema.
     log.info("%s: starting Anthropic structural extract", tag)
     try:
-        llm = _llm_extract_structural(text, settings=settings, client=client, run_id=tag)
+        llm = _llm_extract_structural(
+            text, settings=settings, client=client, run_id=tag, raw_sink=raw_sink
+        )
     except concurrent.futures.TimeoutError:
         log.warning(
             "%s: LLM call exceeded wall-clock %.1fs; falling back to regex",
@@ -530,6 +533,7 @@ def parse_resume_pdf(
     settings: Settings | None = None,
     client: Anthropic | None = None,
     run_id: str | None = None,
+    raw_sink: list[str] | None = None,
 ) -> Profile:
     """PDF-input variant of `parse_resume`.
 
@@ -591,7 +595,13 @@ def parse_resume_pdf(
 
     log.info("%s: starting Anthropic structural extract (PDF document input)", tag)
     try:
-        llm = _llm_extract_structural_pdf(pdf_bytes, settings=settings, client=client, run_id=tag)
+        llm = _llm_extract_structural_pdf(
+            pdf_bytes,
+            settings=settings,
+            client=client,
+            run_id=tag,
+            raw_sink=raw_sink,
+        )
     except concurrent.futures.TimeoutError:
         log.warning(
             "%s: PDF LLM call exceeded wall-clock %.1fs; falling back to regex",
@@ -721,9 +731,13 @@ def _llm_extract_structural(
     settings: Settings,
     client: Anthropic | None = None,
     run_id: str | None = None,
+    raw_sink: list[str] | None = None,
 ) -> _LLMStructuralExtract:
     """Text-input variant: send the resume as plain text. Used by the
-    paste path and the DOCX path."""
+    paste path and the DOCX path. `raw_sink` is an optional mutable
+    list — when provided, the raw JSON string the model returned
+    (BEFORE parsing) gets appended. Used by the worker to persist the
+    raw output on the ParseRun row for triage."""
     payload = text[:_LLM_MAX_CHARS]
     user_content = [
         {
@@ -742,6 +756,7 @@ def _llm_extract_structural(
         settings=settings,
         client=client,
         run_id=run_id,
+        raw_sink=raw_sink,
     )
 
 
@@ -751,6 +766,7 @@ def _llm_extract_structural_pdf(
     settings: Settings,
     client: Anthropic | None = None,
     run_id: str | None = None,
+    raw_sink: list[str] | None = None,
 ) -> _LLMStructuralExtract:
     """PDF-input variant: hand the raw PDF to Claude as a `document`
     content block. Claude's document understanding handles bullets,
@@ -789,6 +805,7 @@ def _llm_extract_structural_pdf(
         settings=settings,
         client=client,
         run_id=run_id,
+        raw_sink=raw_sink,
     )
 
 
@@ -800,6 +817,7 @@ def _run_llm_extract(
     settings: Settings,
     client: Anthropic | None,
     run_id: str | None,
+    raw_sink: list[str] | None = None,
 ) -> _LLMStructuralExtract:
     """Shared transport for both the text- and PDF-input variants.
     Hard wall-clock ceiling + abandon-the-thread-on-timeout pattern
@@ -855,7 +873,32 @@ def _run_llm_extract(
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     log.info("%s: messages.create returned", tag)
-    return _LLMStructuralExtract.model_validate_json(_first_text(response))
+    # Pull the raw JSON text out of the response BEFORE parsing. We
+    # log a truncated form so the operator can see exactly what the
+    # model returned in the Render logs (one grep on the run_id),
+    # and we hand the full text to `raw_sink` so the worker can
+    # persist it on the ParseRun row for triage. Storing the raw
+    # output is the single most useful debugging hook when a parse
+    # comes back "wrong" — it lets the operator distinguish an
+    # extraction problem (the model didn't return what we'd hoped)
+    # from a mapping / display problem (we lost something between
+    # the model output and the `profile` column).
+    raw_text = _first_text(response)
+    log.info("%s: raw LLM JSON (%d chars): %s", tag, len(raw_text), _truncate(raw_text, 4000))
+    if raw_sink is not None:
+        raw_sink.append(raw_text)
+    return _LLMStructuralExtract.model_validate_json(raw_text)
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Cap log-line length so a huge structured-output payload
+    doesn't blow out the log volume on a free-tier hosting plan.
+    The full payload is still persisted on the ParseRun row when
+    `raw_sink` is wired up — this truncation only affects what
+    lands in the streaming Render log."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...[+{len(text) - limit} chars]"
 
 
 def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
@@ -980,7 +1023,7 @@ def _to_profile_experience(entry: _LLMExperience) -> ProfileExperience | None:
     else:
         end = _normalise_date(end_raw)
     location = (entry.location or "").strip() or None
-    bullets = [b.strip() for b in entry.description_bullets if b and b.strip()]
+    bullets = _normalise_bullets(entry.description_bullets)
     return ProfileExperience(
         company=company,
         title=title,
@@ -989,6 +1032,41 @@ def _to_profile_experience(entry: _LLMExperience) -> ProfileExperience | None:
         end=end,
         bullets=bullets[:20],
     )
+
+
+_EMBEDDED_BULLET_SPLIT_RE = re.compile(r"\n+\s*(?:[•◦▪●‣⁃*–—-]\s+|\(?\d+[\.)]\s+)|(?:\n\s*\n)")
+
+
+def _normalise_bullets(raw_bullets: list[str]) -> list[str]:
+    """Defensive split for the "run-on blob" failure mode where the
+    LLM returns concatenated bullets in a single string instead of a
+    list. The prompt asks for one-bullet-per-list-item, but if the
+    model slips, we'd rather split here than render `"Did X. Did Y.
+    Did Z."` as a single bullet on the profile.
+
+    Rules:
+      * Strip leading/trailing whitespace per item.
+      * Drop empty items.
+      * Split any item that contains an embedded newline followed by
+        a bullet glyph (`•`, `-`, `*`, numeric `1.` / `1)`) OR a
+        blank line — both unambiguous signals of multiple bullets
+        glued into one string.
+      * Single multi-line bullets without those markers are LEFT
+        ALONE — wrapping inside one bullet shouldn't split.
+    """
+    out: list[str] = []
+    for raw in raw_bullets or []:
+        if not raw:
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        parts = _EMBEDDED_BULLET_SPLIT_RE.split(text)
+        for part in parts:
+            cleaned = (part or "").strip(" \t\n\r•◦▪●‣⁃*–—-")
+            if cleaned:
+                out.append(cleaned)
+    return out
 
 
 def _to_profile_education(entry: _LLMEducation) -> ProfileEducation | None:
@@ -1465,7 +1543,14 @@ def _finish_parse(
     status: str,
     profile: dict[str, Any] | None,
     error: str | None,
+    raw_llm_output: dict[str, Any] | None = None,
 ) -> None:
+    """Write the terminal status onto the ParseRun row. `raw_llm_output`
+    is the verbatim structured-output JSON the model returned (as a
+    parsed dict) — persisted so the operator can triage a bad parse
+    without re-running the upload. None means either the LLM branch
+    didn't run (regex-only fallback) or the failure happened before
+    the LLM call returned."""
     with SessionLocal() as db:
         run = db.execute(select(ParseRun).where(ParseRun.run_id == run_id)).scalar_one_or_none()
         if run is None:
@@ -1474,8 +1559,31 @@ def _finish_parse(
         run.status = status
         run.profile = profile
         run.error = error
+        run.raw_llm_output = raw_llm_output
         run.finished_at = datetime.now(UTC)
         db.commit()
+
+
+def _coerce_raw_output(raw_sink: list[str]) -> dict[str, Any] | None:
+    """Convert the raw-output sink (the LLM's verbatim JSON text)
+    into a dict suitable for the `raw_llm_output` JSON column. A
+    parse failure here is non-fatal — we store the raw text under
+    a `_raw` key so the row still carries something to triage,
+    rather than losing the payload entirely."""
+    if not raw_sink:
+        return None
+    import json as _json  # noqa: PLC0415
+
+    text = raw_sink[-1]
+    try:
+        parsed = _json.loads(text)
+    except (ValueError, TypeError):
+        return {"_raw_unparseable_text": text[:20000]}
+    if not isinstance(parsed, dict):
+        # Schema returns an object at the top level — anything else
+        # is unexpected but worth keeping verbatim for triage.
+        return {"_raw_non_dict": parsed}
+    return parsed
 
 
 def _execute_parse_run(run_id: str, text: str, settings: Settings | None = None) -> None:
@@ -1503,14 +1611,16 @@ def _execute_parse_run(run_id: str, text: str, settings: Settings | None = None)
     tag = f"parse_run={run_id}"
     log.info("%s: worker started (input %d chars)", tag, len(text or ""))
     terminal_written = False
+    raw_sink: list[str] = []
     try:
-        profile = parse_resume(text, settings=settings, run_id=tag)
+        profile = parse_resume(text, settings=settings, run_id=tag, raw_sink=raw_sink)
         log.info("%s: parse_resume returned — writing success", tag)
         _finish_parse(
             run_id,
             status=PARSE_STATUS_SUCCESS,
             profile=profile.model_dump(mode="json"),
             error=None,
+            raw_llm_output=_coerce_raw_output(raw_sink),
         )
         terminal_written = True
         log.info("%s: terminal status=success written", tag)
@@ -1526,6 +1636,7 @@ def _execute_parse_run(run_id: str, text: str, settings: Settings | None = None)
                 status=PARSE_STATUS_FAILED,
                 profile=None,
                 error=f"Parse failed — {message}",
+                raw_llm_output=_coerce_raw_output(raw_sink),
             )
             terminal_written = True
             log.info("%s: terminal status=failed written", tag)
@@ -1564,14 +1675,16 @@ def _execute_parse_run_pdf(run_id: str, pdf_bytes: bytes, settings: Settings | N
     tag = f"parse_run={run_id}"
     log.info("%s: PDF worker started (input %d bytes)", tag, len(pdf_bytes or b""))
     terminal_written = False
+    raw_sink: list[str] = []
     try:
-        profile = parse_resume_pdf(pdf_bytes, settings=settings, run_id=tag)
+        profile = parse_resume_pdf(pdf_bytes, settings=settings, run_id=tag, raw_sink=raw_sink)
         log.info("%s: parse_resume_pdf returned — writing success", tag)
         _finish_parse(
             run_id,
             status=PARSE_STATUS_SUCCESS,
             profile=profile.model_dump(mode="json"),
             error=None,
+            raw_llm_output=_coerce_raw_output(raw_sink),
         )
         terminal_written = True
         log.info("%s: terminal status=success written", tag)
@@ -1584,6 +1697,7 @@ def _execute_parse_run_pdf(run_id: str, pdf_bytes: bytes, settings: Settings | N
                 status=PARSE_STATUS_FAILED,
                 profile=None,
                 error=f"Parse failed — {message}",
+                raw_llm_output=_coerce_raw_output(raw_sink),
             )
             terminal_written = True
             log.info("%s: terminal status=failed written", tag)
