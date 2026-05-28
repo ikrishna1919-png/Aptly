@@ -24,8 +24,8 @@ export function SiteFooter() {
           aria-label="Footer"
           className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs"
         >
-          <Link href="/jobs" className="hover:text-foreground">
-            Browse jobs
+          <Link href="/get-started" className="hover:text-foreground">
+            Get Started
           </Link>
           <Link href="/sign-in" className="hover:text-foreground">
             Sign in

@@ -180,7 +180,49 @@ def test_auth_me_returns_signed_in_user(factories, settings):
         res = test_client.get("/api/auth/me")
         assert res.status_code == 200
         body = res.json()
-        assert body == {"id": u.id, "email": "me@example.com", "name": "Me"}
+        # `profile_saved=False` because we haven't PUT /api/profile —
+        # the auto-seeded Candidate row (if any) carries NULL on
+        # `profile_saved_at` until the user explicitly saves.
+        assert body == {
+            "id": u.id,
+            "email": "me@example.com",
+            "name": "Me",
+            "profile_saved": False,
+        }
+    finally:
+        app.dependency_overrides.clear()
+        config_module.get_settings.cache_clear()
+
+
+def test_auth_me_profile_saved_flips_after_first_put(factories, settings):
+    """`profile_saved` starts False (seeded Candidate, never explicitly
+    saved), then flips to True after the user PUTs their profile.
+    This is the signal the frontend uses to gate `/jobs` behind a
+    real save — without it, brand-new users would land on the jobs
+    feed running tailoring against the demo template."""
+    with factories() as s:
+        u = User(google_subject_id="sub-2", email="u@example.com", name="U")
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        s.expunge(u)
+    test_client = _client_with_user(factories, settings, user=u)
+    try:
+        # Fresh user — no PUT yet → profile_saved is False.
+        body = test_client.get("/api/auth/me").json()
+        assert body["profile_saved"] is False
+
+        # A GET on /profile triggers the auto-seed but should NOT
+        # flip the flag (seed != explicit save).
+        test_client.get("/api/profile")
+        assert test_client.get("/api/auth/me").json()["profile_saved"] is False
+
+        # PUT the profile — this is what counts as "saved."
+        profile_payload = test_client.get("/api/profile").json()
+        profile_payload["name"] = "Real Name"
+        put = test_client.put("/api/profile", json=profile_payload)
+        assert put.status_code == 200
+        assert test_client.get("/api/auth/me").json()["profile_saved"] is True
     finally:
         app.dependency_overrides.clear()
         config_module.get_settings.cache_clear()

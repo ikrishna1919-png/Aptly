@@ -12,11 +12,14 @@
                                             file has no text layer.
   GET  /api/profile/parse/{run_id}        → poll the parse run's status
 
-Each user has at most one Candidate row (unique on `user_id`). Reads
-seed from `DEMO_CANDIDATE` when the row doesn't yet exist — that's
-the first-load shape on a fresh sign-up so the editor isn't empty.
-The tailoring service consumes the same row via `get_candidate(db,
-user.id)`.
+Each user has at most one Candidate row (unique on `user_id`). On
+first read for a brand-new user the row is seeded with an EMPTY
+Profile shape (not the demo template — that used to leak someone
+else's name into newcomers' forms). The tailoring service consumes
+the same row via `get_candidate(db, user.id)`; until the user
+saves at least once, `profile_saved_at` stays NULL and the
+frontend's profile-gate redirects them to `/profile` before the
+jobs feed unlocks.
 
 Routes are NO LONGER admin-token-gated — they require a Google
 session via `get_current_user`. The admin token still gates the
@@ -26,7 +29,7 @@ operator endpoints under `/api/admin/*` (ingest, manual jobs).
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, status
@@ -40,7 +43,6 @@ from app.database import get_db
 from app.models.candidate import DEMO_SLUG, Candidate
 from app.models.parse_run import ParseRun
 from app.models.user import User
-from app.services.demo_candidate import DEMO_CANDIDATE
 from app.services.profile_parser import (
     Profile,
     start_background_parse,
@@ -61,19 +63,34 @@ log = logging.getLogger(__name__)
 
 
 def _load_or_seed(db: Session, user: User) -> Candidate:
-    """Return the user's Candidate row, seeding from the in-code
-    `DEMO_CANDIDATE` template when it doesn't yet exist. The seeded
-    row carries the user's id + a per-user slug so the legacy
+    """Return the user's Candidate row, seeding an empty Profile
+    shape when it doesn't yet exist.
+
+    Brand-new users get an EMPTY profile, not the legacy
+    `DEMO_CANDIDATE` template — otherwise the editor pre-fills with
+    someone else's name + experience, which is misleading and risks
+    a user accidentally saving the demo as their own. The row still
+    carries the user's id + a per-user slug so the legacy
     `(slug)` unique constraint stays satisfied alongside the new
-    `(user_id)` uniqueness."""
+    `(user_id)` uniqueness.
+
+    `profile_saved_at` is left NULL on seed; the frontend's
+    profile-gate reads this signal via `/auth/me` and routes the
+    user to `/profile` first. Once they save, the PUT handler
+    stamps the timestamp and the gate opens.
+    """
     row = db.execute(select(Candidate).where(Candidate.user_id == user.id)).scalar_one_or_none()
     if row is None:
         row = Candidate(
             user_id=user.id,
-            # Per-user slug so two users seeded from the demo don't
+            # Per-user slug so two users seeded together don't
             # collide on the legacy `slug` unique constraint.
             slug=f"{DEMO_SLUG}-u{user.id}",
-            profile=dict(DEMO_CANDIDATE),
+            # Empty Profile, not DEMO_CANDIDATE — see docstring.
+            # `Profile.model_dump` gives us the canonical empty
+            # shape (every list field defaulted to `[]`, every
+            # string default to `""`).
+            profile=Profile(name="").model_dump(mode="json"),
         )
         db.add(row)
         db.commit()
@@ -97,9 +114,12 @@ def update_profile(
     db: Session = Depends(get_db),
 ) -> Profile:
     """Replace the saved profile with the payload. No diffing — the
-    form sends the whole shape every save."""
+    form sends the whole shape every save. Stamps `profile_saved_at`
+    so the auth `/me` endpoint can flip `profile_saved=true` and the
+    frontend's profile-gate stops blocking `/jobs`."""
     row = _load_or_seed(db, user)
     row.profile = payload.model_dump(mode="json")
+    row.profile_saved_at = datetime.now(UTC)
     db.commit()
     db.refresh(row)
     return Profile.model_validate(row.profile)

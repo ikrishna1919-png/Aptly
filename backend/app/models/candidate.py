@@ -38,6 +38,16 @@ class Candidate(Base):
         onupdate=func.now(),
         nullable=False,
     )
+    # Set explicitly the first time the user `PUT`s to `/api/profile`
+    # (and refreshed on every subsequent save). Distinguishes a row
+    # auto-seeded from `DEMO_CANDIDATE` (NULL) from one the user has
+    # actually claimed (datetime set). The auth `/me` endpoint
+    # surfaces this as a `profile_saved` boolean so the frontend can
+    # gate `/jobs` behind a real save without leaking demo data into
+    # the tailoring flow.
+    profile_saved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 DEMO_SLUG = "demo"

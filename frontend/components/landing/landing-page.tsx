@@ -88,27 +88,19 @@ function Hero() {
             <Button
               asChild
               size="lg"
-              className="rounded-full px-6 text-base font-semibold shadow-sm"
+              className="rounded-full px-7 text-base font-semibold shadow-sm"
             >
-              <Link href="/sign-in">
-                Get started — sign in with Google
+              <Link href="/get-started">
+                Get Started
                 <ArrowRight className="ml-2 h-4 w-4" aria-hidden />
               </Link>
-            </Button>
-            <Button
-              asChild
-              variant="outline"
-              size="lg"
-              className="rounded-full border-border/80 px-5 text-base font-medium"
-            >
-              <Link href="/jobs">Browse jobs first</Link>
             </Button>
           </div>
           <p
             className="reveal-stagger-item mt-4 text-xs text-muted-foreground"
             style={{ animationDelay: "400ms" }}
           >
-            Free while in early access · No credit card · Google sign-in
+            Free while in early access · No credit card · One-click Google sign-up
           </p>
         </div>
       </div>
@@ -387,27 +379,19 @@ function FinalCta() {
           <span className="italic text-primary">actually</span> hire you.
         </h2>
         <p className="mx-auto mt-4 max-w-xl text-base text-muted-foreground">
-          Sign in with Google. We&apos;ll pull the freshest sponsorship-
-          friendly jobs the moment you land.
+          One click to create a profile. We&apos;ll pull the freshest
+          sponsorship-friendly jobs the moment your résumé is in.
         </p>
         <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <Button
             asChild
             size="lg"
-            className="rounded-full px-6 text-base font-semibold shadow-sm"
+            className="rounded-full px-7 text-base font-semibold shadow-sm"
           >
-            <Link href="/sign-in">
-              Get started — sign in with Google
+            <Link href="/get-started">
+              Get Started
               <ArrowRight className="ml-2 h-4 w-4" aria-hidden />
             </Link>
-          </Button>
-          <Button
-            asChild
-            variant="outline"
-            size="lg"
-            className="rounded-full border-border/80 px-5 text-base font-medium"
-          >
-            <Link href="/jobs">Browse jobs first</Link>
           </Button>
         </div>
       </div>
