@@ -231,18 +231,46 @@ TAILORED_RESUME_SCHEMA: dict[str, Any] = GENERATED_RESUME_SCHEMA
 # with the prompt; the renderers should never see a disallowed character.
 
 _MONTHS = (
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
 )
 
 # char → replacement. en/em/figure/minus dashes → hyphen; decorative bullet
 # glyphs → hyphen; smart quotes / primes → straight quotes.
 _CHAR_REPLACEMENTS: dict[str, str] = {
-    "–": "-", "—": "-", "‒": "-", "―": "-", "−": "-",
-    "•": "-", "‣": "-", "◦": "-", "⁃": "-", "∙": "-",
-    "·": "-", "●": "-", "▪": "-", "‧": "-",
-    "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
-    "“": '"', "”": '"', "„": '"', "″": '"',
+    "–": "-",
+    "—": "-",
+    "‒": "-",
+    "―": "-",
+    "−": "-",
+    "•": "-",
+    "‣": "-",
+    "◦": "-",
+    "⁃": "-",
+    "∙": "-",
+    "·": "-",
+    "●": "-",
+    "▪": "-",
+    "‧": "-",
+    "‘": "'",
+    "’": "'",
+    "‚": "'",
+    "‛": "'",
+    "′": "'",
+    "“": '"',
+    "”": '"',
+    "„": '"',
+    "″": '"',
 }
 _TRANSLATE_TABLE = {ord(k): v for k, v in _CHAR_REPLACEMENTS.items()}
 
@@ -574,10 +602,10 @@ _SYSTEM_GENERATE = (
     "  and, where the profile supports it, includes a quantified result. "
     "  3 to 5 bullets per role.\n"
     "- Group Skills into labeled categories (Languages, Frameworks, Tools, "
-    "  Cloud, etc.). Each category is {\"category\": \"...\", \"items\": [...]}.\n"
-    '  - LANGUAGES the candidate speaks go in a Skills category named '
+    '  Cloud, etc.). Each category is {"category": "...", "items": [...]}.\n'
+    "  - LANGUAGES the candidate speaks go in a Skills category named "
     '    "Languages" (e.g. {"category":"Languages","items":["English","Hindi"]}).\n'
-    "- Dates as \"Mon YYYY\" (e.g. \"Jan 2023\"). The current role's "
+    '- Dates as "Mon YYYY" (e.g. "Jan 2023"). The current role\'s '
     '  end_date is "Present".\n'
     "- Past tense for prior roles; present tense ONLY for the current role.\n"
     "- No first-person pronouns. No filler ('responsible for', 'duties "
@@ -749,8 +777,7 @@ def _llm_generate(
         + "\n\nUser answers to tailoring questions (may be partial):\n"
         + json.dumps(answers, indent=2)
         + "\n\nReturn the tailored resume as JSON matching the provided schema. "
-        "Never invent facts not present in the candidate profile."
-        + addendum
+        "Never invent facts not present in the candidate profile." + addendum
     )
     response = api.messages.create(
         model=MODEL,

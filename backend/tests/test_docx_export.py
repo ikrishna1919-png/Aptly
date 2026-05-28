@@ -113,9 +113,9 @@ def test_visual_mode_uses_right_tab_stop_for_dates():
         if 'w:val="right"' in m and re.search(r'w:pos="\d+"', m)
     ]
     # One per experience + education entry (2 + 1 = 3 here).
-    assert len(right_tab_stops) >= 3, (
-        f"expected right-aligned tab stops; got {len(right_tab_stops)}"
-    )
+    assert (
+        len(right_tab_stops) >= 3
+    ), f"expected right-aligned tab stops; got {len(right_tab_stops)}"
     # Inline `\t` between the company and the date run.
     assert re.findall(r"<w:tab\s*/>", xml)
     # Visual mode draws heading rules (paragraph bottom borders).
@@ -150,6 +150,7 @@ def test_closed_list_headings_present():
 def test_modes_share_identical_words():
     """Visual and plain must contain the same words — only the date join
     differs ("\\t" vs " | "), which we normalise before comparing."""
+
     def words(buf: bytes) -> list[str]:
         norm = _docx_text(buf).replace("\t", " ").replace(" | ", " ")
         return re.findall(r"\S+", norm)
