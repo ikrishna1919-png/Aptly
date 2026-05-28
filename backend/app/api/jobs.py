@@ -68,6 +68,12 @@ class JobsListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+    # Page-based view of the same pagination cursor — derived from
+    # `offset` / `limit` so callers that prefer page numbers don't
+    # have to recompute. `page` is 1-indexed; `total_pages` is
+    # `ceil(total / limit)`.
+    page: int
+    total_pages: int
     window_hours: int
 
 
@@ -202,11 +208,13 @@ def list_jobs(
                 total=0,
                 limit=limit,
                 offset=offset,
+                page=1,
+                total_pages=0,
                 window_hours=settings.hours_window,
             )
         base = base.where(Job.company.in_(keep))
 
-    total = db.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+    total = int(db.execute(select(func.count()).select_from(base.subquery())).scalar_one())
     rows = (
         db.execute(base.order_by(Job.source_updated_at.desc()).limit(limit).offset(offset))
         .scalars()
@@ -216,11 +224,19 @@ def list_jobs(
     jobs_out = _serialise_with_signals(
         list(rows), db, conservative_threshold=conservative_threshold
     )
+    # Page math: `page` is 1-indexed; `total_pages` is `ceil(total /
+    # limit)`. When the filter set is empty (total=0) we surface
+    # `total_pages=0` rather than 1 so the pagination control can
+    # hide itself cleanly.
+    page = (offset // limit) + 1 if limit > 0 else 1
+    total_pages = (total + limit - 1) // limit if limit > 0 else 0
     return JobsListResponse(
         jobs=jobs_out,
-        total=int(total),
+        total=total,
         limit=limit,
         offset=offset,
+        page=page,
+        total_pages=total_pages,
         window_hours=settings.hours_window,
     )
 

@@ -18,12 +18,17 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   ParseEmptyResultError,
   ParseTimeoutError,
+  RESUME_UPLOAD_ACCEPT,
+  RESUME_UPLOAD_MAX_BYTES,
   fetchProfile,
+  parseProfileFile,
   parseProfileText,
   saveProfile,
   type Profile,
+  type ProfileAchievement,
   type ProfileEducation,
   type ProfileExperience,
+  type ProfileProject,
 } from "@/lib/api";
 import { RequireAuth } from "@/lib/auth-context";
 
@@ -38,6 +43,9 @@ const EMPTY_PROFILE: Profile = {
   skills: [],
   experience: [],
   education: [],
+  projects: [],
+  achievements: [],
+  section_order: [],
 };
 
 const EMPTY_EXPERIENCE: ProfileExperience = {
@@ -54,6 +62,21 @@ const EMPTY_EDUCATION: ProfileEducation = {
   degree: "",
   location: "",
   graduation: "",
+};
+
+const EMPTY_PROJECT: ProfileProject = {
+  name: "",
+  description: "",
+  technologies: [],
+  link: "",
+  start_date: "",
+  end_date: "",
+};
+
+const EMPTY_ACHIEVEMENT: ProfileAchievement = {
+  title: "",
+  description: "",
+  date: "",
 };
 
 export default function ProfilePage() {
@@ -99,34 +122,52 @@ function ProfileEditor() {
 
   async function onParse() {
     if (!pasted.trim()) return setError("Paste your resume text first");
-    // Cancel any prior in-flight parse before starting a new one —
-    // protects against a "retry" double-click triggering two polling
-    // loops against the same browser session.
+    await runParse(() =>
+      parseProfileText(pasted, {
+        signal: getParseSignal(),
+        onProgress: () => setInfo("Parsing your resume…"),
+      }),
+    );
+  }
+
+  async function onUpload(file: File) {
+    if (!file) return;
+    if (file.size > RESUME_UPLOAD_MAX_BYTES) {
+      setError(
+        `File is too large. Maximum size is ${
+          RESUME_UPLOAD_MAX_BYTES / (1024 * 1024)
+        } MB.`,
+      );
+      return;
+    }
+    setInfo(`Reading ${file.name}…`);
+    await runParse(() =>
+      parseProfileFile(file, {
+        signal: getParseSignal(),
+        onProgress: () => setInfo(`Parsing ${file.name}…`),
+      }),
+    );
+  }
+
+  function getParseSignal(): AbortSignal {
     parseAbortRef.current?.abort();
     const controller = new AbortController();
     parseAbortRef.current = controller;
+    return controller.signal;
+  }
 
+  async function runParse(call: () => Promise<Profile>) {
     setError(null);
     setInfo("Parsing your resume…");
     setParsing(true);
     try {
-      const parsed = await parseProfileText(pasted, {
-        signal: controller.signal,
-        // The deterministic parser is fast — the `onProgress` callback
-        // exists for parity with the previous AI-backed flow but in
-        // practice we never see more than a single poll loop.
-        onProgress: () => setInfo("Parsing your resume…"),
-      });
+      const parsed = await call();
       setProfile(normaliseProfile(parsed));
       setInfo("Parsed — review and edit, then click Save.");
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") {
-        // Caller-initiated cancel — silent.
         setInfo(null);
       } else if (e instanceof ParseEmptyResultError) {
-        // Soft case: parser ran successfully but couldn't extract
-        // anything. Render in the muted info channel, not the red
-        // error channel — the user just fills the form below.
         setInfo(e.message);
       } else if (e instanceof ParseTimeoutError) {
         setError(e.message);
@@ -134,12 +175,7 @@ function ProfileEditor() {
         setError(e instanceof Error ? e.message : "Parse failed");
       }
     } finally {
-      // Only clear the spinner if THIS controller is still the active
-      // one (a fresh retry could have swapped it in mid-flight).
-      if (parseAbortRef.current === controller) {
-        parseAbortRef.current = null;
-        setParsing(false);
-      }
+      setParsing(false);
     }
   }
 
@@ -218,6 +254,55 @@ function ProfileEditor() {
     }));
   }
 
+  function updateProject(
+    i: number,
+    field: keyof ProfileProject,
+    value: string | string[],
+  ) {
+    setProfile((p) => {
+      const next = [...p.projects];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, projects: next };
+    });
+  }
+
+  function addProject() {
+    setProfile((p) => ({ ...p, projects: [...p.projects, { ...EMPTY_PROJECT }] }));
+  }
+
+  function removeProject(i: number) {
+    setProfile((p) => ({
+      ...p,
+      projects: p.projects.filter((_, idx) => idx !== i),
+    }));
+  }
+
+  function updateAchievement(
+    i: number,
+    field: keyof ProfileAchievement,
+    value: string,
+  ) {
+    setProfile((p) => {
+      const next = [...p.achievements];
+      next[i] = { ...next[i], [field]: value };
+      return { ...p, achievements: next };
+    });
+  }
+
+  function addAchievement() {
+    setProfile((p) => ({
+      ...p,
+      achievements: [...p.achievements, { ...EMPTY_ACHIEVEMENT }],
+    }));
+  }
+
+  function removeAchievement(i: number) {
+    setProfile((p) => ({
+      ...p,
+      achievements: p.achievements.filter((_, idx) => idx !== i),
+    }));
+  }
+
   return (
     <div className="container max-w-3xl space-y-8 py-10">
       <header className="space-y-3">
@@ -240,20 +325,29 @@ function ProfileEditor() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Paste resume to autofill</CardTitle>
+          <CardTitle>Autofill from your resume</CardTitle>
           <CardDescription>
-            Pull contact info, work history, education, and skills out
-            of pasted resume text. Pure pattern extraction — no AI in
-            this step. The result populates the form below for review;
-            nothing saves until you click Save.
+            Upload a PDF or DOCX, or paste the text. The hybrid parser
+            pulls contact info, work history, education, skills,
+            projects, and achievements. The result populates the form
+            below for review; nothing saves until you click Save.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-4">
+          <ResumeDropzone
+            onPick={(file) => void onUpload(file)}
+            disabled={parsing}
+          />
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+            <span className="h-px flex-1 bg-border" />
+            <span>or paste the text</span>
+            <span className="h-px flex-1 bg-border" />
+          </div>
           <Textarea
-            rows={10}
+            rows={8}
             value={pasted}
             onChange={(e) => setPasted(e.target.value)}
-            placeholder="Paste your resume as plain text — copy-paste from PDF or DOCX is fine."
+            placeholder="Paste your resume as plain text."
           />
           <div className="flex flex-wrap items-center justify-end gap-3">
             {parsing && (
@@ -270,7 +364,7 @@ function ProfileEditor() {
               onClick={() => void onParse()}
               disabled={parsing || !pasted.trim()}
             >
-              {parsing ? "Parsing…" : error ? "Retry parse" : "Parse resume"}
+              {parsing ? "Parsing…" : error ? "Retry parse" : "Parse pasted text"}
             </Button>
           </div>
         </CardContent>
@@ -504,6 +598,155 @@ function ProfileEditor() {
 
             <Separator />
 
+            {/* Projects */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Projects</h3>
+                <Button type="button" variant="outline" size="sm" onClick={addProject}>
+                  + Add project
+                </Button>
+              </div>
+              {profile.projects.length === 0 && (
+                <p className="text-sm text-muted-foreground">No projects yet.</p>
+              )}
+              {profile.projects.map((proj, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Name" required>
+                      <Input
+                        required
+                        value={proj.name}
+                        onChange={(e) => updateProject(i, "name", e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Link">
+                      <Input
+                        value={proj.link ?? ""}
+                        onChange={(e) => updateProject(i, "link", e.target.value)}
+                        placeholder="https://github.com/…"
+                      />
+                    </Field>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="Start">
+                        <Input
+                          value={proj.start_date ?? ""}
+                          onChange={(e) =>
+                            updateProject(i, "start_date", e.target.value)
+                          }
+                          placeholder="2023-02"
+                        />
+                      </Field>
+                      <Field label="End">
+                        <Input
+                          value={proj.end_date ?? ""}
+                          onChange={(e) =>
+                            updateProject(i, "end_date", e.target.value)
+                          }
+                          placeholder="2023-06 or Present"
+                        />
+                      </Field>
+                    </div>
+                  </div>
+                  <Field label="Description">
+                    <Textarea
+                      rows={2}
+                      value={proj.description}
+                      onChange={(e) => updateProject(i, "description", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Technologies (comma-separated)">
+                    <Input
+                      value={proj.technologies.join(", ")}
+                      onChange={(e) =>
+                        updateProject(
+                          i,
+                          "technologies",
+                          e.target.value
+                            .split(",")
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        )
+                      }
+                      placeholder="TypeScript, Postgres, AWS"
+                    />
+                  </Field>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removeProject(i)}
+                    >
+                      Remove project
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
+            {/* Achievements */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">Achievements</h3>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addAchievement}
+                >
+                  + Add achievement
+                </Button>
+              </div>
+              {profile.achievements.length === 0 && (
+                <p className="text-sm text-muted-foreground">No achievements yet.</p>
+              )}
+              {profile.achievements.map((ach, i) => (
+                <Card key={i} className="space-y-3 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Title" required>
+                      <Input
+                        required
+                        value={ach.title}
+                        onChange={(e) => updateAchievement(i, "title", e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Date">
+                      <Input
+                        value={ach.date ?? ""}
+                        onChange={(e) => updateAchievement(i, "date", e.target.value)}
+                        placeholder="2023 or Mar 2023"
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Description">
+                    <Textarea
+                      rows={2}
+                      value={ach.description}
+                      onChange={(e) =>
+                        updateAchievement(i, "description", e.target.value)
+                      }
+                    />
+                  </Field>
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => removeAchievement(i)}
+                    >
+                      Remove achievement
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            <Separator />
+
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm">
                 {loading && <span className="text-muted-foreground">Loading…</span>}
@@ -517,6 +760,72 @@ function ProfileEditor() {
           </CardContent>
         </Card>
       </form>
+    </div>
+  );
+}
+
+function ResumeDropzone({
+  onPick,
+  disabled,
+}: {
+  onPick: (file: File) => void;
+  disabled: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  function handleFiles(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+    onPick(file);
+  }
+
+  return (
+    <div
+      className={`flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors ${
+        dragging
+          ? "border-primary bg-primary/5"
+          : "border-border bg-background hover:bg-secondary/40"
+      } ${disabled ? "pointer-events-none opacity-60" : ""}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (!disabled) setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        if (disabled) return;
+        handleFiles(e.dataTransfer.files);
+      }}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept={RESUME_UPLOAD_ACCEPT}
+        className="hidden"
+        onChange={(e) => {
+          handleFiles(e.target.files);
+          // Allow re-selecting the same file after a parse — input
+          // value is sticky until we clear it.
+          e.target.value = "";
+        }}
+      />
+      <p className="text-sm font-medium text-foreground">
+        Drop a PDF or DOCX here
+      </p>
+      <p className="text-xs text-muted-foreground">
+        or{" "}
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          className="font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+        >
+          choose a file
+        </button>
+        {" — up to "}
+        {RESUME_UPLOAD_MAX_BYTES / (1024 * 1024)} MB
+      </p>
     </div>
   );
 }
@@ -570,6 +879,20 @@ function normaliseProfile(p: Profile): Profile {
       location: e.location ?? "",
       graduation: e.graduation ?? "",
     })),
+    projects: (p.projects ?? []).map((pr) => ({
+      name: pr.name ?? "",
+      description: pr.description ?? "",
+      technologies: pr.technologies ?? [],
+      link: pr.link ?? "",
+      start_date: pr.start_date ?? "",
+      end_date: pr.end_date ?? "",
+    })),
+    achievements: (p.achievements ?? []).map((a) => ({
+      title: a.title ?? "",
+      description: a.description ?? "",
+      date: a.date ?? "",
+    })),
+    section_order: p.section_order ?? [],
   };
 }
 
@@ -589,6 +912,16 @@ function cleanForSave(p: Profile): Profile {
       linkedin: opt(p.links.linkedin),
       github: opt(p.links.github),
     },
+    projects: p.projects.map((pr) => ({
+      ...pr,
+      link: opt(pr.link),
+      start_date: opt(pr.start_date),
+      end_date: opt(pr.end_date),
+    })),
+    achievements: p.achievements.map((a) => ({
+      ...a,
+      date: opt(a.date),
+    })),
   };
 }
 

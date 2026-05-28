@@ -107,9 +107,35 @@ class ProfileEducation(BaseModel):
     graduation: str = Field(default="", description="YYYY")
 
 
+class ProfileProject(BaseModel):
+    """One personal / professional project entry. Optional fields are
+    null when the resume doesn't surface them — the tailor service
+    only renders what's populated."""
+
+    name: str
+    description: str = ""
+    technologies: list[str] = Field(default_factory=list)
+    link: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+class ProfileAchievement(BaseModel):
+    """One award / honour / notable accomplishment."""
+
+    title: str
+    description: str = ""
+    date: str | None = None
+
+
 class Profile(BaseModel):
     """The candidate profile the tailor service runs against. Stored as
-    JSON in `candidates.profile`."""
+    JSON in `candidates.profile` — no migration is needed when fields
+    are added below because the column is `JSON`.
+
+    Field order here also serves as the *default* section order in the
+    tailored output when the user's original resume doesn't pin a
+    different one (see `tailor.py:_SYSTEM_GENERATE`)."""
 
     name: str
     headline: str | None = None
@@ -121,6 +147,13 @@ class Profile(BaseModel):
     skills: list[str] = Field(default_factory=list)
     experience: list[ProfileExperience] = Field(default_factory=list)
     education: list[ProfileEducation] = Field(default_factory=list)
+    projects: list[ProfileProject] = Field(default_factory=list)
+    achievements: list[ProfileAchievement] = Field(default_factory=list)
+    # Order the user's resume presents its sections in, when known.
+    # Populated by the LLM parser; the tailor service uses it to
+    # mirror the user's section ordering. Free-form strings so a
+    # template that uses non-standard headers still survives.
+    section_order: list[str] = Field(default_factory=list)
 
 
 # ─── Typed errors (kept for backwards compatibility) ────────────────────────
@@ -174,17 +207,41 @@ class _LLMSkillGroup(BaseModel):
     items: list[str] = Field(default_factory=list)
 
 
+class _LLMProject(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    technologies: list[str] = Field(default_factory=list)
+    link: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+class _LLMAchievement(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    date: str | None = None
+
+
 class _LLMStructuralExtract(BaseModel):
     """The structured output the resume-parse Claude call returns. The
     `skills` field can be either a flat list (most resumes) OR a list
     of category groups (resumes with `Technical Skills:` /
     `Languages:` etc.). Pydantic produces an `anyOf` in the JSON schema
-    that Anthropic accepts."""
+    that Anthropic accepts.
+
+    `section_order` records the resume's actual section ordering so the
+    tailor service can mirror the candidate's voice / structure. Free-
+    form strings (we don't constrain via enum) so a template that
+    uses non-standard headers like "Selected Work" or "Highlights"
+    still round-trips."""
 
     name: str | None = None
     experience: list[_LLMExperience] = Field(default_factory=list)
     education: list[_LLMEducation] = Field(default_factory=list)
     skills: list[str] | list[_LLMSkillGroup] = Field(default_factory=list)
+    projects: list[_LLMProject] = Field(default_factory=list)
+    achievements: list[_LLMAchievement] = Field(default_factory=list)
+    section_order: list[str] = Field(default_factory=list)
 
 
 # Precompute the schema once. `prepare_schema` strips the Anthropic-
@@ -409,6 +466,21 @@ _SYSTEM_PROMPT = (
     "    category (e.g. 'Languages: Python, Go; Cloud: AWS, GCP'), "
     "    return a list of `{category, items}` objects so the "
     "    structure is preserved.\n"
+    "  - projects: personal or professional projects under a 'Projects' / "
+    "    'Personal Projects' / 'Side Projects' / 'Selected Work' header. "
+    "    `name` is the project title; `description` is one or two "
+    "    sentences; `technologies` is the stack as a string list (only "
+    "    if the resume explicitly enumerates one); `link` is the URL if "
+    "    one is given. Omit the section entirely if the resume has none.\n"
+    "  - achievements: awards, honours, notable accomplishments under "
+    "    headers like 'Awards', 'Honors', 'Achievements', 'Recognition'. "
+    "    Distinct from project bullets and from experience-section "
+    "    achievements — only what's filed under its own header. Omit if "
+    "    the resume has none.\n"
+    "  - section_order: a list of the resume's section headings in the "
+    "    order they appear, lowercased. Example: ['summary', 'experience', "
+    "    'projects', 'skills', 'education']. Used by downstream tooling "
+    "    to mirror the candidate's preferred ordering.\n"
     "\n"
     "Output strictly the JSON schema requested — no prose, no markdown."
 )
@@ -470,7 +542,11 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
     """Build the final Profile: contact fields from `regex_profile`,
     structural fields from `llm` where present (otherwise the regex
     fallback). An empty experience list from the LLM keeps the regex
-    list — partial > empty."""
+    list — partial > empty.
+
+    Projects, achievements, and section_order come from the LLM only
+    — the regex extractor never tried to populate them, so there's no
+    fallback to merge against."""
     name = (llm.name or regex_profile.name or "").strip()
 
     llm_experience = [_to_profile_experience(e) for e in llm.experience]
@@ -484,6 +560,12 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
     llm_skills = _flatten_skills(llm.skills)
     skills = llm_skills or regex_profile.skills
 
+    projects = [p for p in (_to_profile_project(p) for p in llm.projects) if p is not None]
+    achievements = [
+        a for a in (_to_profile_achievement(a) for a in llm.achievements) if a is not None
+    ]
+    section_order = [s.strip().lower() for s in llm.section_order if s and s.strip()]
+
     return Profile(
         name=name,
         headline=regex_profile.headline,
@@ -495,6 +577,34 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
         skills=skills,
         experience=experience,
         education=education,
+        projects=projects,
+        achievements=achievements,
+        section_order=section_order,
+    )
+
+
+def _to_profile_project(entry: _LLMProject) -> ProfileProject | None:
+    name = (entry.name or "").strip()
+    if not name:
+        return None
+    return ProfileProject(
+        name=name,
+        description=(entry.description or "").strip(),
+        technologies=[t.strip() for t in entry.technologies if t and t.strip()],
+        link=(entry.link or "").strip() or None,
+        start_date=(entry.start_date or "").strip() or None,
+        end_date=(entry.end_date or "").strip() or None,
+    )
+
+
+def _to_profile_achievement(entry: _LLMAchievement) -> ProfileAchievement | None:
+    title = (entry.title or "").strip()
+    if not title:
+        return None
+    return ProfileAchievement(
+        title=title,
+        description=(entry.description or "").strip(),
+        date=(entry.date or "").strip() or None,
     )
 
 

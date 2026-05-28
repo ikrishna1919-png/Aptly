@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { EmptyState, ErrorState } from "@/components/empty-state";
 import { JobCard } from "@/components/job-card";
+import { JobsPagination } from "@/components/jobs-pagination";
 import { fetchJobs, type JobsQuery } from "@/lib/api";
 
 export async function JobsFeed({ query }: { query: JobsQuery }) {
@@ -29,9 +30,7 @@ export async function JobsFeed({ query }: { query: JobsQuery }) {
         title="No jobs match your filters yet"
         description={
           <>
-            Try widening the location, removing a filter, or check back after the
-            next 6-hour ingest. The feed only ever shows the last{" "}
-            {data.window_hours} hours.
+            Try widening the location, removing a filter, or check back later.
           </>
         }
         action={
@@ -46,6 +45,11 @@ export async function JobsFeed({ query }: { query: JobsQuery }) {
     );
   }
 
+  // Result-count line keeps the technical 48h-window detail OUT of
+  // the user-facing surface (per the cleanup spec). Just the count
+  // + sort affordance.
+  const first = data.offset + 1;
+  const last = Math.min(data.offset + data.jobs.length, data.total);
   return (
     <>
       <div
@@ -53,8 +57,13 @@ export async function JobsFeed({ query }: { query: JobsQuery }) {
         aria-live="polite"
       >
         <p className="text-sm text-muted-foreground">
+          Showing{" "}
+          <span className="font-medium text-foreground">
+            {first}–{last}
+          </span>{" "}
+          of{" "}
           <span className="font-medium text-foreground">{data.total}</span>{" "}
-          {data.total === 1 ? "job" : "jobs"} · last {data.window_hours}h
+          {data.total === 1 ? "job" : "jobs"}
         </p>
         <p className="text-xs text-muted-foreground">Sorted by newest</p>
       </div>
@@ -65,6 +74,11 @@ export async function JobsFeed({ query }: { query: JobsQuery }) {
           </li>
         ))}
       </ul>
+      <JobsPagination
+        page={data.page}
+        totalPages={data.total_pages}
+        limit={data.limit}
+      />
     </>
   );
 }
