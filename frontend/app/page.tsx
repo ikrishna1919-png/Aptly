@@ -5,7 +5,16 @@ import { LandingPage } from "@/components/landing/landing-page";
 
 export const dynamic = "force-dynamic";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Server-side fetches need an absolute URL — there's no "origin" on
+// the Next.js server. The rest of the app uses relative paths via
+// the rewrite proxy (see `next.config.mjs`), so the public
+// `NEXT_PUBLIC_API_URL` is no longer set in production; use the
+// server-only `API_PROXY_TARGET` (which IS set, for the rewrite),
+// then fall back to the legacy public var, then localhost for dev.
+const API_URL =
+  process.env.API_PROXY_TARGET ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:8000";
 
 /**
  * Public landing route. Logged-in visitors are redirected straight

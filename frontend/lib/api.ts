@@ -62,7 +62,20 @@ export type JobsQuery = {
   offset?: number;
 };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Empty-string base = relative URLs. Every browser → backend call
+// goes through Next.js' same-origin proxy (configured in
+// `next.config.mjs`), which forwards `/api/*` to the real backend
+// over the Vercel edge. This makes the session cookie FIRST-PARTY
+// for the frontend origin, which is what's needed for Safari /
+// incognito sign-in to work (third-party cookies are blocked
+// there).
+//
+// `NEXT_PUBLIC_API_URL` is still honoured for backward
+// compatibility with any tooling that sets it (e.g. a Playwright
+// suite pointing at a custom backend) — when set it's used as the
+// absolute base. Production deploys should leave it unset so the
+// proxy path is exercised.
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
   const params = new URLSearchParams();

@@ -25,7 +25,9 @@ operator endpoints under `/api/admin/*` (ingest, manual jobs).
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, status
 from pydantic import BaseModel, Field
@@ -39,16 +41,20 @@ from app.models.candidate import DEMO_SLUG, Candidate
 from app.models.parse_run import ParseRun
 from app.models.user import User
 from app.services.demo_candidate import DEMO_CANDIDATE
-from app.services.profile_parser import Profile, start_background_parse
+from app.services.profile_parser import (
+    Profile,
+    start_background_parse,
+    start_background_parse_pdf,
+)
 from app.services.resume_extractor import (
     MAX_UPLOAD_BYTES,
     SUPPORTED_SUFFIXES,
     EmptyExtractionError,
-    UnsupportedResumeFile,
     extract_text,
 )
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 # ── Load / save ─────────────────────────────────────────────────────────────
@@ -158,18 +164,35 @@ async def parse_profile_upload(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ) -> ParseStartResponse:
-    """Accept a PDF or DOCX resume, extract its plain text, and kick
-    off the same background parse the paste endpoint uses. The
-    extraction step is the only thing different from
-    `POST /api/profile/parse` — everything downstream (hybrid parser,
-    run row, polling endpoint, frontend status loop) is shared.
+    """Accept a PDF or DOCX resume and kick off a background parse.
+
+    Two routing paths, picked by extension:
+
+    * `.pdf` → bytes are handed straight to Claude as a `document`
+      content block. We deliberately SKIP the pdfplumber text
+      extract here; Claude's document understanding handles
+      bulleted lists, multi-column layouts, and table-styled
+      contact rows far more reliably than text we'd lift out
+      up-front. pdfplumber still runs inside the worker for the
+      regex contact-field pass — see `parse_resume_pdf`.
+    * `.docx` → run the (improved) DOCX text extractor first,
+      which walks headers/footers, all paragraphs (with list
+      markers preserved), tables, and text boxes, then hand the
+      assembled text to the existing text-input worker. The
+      `.docx → PDF` conversion path was considered but `python-docx`
+      gives us cell-level access cleanly; the convert step would
+      add a pandoc / LibreOffice dependency without buying
+      anything we don't already get here.
 
     Failure surfaces:
-      * 400 — extension isn't `.pdf` or `.docx`.
+      * 400 — extension isn't `.pdf` or `.docx`, or the file is
+              corrupt / unreadable.
       * 413 — file is larger than `MAX_UPLOAD_BYTES`.
       * 422 — file parsed cleanly but produced no text (almost always
-              a scanned / image-only PDF). The frontend turns this
-              into a "paste your text instead" message.
+              a scanned / image-only PDF whose direct-to-LLM upload
+              would also fail to surface anything useful). The
+              frontend turns this into a "paste your text instead"
+              message.
     """
     # Read bytes with a hard cap. `UploadFile.read(size)` returns up
     # to `size` bytes; if we got the cap we read one more byte to
@@ -184,31 +207,65 @@ async def parse_profile_upload(
         )
 
     filename = file.filename or ""
-    try:
-        text = extract_text(filename, data)
-    except UnsupportedResumeFile as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        ) from e
-    except EmptyExtractionError as e:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(e),
-        ) from e
-    except ValueError as e:
-        # Corrupt / unreadable file — `extract_text` wraps the
-        # underlying pdfminer/docx exception in a `ValueError` with
-        # a clear "couldn't read" message.
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e) or "Couldn't read uploaded file.",
-        ) from e
+    suffix = PurePosixPath(filename).suffix.lower()
 
-    run_id = start_background_parse(text, user_id=user.id, settings=settings)
-    status_url = f"/api/profile/parse/{run_id}"
-    response.headers["Location"] = status_url
-    return ParseStartResponse(run_id=run_id, status_url=status_url)
+    if suffix == ".pdf":
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Uploaded PDF is empty.",
+            )
+        # Cheap structural sanity-check at the API edge — real PDFs
+        # start with the `%PDF-` magic. We do this here so an
+        # obvious mistake (a text file renamed `.pdf`, a corrupted
+        # download) fails fast with a clear 400 instead of burning
+        # an Anthropic call inside the worker and surfacing the
+        # error via the polling path.
+        if not data.startswith(b"%PDF-"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Couldn't read PDF: file is not a PDF.",
+            )
+        # Direct-to-LLM path: hand the PDF bytes to the worker.
+        # `parse_resume_pdf` runs pdfplumber for the regex contact
+        # pass and Anthropic for the structural extract — the
+        # bytes never round-trip through a separate text extractor.
+        run_id = start_background_parse_pdf(data, user_id=user.id, settings=settings)
+        status_url = f"/api/profile/parse/{run_id}"
+        response.headers["Location"] = status_url
+        return ParseStartResponse(run_id=run_id, status_url=status_url)
+
+    if suffix == ".docx":
+        try:
+            text = extract_text(filename, data)
+        except EmptyExtractionError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            ) from e
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e) or "Couldn't read uploaded file.",
+            ) from e
+        # Sanity log so an unexpectedly short extract (template that
+        # parks all content somewhere the walker missed) is
+        # detectable from the Render logs.
+        log.info(
+            "profile/parse/upload: DOCX extracted %d chars from %s",
+            len(text),
+            filename,
+        )
+        run_id = start_background_parse(text, user_id=user.id, settings=settings)
+        status_url = f"/api/profile/parse/{run_id}"
+        response.headers["Location"] = status_url
+        return ParseStartResponse(run_id=run_id, status_url=status_url)
+
+    # Anything else: clear, immediate 400.
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(f"Unsupported file type {suffix!r}. Allowed: " f"{', '.join(SUPPORTED_SUFFIXES)}."),
+    )
 
 
 # Re-exported for the OpenAPI docs / frontend constants.

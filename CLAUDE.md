@@ -59,45 +59,68 @@ but `/api/auth/google/login` returns 503.
 |---|---|---|
 | `GOOGLE_CLIENT_ID` | yes | From the Google Cloud console OAuth client. |
 | `GOOGLE_CLIENT_SECRET` | yes | Same place. |
-| `GOOGLE_REDIRECT_URI` | yes | Full URL of the callback, e.g. `https://api.aptly.app/api/auth/google/callback`. Must match what's registered in the console exactly. |
+| `GOOGLE_REDIRECT_URI` | yes | Full URL of the callback **on the frontend's origin** (since the browser is now talking to Vercel via the same-origin API proxy — see below). e.g. `https://aptly-buvg.vercel.app/api/auth/google/callback`. Must match what's registered in the Google Cloud console exactly. The proxy forwards this to the backend's `/api/auth/google/callback` handler; the cookie returns first-party to the Vercel origin. |
 | `SESSION_SECRET` | yes (prod) | Long random string — signs the session cookie. The default is an obvious placeholder so deploys can't accidentally ship without setting this. Rotate to invalidate every session. |
 | `FRONTEND_URL` | **yes (no default)** | Where to bounce the user after a successful OAuth callback — e.g. `https://aptly-buvg.vercel.app` in prod, `http://localhost:3000` for local dev. **There is intentionally no default**: a missing value raises HTTP 500 from `/api/auth/google/login` so a misconfigured deploy fails loud instead of silently redirecting users at `localhost:3000` and showing `ERR_CONNECTION_REFUSED`. |
-| `CORS_ORIGINS` | yes | Comma-separated list of origins allowed to send credentialed requests. **Must explicitly include the frontend origin** (e.g. `https://aptly-buvg.vercel.app`) — browsers reject `Access-Control-Allow-Origin: *` when `allow_credentials=True`. |
-| `ENVIRONMENT` | yes (prod) | Set to `production` outside local dev so the session cookie picks up `SameSite=None; Secure` for cross-origin auth between Vercel and Render. Anything else (e.g. `development`) keeps `SameSite=Lax` + `Secure=False` so `next dev` over HTTP works. |
+| `CORS_ORIGINS` | yes | Comma-separated list of origins allowed to send credentialed requests. With the same-origin proxy in front of the backend, browser-originated requests now arrive from the proxy server (Vercel edge), not the user's browser directly. Listing the frontend origin still helps for any legacy direct-from-browser flow and is harmless otherwise. |
+| `ENVIRONMENT` | yes (prod) | Set to `production` outside local dev so the session cookie picks up `Secure=True`. SameSite is now `Lax` on both prod and dev (first-party via the proxy — see below). |
 | `INITIAL_USER_EMAIL` | yes (first deploy) | The Google address of the owner. Migration 0012 seeds a `users` row with this email + `google_subject_id=NULL`; on the owner's first sign-in the auth handler links the Google `sub` to that row, preserving the existing single-user data. After that this var is informational only. |
 
 Google Cloud setup (one-time):
 
 1. Create an OAuth 2.0 Client ID in the Google Cloud console (Web
    application).
-2. Add the callback as an **Authorised redirect URI**:
-   `https://api.<your-render-host>/api/auth/google/callback`. For
-   local dev also add `http://localhost:8000/api/auth/google/callback`.
+2. Add the callback as an **Authorised redirect URI** — note this is
+   the FRONTEND origin's `/api/auth/google/callback`, since the
+   proxy forwards it to the backend:
+   `https://<your-vercel-host>/api/auth/google/callback`. For local
+   dev also add `http://localhost:3000/api/auth/google/callback`.
 3. Copy the Client ID + Secret into the env vars above.
-4. Add `https://<your-render-host>` and the Vercel URL to
-   **Authorised JavaScript origins**.
+4. Add the Vercel URL (and `http://localhost:3000` for dev) to
+   **Authorised JavaScript origins**. The Render origin no longer
+   needs to be listed — the browser never calls it directly.
 5. Restrict the OAuth consent screen to the scopes Aptly uses:
    `openid`, `email`, `profile`. No Drive / Calendar access.
 
-The frontend needs `NEXT_PUBLIC_API_URL` to point at the backend
-host so the session cookie rides correctly on cross-origin fetches
-(set on Vercel; `http://localhost:8000` for local dev).
+### Same-origin API proxy (Vercel rewrites → Render)
 
-Cross-origin cookie sanity-check: the frontend (Vercel) and the
-backend (Render) are on different origins, so the session cookie
-crosses sites on every credentialed fetch. The combination that
-actually works in modern browsers is:
+The frontend (Vercel) and the backend (Render) live on different
+domains, so the session cookie used to be third-party — Safari +
+incognito blocked it and sign-in failed silently. **Fix**: the
+frontend proxies every browser → backend call through its own
+origin via Next.js rewrites (`frontend/next.config.mjs`). The
+browser only ever calls the Vercel domain; the `Set-Cookie` lands
+as first-party for that origin and survives ITP.
 
-  * Backend session cookie: `SameSite=None; Secure; HttpOnly` in
-    production (driven by `ENVIRONMENT=production`), `SameSite=Lax;
-    HttpOnly` in dev. `Secure` is required by browsers when
-    `SameSite=None`; `HttpOnly` is set unconditionally by Starlette's
-    `SessionMiddleware`.
-  * Backend CORS: `allow_credentials=True` AND `allow_origins`
-    listing the frontend origin explicitly — wildcards are rejected
-    by browsers when combined with credentials.
-  * Frontend `fetch` / `axios`: every call to the backend uses
-    `credentials: 'include'` (audited in `frontend/lib/api.ts`).
+  * **`API_PROXY_TARGET`** (Vercel env var; server-side only, NOT
+    `NEXT_PUBLIC_`) — full backend URL the rewrite forwards to,
+    e.g. `https://aptly-backend-47l1.onrender.com`. Defaults to
+    `http://localhost:8000` so `next dev` works without any extra
+    setup. The legacy `NEXT_PUBLIC_API_URL` is still respected as
+    a fallback but should be unset in prod so the browser uses the
+    proxy path.
+  * **Frontend API client** (`frontend/lib/api.ts`) uses relative
+    URLs (`/api/...`); the browser hits Vercel, which rewrites the
+    request to `${API_PROXY_TARGET}/api/...`. `Set-Cookie` from the
+    backend flows back through the proxy unchanged and the browser
+    stores it as first-party for the Vercel origin.
+  * **Backend session cookie**: `SameSite=Lax; HttpOnly` in both
+    prod and dev, plus `Secure` in prod. Lax works because the
+    cookie is first-party from the browser's perspective; `None`
+    is no longer needed (and is what Safari was blocking).
+  * **OAuth flow**: `GOOGLE_REDIRECT_URI` MUST be on the Vercel
+    origin (see above). Google sends the user there → Vercel
+    rewrites to the backend's `/api/auth/google/callback` → backend
+    sets the session cookie → backend 302s to
+    `${FRONTEND_URL}/<next>` → user lands signed-in.
+
+Sanity check after a deploy: open the app in Safari OR in a Chrome
+incognito window, sign in with Google. You should land at `/jobs`
+with the session intact; the in-app "Sign out" button works; a
+parse / profile-save round-trips. If the browser shows you at the
+sign-in page after the callback, the cookie didn't stick — most
+likely `GOOGLE_REDIRECT_URI` is still pointing at the Render origin
+instead of the Vercel proxy path.
 
 ## Current phase
 **Phase 0 — Foundation.** Goal: clean monorepo, Postgres wired with one real

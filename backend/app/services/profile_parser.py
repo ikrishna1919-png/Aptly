@@ -491,6 +491,89 @@ def _empty_profile() -> Profile:
     return Profile(name="")
 
 
+def parse_resume_pdf(
+    pdf_bytes: bytes,
+    *,
+    settings: Settings | None = None,
+    client: Anthropic | None = None,
+    run_id: str | None = None,
+) -> Profile:
+    """PDF-input variant of `parse_resume`.
+
+    Skips the pdfplumber text-extraction step that's the source of
+    most "dropped bullets" complaints — bullets, multi-column
+    layouts, and table cells survive intact when Claude reads the
+    PDF directly via the `document` content block.
+
+    The regex contact-field pass still runs against pdfplumber's
+    text view so emails, phone numbers, and URLs keep their cheap
+    deterministic source. Worst case the regex pass returns nothing
+    (image-only PDF); the LLM result still populates name +
+    structural fields and the user fills the rest.
+
+    Same failure modes as `parse_resume`: any Anthropic error or
+    wall-clock timeout falls through to the regex result. The
+    worker also catches an empty extraction here so an image-only
+    PDF can still produce SOMETHING (e.g. the model often surfaces
+    the candidate's name + headline even from a scanned page).
+    """
+    tag = f"parse_run={run_id}" if run_id else "parse_run=adhoc"
+    settings = settings or get_settings()
+    if not pdf_bytes:
+        log.info("%s: empty PDF input, returning empty profile", tag)
+        return _empty_profile()
+
+    log.info("%s: parse_resume_pdf received %d bytes", tag, len(pdf_bytes))
+
+    # Run the cheap pdfplumber text extract for the regex contact
+    # fields. Failure here is non-fatal — we still send the PDF to
+    # Claude and merge whatever LLM result we get. An image-only PDF
+    # falls into this branch silently.
+    regex_profile = _empty_profile()
+    try:
+        from app.services.resume_extractor import _extract_pdf  # noqa: PLC0415
+
+        extracted_text = _extract_pdf(pdf_bytes) or ""
+        log.info(
+            "%s: pdfplumber extracted %d chars for regex contact pass",
+            tag,
+            len(extracted_text),
+        )
+        if extracted_text.strip():
+            lines = [ln.rstrip() for ln in extracted_text.splitlines()]
+            sections = _segment_sections(lines)
+            header_lines = sections.get("_preamble", [])
+            regex_profile = _regex_extract(extracted_text, lines, sections, header_lines)
+    except Exception as exc:  # noqa: BLE001
+        # Don't fail the whole parse for a regex-pass blip. The LLM
+        # result alone is plenty when pdfplumber can't read the file.
+        log.warning("%s: pdfplumber pass failed (continuing): %s", tag, exc)
+
+    if not settings.has_anthropic_key:
+        # No key → no LLM. Best we can do is the regex result, which
+        # may be empty for a scanned PDF — that's fine, the API path
+        # surfaces an actionable error if everything's blank.
+        log.info("%s: no ANTHROPIC_API_KEY — returning regex-only profile", tag)
+        return regex_profile
+
+    log.info("%s: starting Anthropic structural extract (PDF document input)", tag)
+    try:
+        llm = _llm_extract_structural_pdf(pdf_bytes, settings=settings, client=client, run_id=tag)
+    except concurrent.futures.TimeoutError:
+        log.warning(
+            "%s: PDF LLM call exceeded wall-clock %.1fs; falling back to regex",
+            tag,
+            _LLM_HARD_TIMEOUT_SECONDS,
+        )
+        return regex_profile
+    except Exception as exc:  # noqa: BLE001
+        log.exception("%s: PDF LLM extraction failed; falling back to regex: %s", tag, exc)
+        return regex_profile
+
+    log.info("%s: Anthropic PDF extract returned; merging with regex profile", tag)
+    return _merge(regex_profile, llm)
+
+
 # ─── LLM extraction ─────────────────────────────────────────────────────────
 
 
@@ -554,28 +637,96 @@ def _llm_extract_structural(
     client: Anthropic | None = None,
     run_id: str | None = None,
 ) -> _LLMStructuralExtract:
-    api = _build_client(settings, client)
-    # Truncate the input that goes to the model. Past ~14k characters
-    # we're almost certainly past the useful structural content (older
-    # bullets, references, hobbies) and the LLM accuracy on the head of
-    # the resume matters far more.
+    """Text-input variant: send the resume as plain text. Used by the
+    paste path and the DOCX path."""
     payload = text[:_LLM_MAX_CHARS]
+    user_content = [
+        {
+            "type": "text",
+            "text": (
+                "Raw resume text:\n---\n"
+                + payload
+                + "\n---\n\nReturn the extracted fields as JSON matching the schema."
+            ),
+        }
+    ]
+    return _run_llm_extract(
+        user_content=user_content,
+        kind="text",
+        size_note=f"{len(payload)} chars",
+        settings=settings,
+        client=client,
+        run_id=run_id,
+    )
+
+
+def _llm_extract_structural_pdf(
+    pdf_bytes: bytes,
+    *,
+    settings: Settings,
+    client: Anthropic | None = None,
+    run_id: str | None = None,
+) -> _LLMStructuralExtract:
+    """PDF-input variant: hand the raw PDF to Claude as a `document`
+    content block. Claude's document understanding handles bullets,
+    multi-column layouts, tables, and styled lists far more reliably
+    than text we extracted up-front via pdfplumber — which is the
+    point of this whole code path.
+
+    The PDF is base64-encoded and inlined into the user-message
+    content. The Anthropic SDK + API accepts PDFs natively via this
+    shape; no preprocessing on our side beyond the encoding."""
+    import base64  # noqa: PLC0415 — keep cold-start light
+
+    data_b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
+    user_content = [
+        {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": data_b64,
+            },
+        },
+        {
+            "type": "text",
+            "text": (
+                "The attached PDF is the candidate's resume. Read every page,"
+                " including bulleted lists, tables, and multi-column sections,"
+                " and return the extracted fields as JSON matching the schema."
+            ),
+        },
+    ]
+    return _run_llm_extract(
+        user_content=user_content,
+        kind="pdf",
+        size_note=f"{len(pdf_bytes)} bytes",
+        settings=settings,
+        client=client,
+        run_id=run_id,
+    )
+
+
+def _run_llm_extract(
+    *,
+    user_content: list[dict],
+    kind: str,
+    size_note: str,
+    settings: Settings,
+    client: Anthropic | None,
+    run_id: str | None,
+) -> _LLMStructuralExtract:
+    """Shared transport for both the text- and PDF-input variants.
+    Hard wall-clock ceiling + abandon-the-thread-on-timeout pattern
+    is the same for both — see the long comment block below."""
+    api = _build_client(settings, client)
 
     def _call() -> Any:
         return api.messages.create(
             model=MODEL,
             max_tokens=4000,
             system=_SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Raw resume text:\n---\n"
-                        + payload
-                        + "\n---\n\nReturn the extracted fields as JSON matching the schema."
-                    ),
-                }
-            ],
+            messages=[{"role": "user", "content": user_content}],
             output_config={"format": {"type": "json_schema", "schema": _LLM_SCHEMA}},
         )
 
@@ -583,8 +734,8 @@ def _llm_extract_structural(
     # per-phase and a slow-streaming response can blow past it; this
     # wrapper guarantees control returns to the caller after at most
     # `_LLM_HARD_TIMEOUT_SECONDS`. `concurrent.futures.TimeoutError`
-    # propagates up to `parse_resume`, which catches it + falls
-    # back to the regex result.
+    # propagates up to `parse_resume` / `parse_resume_pdf`, which
+    # catches it + falls back to the regex result.
     #
     # The pool is shut down with `wait=False` on timeout. That way
     # we don't wait for the stuck SDK call's thread to finish — it
@@ -594,10 +745,11 @@ def _llm_extract_structural(
     # we care about already moved on.
     tag = run_id or "parse_run=adhoc"
     log.info(
-        "%s: messages.create starting (model=%s, payload=%d chars, hard_timeout=%.1fs)",
+        "%s: messages.create starting (model=%s, kind=%s, payload=%s, hard_timeout=%.1fs)",
         tag,
         MODEL,
-        len(payload),
+        kind,
+        size_note,
         _LLM_HARD_TIMEOUT_SECONDS,
     )
     # `thread_name_prefix` makes a stuck worker easy to spot in
@@ -1304,6 +1456,56 @@ def _execute_parse_run(run_id: str, text: str, settings: Settings | None = None)
                 log.exception("%s: even the defensive write failed; row stays at running", tag)
 
 
+def _execute_parse_run_pdf(run_id: str, pdf_bytes: bytes, settings: Settings | None = None) -> None:
+    """PDF-input variant of `_execute_parse_run`. Same terminal-status
+    guarantees, same `try/except/finally` shape — only the inner
+    parse call changes."""
+    tag = f"parse_run={run_id}"
+    log.info("%s: PDF worker started (input %d bytes)", tag, len(pdf_bytes or b""))
+    terminal_written = False
+    try:
+        profile = parse_resume_pdf(pdf_bytes, settings=settings, run_id=tag)
+        log.info("%s: parse_resume_pdf returned — writing success", tag)
+        _finish_parse(
+            run_id,
+            status=PARSE_STATUS_SUCCESS,
+            profile=profile.model_dump(mode="json"),
+            error=None,
+        )
+        terminal_written = True
+        log.info("%s: terminal status=success written", tag)
+    except Exception as e:  # noqa: BLE001
+        log.exception("%s: PDF worker caught unhandled exception", tag)
+        message = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        try:
+            _finish_parse(
+                run_id,
+                status=PARSE_STATUS_FAILED,
+                profile=None,
+                error=f"Parse failed — {message}",
+            )
+            terminal_written = True
+            log.info("%s: terminal status=failed written", tag)
+        except Exception:  # noqa: BLE001
+            log.exception("%s: failed to record failed status (DB unreachable?)", tag)
+    finally:
+        if not terminal_written:
+            log.warning("%s: no terminal status was written — writing defensive failed row", tag)
+            try:
+                _finish_parse(
+                    run_id,
+                    status=PARSE_STATUS_FAILED,
+                    profile=None,
+                    error=(
+                        "Parse worker exited without recording a result. "
+                        "See backend logs for details."
+                    ),
+                )
+                log.info("%s: defensive failed row written from finally", tag)
+            except Exception:  # noqa: BLE001
+                log.exception("%s: even the defensive write failed; row stays at running", tag)
+
+
 def start_background_parse(
     text: str,
     *,
@@ -1327,4 +1529,23 @@ def start_background_parse(
         db.add(ParseRun(run_id=run_id, status=PARSE_STATUS_RUNNING, user_id=user_id))
         db.commit()
     _launch_worker(_execute_parse_run, (run_id, text, settings))
+    return run_id
+
+
+def start_background_parse_pdf(
+    pdf_bytes: bytes,
+    *,
+    user_id: int | None = None,
+    settings: Settings | None = None,
+) -> str:
+    """PDF-input twin of `start_background_parse`. Spawns
+    `_execute_parse_run_pdf` instead so the worker sends the PDF to
+    Claude as a `document` content block — far more reliable than
+    text we'd extract upstream."""
+    run_id = uuid.uuid4().hex
+    settings = settings or get_settings()
+    with SessionLocal() as db:
+        db.add(ParseRun(run_id=run_id, status=PARSE_STATUS_RUNNING, user_id=user_id))
+        db.commit()
+    _launch_worker(_execute_parse_run_pdf, (run_id, pdf_bytes, settings))
     return run_id
