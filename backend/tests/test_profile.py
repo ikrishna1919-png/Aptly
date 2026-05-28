@@ -60,9 +60,19 @@ def _wire_parse_worker(monkeypatch, factories):
     """Route the background-parse worker through the test's in-memory
     engine + drive it inline so tests can assert the final state
     without waiting on a real thread. Same pattern the ingest
-    background tests use."""
+    background tests use.
+
+    Also stubs `_build_client` to raise — by default the parser's LLM
+    branch fails, and the regex fallback runs. Tests that want the LLM
+    branch monkeypatch `_build_client` again to install their own
+    mock client."""
     monkeypatch.setattr(parser_module, "SessionLocal", factories)
     monkeypatch.setattr(parser_module, "_launch_worker", lambda target, args: target(*args))
+
+    def _raise(*_args, **_kwargs):  # pragma: no cover — default behavior is the raise
+        raise RuntimeError("test stub: no Anthropic client wired")
+
+    monkeypatch.setattr(parser_module, "_build_client", _raise)
 
 
 def _make_user(factories):
@@ -638,17 +648,348 @@ def test_parse_resume_never_throws_on_garbage():
         assert isinstance(p.experience, list)
 
 
-def test_parser_module_does_not_import_anthropic():
-    """The whole point of this PR: the resume-parse code path no
-    longer touches Anthropic. The tailor module still does."""
+# ── Hybrid (regex + Anthropic) parser ──────────────────────────────────────
+
+
+from types import SimpleNamespace  # noqa: E402 — grouped with the hybrid tests
+
+
+def _mock_anthropic_client(payload: dict):
+    """A drop-in for `anthropic.Anthropic()` that captures the call
+    args and returns a pre-baked JSON response. Same pattern the
+    tailor tests use."""
+
+    class _Mock:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            text_block = SimpleNamespace(type="text", text=json.dumps(payload))
+            return SimpleNamespace(content=[text_block])
+
+    return _Mock()
+
+
+def test_parse_calls_anthropic_when_key_present_and_uses_structural_output(
+    client_with_key, monkeypatch
+):
+    """Hybrid path: when the API key is configured, the parser calls
+    Claude with the resume text + structured-output schema, then maps
+    the LLM response into the Profile shape."""
+    test_client, _ = client_with_key
+    payload = {
+        "name": "Dana Sponsor",
+        "experience": [
+            {
+                "company": "Forge Labs",
+                "title": "Staff Backend Engineer",
+                "location": "Remote",
+                "start_date": "Jan 2023",
+                "end_date": "Present",
+                "description_bullets": [
+                    "Led the migration to event-driven Kafka.",
+                    "Cut p95 latency 480ms → 110ms.",
+                ],
+            },
+            {
+                "company": "Initech",
+                "title": "Software Engineer",
+                "location": "Austin, TX",
+                "start_date": "Jul 2019",
+                "end_date": "Dec 2022",
+                "description_bullets": ["Built the billing pipeline."],
+            },
+        ],
+        "education": [
+            {
+                "school": "Carnegie Mellon University",
+                "degree": "B.S.",
+                "field_of_study": "Computer Science",
+                "location": "Pittsburgh, PA",
+                "start_date": "2014",
+                "end_date": "2018",
+            }
+        ],
+        "skills": ["Python", "Kafka", "Postgres"],
+    }
+    mock = _mock_anthropic_client(payload)
+    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
+
+    start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    assert start.status_code == 202
+    poll = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH)
+    body = poll.json()
+    assert body["status"] == "success"
+    profile = body["profile"]
+
+    # Structural fields come from the LLM payload — verbatim, with
+    # company/title correctly assigned (not swapped).
+    assert profile["name"] == "Dana Sponsor"
+    assert profile["experience"][0]["company"] == "Forge Labs"
+    assert profile["experience"][0]["title"] == "Staff Backend Engineer"
+    assert profile["experience"][0]["start"] == "2023-01"
+    assert profile["experience"][0]["end"] == "Present"
+    assert profile["experience"][1]["company"] == "Initech"
+    assert profile["experience"][1]["title"] == "Software Engineer"
+    assert profile["experience"][1]["end"] == "2022-12"
+
+    assert profile["education"][0]["school"] == "Carnegie Mellon University"
+    assert "Computer Science" in profile["education"][0]["degree"]
+    assert profile["education"][0]["graduation"] == "2018"
+
+    # Skills from the LLM are surfaced.
+    assert "Kafka" in profile["skills"]
+
+    # Contact fields stay regex-derived from the source text, NOT the LLM
+    # payload (which didn't include them) — the hybrid contract.
+    assert profile["email"] == "alex.rivera@example.com"
+    assert "415" in profile["phone"] or "555" in profile["phone"]
+    assert profile["links"]["linkedin"] == "linkedin.com/in/alex-rivera"
+    assert profile["links"]["github"] == "github.com/alexr"
+    assert profile["location"] == "San Francisco, CA"
+
+    # Exactly one Anthropic call, on the configured model, with the
+    # cleaned structural-output schema.
+    assert len(mock.calls) == 1
+    call = mock.calls[0]
+    assert call["model"] == parser_module.MODEL
+    assert call["output_config"]["format"]["type"] == "json_schema"
+    schema = call["output_config"]["format"]["schema"]
+    # Schema cleanliness — same rules `_anthropic_schema` enforces.
+    assert _every_object_has_additional_properties_false(schema)
+    assert not _schema_contains_forbidden_keys(schema)
+
+
+def test_parse_falls_back_to_regex_when_llm_raises(client_with_key, monkeypatch):
+    """A failed Anthropic call must NOT fail the whole parse — the
+    regex extractor's result is returned instead, partial > empty."""
+    test_client, _ = client_with_key
+
+    def _raises(*_a, **_k):
+        raise RuntimeError("simulated anthropic 500")
+
+    monkeypatch.setattr(parser_module, "_build_client", _raises)
+
+    start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    assert start.status_code == 202
+    body = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH).json()
+    assert body["status"] == "success"
+    profile = body["profile"]
+    # Regex pulled the contact block.
+    assert profile["email"] == "alex.rivera@example.com"
+    # Regex extracted the name from the preamble.
+    assert profile["name"] == "Alex Rivera"
+    # Regex extracted experience (the headline assertion: company / title
+    # are populated, even if exact alignment isn't perfect — partial is
+    # the contract here).
+    assert len(profile["experience"]) >= 1
+
+
+def test_parse_does_not_call_anthropic_without_key(client_no_key, monkeypatch):
+    """Without `ANTHROPIC_API_KEY`, the parser stays on the regex
+    path — `_build_client` must never be called."""
+    test_client, _ = client_no_key
+    calls: list[int] = []
+    monkeypatch.setattr(
+        parser_module,
+        "_build_client",
+        lambda s, c: (calls.append(1) or RuntimeError("should not be called")),
+    )
+    start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    assert start.status_code == 202
+    body = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH).json()
+    assert body["status"] == "success"
+    # The regex parser still recovered the name + email.
+    assert body["profile"]["name"] == "Alex Rivera"
+    assert body["profile"]["email"] == "alex.rivera@example.com"
+    assert calls == [], "Anthropic must not be called when key is unset"
+
+
+def test_parse_flattens_skill_groups_from_llm(client_with_key, monkeypatch):
+    """The LLM schema lets the model return categorised skill groups
+    (`[{category, items}]`) when the resume groups skills by category.
+    Downstream the Profile model carries a flat list, so the parser
+    flattens the groups (categories are dropped — there's nowhere to
+    store them on the Profile)."""
+    test_client, _ = client_with_key
+    payload = {
+        "name": "Dana Sponsor",
+        "experience": [],
+        "education": [],
+        "skills": [
+            {"category": "Languages", "items": ["Python", "Go"]},
+            {"category": "Cloud", "items": ["AWS", "GCP"]},
+            {"category": "Tools", "items": ["Docker", "Python"]},  # dupe across groups
+        ],
+    }
+    mock = _mock_anthropic_client(payload)
+    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
+
+    start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    body = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH).json()
+    skills = body["profile"]["skills"]
+    # Flattened, deduped (case-insensitive), order preserved.
+    assert skills == ["Python", "Go", "AWS", "GCP", "Docker"]
+
+
+def test_parse_llm_partial_fields_keep_regex_for_others(client_with_key, monkeypatch):
+    """If the LLM returns null for a structural field but found other
+    structural fields, the regex result for the null'd field must
+    surface. Partial > empty."""
+    test_client, _ = client_with_key
+    # LLM returns only education; experience + skills empty.
+    payload = {
+        "name": "Alex Rivera",
+        "experience": [],
+        "education": [
+            {
+                "school": "State University",
+                "degree": "B.S.",
+                "field_of_study": "Computer Science",
+                "location": "Berkeley, CA",
+                "start_date": "2014",
+                "end_date": "2018",
+            }
+        ],
+        "skills": [],
+    }
+    mock = _mock_anthropic_client(payload)
+    monkeypatch.setattr(parser_module, "_build_client", lambda s, c: mock)
+
+    start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
+    body = test_client.get(f"/api/profile/parse/{start.json()['run_id']}", headers=AUTH).json()
+    profile = body["profile"]
+    # Education came from LLM.
+    assert profile["education"][0]["school"] == "State University"
+    # Experience came from regex (LLM returned []).
+    assert len(profile["experience"]) >= 1
+    # Skills came from regex (LLM returned []) — `_FULL_RESUME` has them.
+    assert "Python" in profile["skills"]
+
+
+def test_parser_llm_schema_is_anthropic_clean():
+    """Pin the cleanliness rules `prepare_schema` enforces for the
+    parser's structured-output schema. If this test breaks, the
+    Anthropic 400 regression we shipped before is back."""
+    from app.services.profile_parser import _LLM_SCHEMA
+
+    assert _every_object_has_additional_properties_false(_LLM_SCHEMA)
+    assert not _schema_contains_forbidden_keys(_LLM_SCHEMA)
+
+
+def test_parser_imports_anthropic_lazily():
+    """The parser module must not import `anthropic` at module import
+    time — the lazy `_build_client` import keeps cold start fast and
+    lets the no-key dev path work without the SDK on PATH. The tailor
+    module also follows this pattern."""
+    import importlib
     import sys
 
-    # Force a fresh import to verify the static dependency graph.
+    # Force a fresh import to inspect the static deps.
     sys.modules.pop("app.services.profile_parser", None)
-    import app.services.profile_parser as fresh  # noqa: PLC0415
+    fresh = importlib.import_module("app.services.profile_parser")
 
-    assert not hasattr(fresh, "anthropic")
-    # And no Anthropic-flavoured symbols escaped from the refactor.
-    assert not hasattr(fresh, "MODEL")
-    assert not hasattr(fresh, "PROFILE_SCHEMA")
-    assert not hasattr(fresh, "_build_client")
+    # `anthropic` is NOT imported at module level.
+    assert not hasattr(fresh, "anthropic"), "anthropic must be imported lazily, not at module top"
+    # But the LLM call path exists.
+    assert callable(getattr(fresh, "_build_client", None))
+    assert hasattr(fresh, "_LLM_SCHEMA")
+    assert hasattr(fresh, "MODEL")
+
+
+# Helpers reused above. Kept near the hybrid tests so the assertions
+# they back are easy to read in one screenful.
+
+_FORBIDDEN_SCHEMA_KEYS = (
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "contains",
+    "minContains",
+    "maxContains",
+    "default",
+    "title",
+    "examples",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
+)
+
+
+def _every_object_has_additional_properties_false(schema: dict) -> bool:
+    """Every object node in `schema` must carry
+    `additionalProperties: false` — Anthropic 400s otherwise."""
+
+    def _walk(node) -> bool:
+        if isinstance(node, list):
+            return all(_walk(x) for x in node)
+        if not isinstance(node, dict):
+            return True
+        node_type = node.get("type")
+        is_object = node_type == "object" or "properties" in node
+        if is_object and node.get("additionalProperties") is not False:
+            return False
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            v = node.get(key)
+            if isinstance(v, dict):
+                for sub in v.values():
+                    if not _walk(sub):
+                        return False
+        if "items" in node and not _walk(node["items"]):
+            return False
+        if "prefixItems" in node and not _walk(node["prefixItems"]):
+            return False
+        for key in ("anyOf", "oneOf", "allOf"):
+            v = node.get(key)
+            if isinstance(v, list) and not all(_walk(x) for x in v):
+                return False
+        return True
+
+    return _walk(schema)
+
+
+def _schema_contains_forbidden_keys(schema: dict) -> list[str]:
+    """Return every forbidden-keyword occurrence (path + key) so a
+    failing test reports the exact offender. Property names that
+    coincide with forbidden keywords (e.g. a field literally named
+    `title`) are not flagged — only the schema keyword position is."""
+    hits: list[str] = []
+
+    def _walk(node, path: str) -> None:
+        if isinstance(node, list):
+            for i, v in enumerate(node):
+                _walk(v, f"{path}[{i}]")
+            return
+        if not isinstance(node, dict):
+            return
+        # Forbidden keywords are siblings of `type`/`anyOf`/`properties`.
+        # We check directly on the current node BUT skip the `properties`
+        # / `$defs` dict (its keys are field/def names, not keywords).
+        for bad in _FORBIDDEN_SCHEMA_KEYS:
+            if bad in node:
+                hits.append(f"{path}.{bad}")
+        for key, value in node.items():
+            if key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(
+                value, dict
+            ):
+                for sub_key, sub_value in value.items():
+                    _walk(sub_value, f"{path}.{key}[{sub_key}]")
+            elif key in ("items", "prefixItems"):
+                _walk(value, f"{path}.{key}")
+            elif key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
+                for i, v in enumerate(value):
+                    _walk(v, f"{path}.{key}[{i}]")
+
+    _walk(schema, "$")
+    return hits

@@ -39,6 +39,8 @@ export function JobFilters() {
   const remote = params.get("remote");
   const employmentType = params.get("employment_type");
   const sponsors = params.get("sponsors_visa");
+  const sponsorsH1b = params.get("sponsors_h1b");
+  const pastH1b = params.get("past_h1b_activity");
   const skill = params.get("q"); // skill chips piggyback on the q param for now
   const location = params.get("location") ?? "";
 
@@ -47,10 +49,12 @@ export function JobFilters() {
     if (remote !== null) n++;
     if (employmentType) n++;
     if (sponsors === "true") n++;
+    if (sponsorsH1b === "true") n++;
+    if (pastH1b === "true") n++;
     if (location) n++;
     if (params.get("q")) n++;
     return n;
-  }, [remote, employmentType, sponsors, location, params]);
+  }, [remote, employmentType, sponsors, sponsorsH1b, pastH1b, location, params]);
 
   function commit(update: Record<string, FilterValue>) {
     const next = new URLSearchParams(params.toString());
@@ -141,6 +145,33 @@ export function JobFilters() {
           </Chip>
         </FilterGroup>
 
+        {/*
+         * The two H-1B chips are distinct on purpose — "Sponsors H-1B"
+         * is the conservative high-confidence signal (≥5 LCAs in the
+         * last 12 months); "Past H-1B activity" is the inclusive one
+         * (any LCA in the last 3 years). Both can be active; the
+         * backend treats `false` as 'no filter', so untoggling clears
+         * the URL param rather than sending an opposite-sense filter.
+         */}
+        <FilterGroup label="H-1B (DOL)">
+          <Chip
+            active={sponsorsH1b === "true"}
+            onClick={() =>
+              commit({ sponsors_h1b: sponsorsH1b === "true" ? null : true })
+            }
+          >
+            Sponsors H-1B
+          </Chip>
+          <Chip
+            active={pastH1b === "true"}
+            onClick={() =>
+              commit({ past_h1b_activity: pastH1b === "true" ? null : true })
+            }
+          >
+            Past H-1B activity
+          </Chip>
+        </FilterGroup>
+
         <FilterGroup label="Skills">
           {SKILL_SUGGESTIONS.map((s) => (
             <Chip
@@ -166,6 +197,17 @@ export function JobFilters() {
           </button>
         )}
       </div>
+
+      {/* Disclaimer on the DOL-derived signals. Surfaced near the
+          filter chips AND under the badges on the job card so the
+          user always has the context to read the signal correctly.
+          Misleading users about sponsorship is the core risk of this
+          feature — we'd rather be loud about the uncertainty. */}
+      <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+        H-1B signals reflect public DOL LCA filings from the past 1–3 years. The
+        data is incomplete, employer-name mismatches happen, and a signal does
+        not guarantee sponsorship for any specific role.
+      </p>
     </section>
   );
 }

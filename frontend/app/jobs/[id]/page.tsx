@@ -169,18 +169,46 @@ export default async function JobDetailPage({
 
 function BadgeRow({ job }: { job: Job }) {
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {job.remote === true && <Badge variant="solid">Remote</Badge>}
-      {job.remote === false && <Badge variant="outline">On-site</Badge>}
-      {job.employment_type && <Badge variant="outline">{job.employment_type}</Badge>}
-      {job.salary && <Badge variant="highlight">{job.salary}</Badge>}
-      {job.sponsors_visa === true && (
-        <Badge variant="highlight">Sponsors visa</Badge>
+    <div>
+      <div className="flex flex-wrap gap-1.5">
+        {job.remote === true && <Badge variant="solid">Remote</Badge>}
+        {job.remote === false && <Badge variant="outline">On-site</Badge>}
+        {job.employment_type && <Badge variant="outline">{job.employment_type}</Badge>}
+        {job.salary && <Badge variant="highlight">{job.salary}</Badge>}
+        {job.sponsors_visa === true && (
+          <Badge variant="highlight">Sponsors visa</Badge>
+        )}
+        {job.sponsors_visa === false && (
+          <Badge variant="outline">No visa sponsorship</Badge>
+        )}
+        {/* H-1B LCA signals — two distinct badges. See JobCard for
+            the same rendering rules; a company with no DOL history
+            gets NEITHER badge (never a "doesn't sponsor" badge). */}
+        {job.sponsors_h1b && (
+          <Badge
+            variant="highlight"
+            title={`Filed ${job.lca_count_12mo} H-1B LCAs in the past 12 months (public DOL data).`}
+          >
+            Sponsors H-1B
+          </Badge>
+        )}
+        {!job.sponsors_h1b && job.past_h1b_activity && (
+          <Badge
+            variant="outline"
+            title={`Filed ${job.lca_count_3yr} H-1B LCAs in the past 3 years (public DOL data).`}
+          >
+            Past H-1B activity
+          </Badge>
+        )}
+        {job.source === MANUAL_SOURCE && <Badge variant="muted">Curated</Badge>}
+      </div>
+      {(job.sponsors_h1b || job.past_h1b_activity) && (
+        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+          H-1B signals reflect public DOL LCA filings. The data is incomplete,
+          employer-name mismatches happen, and a signal does not guarantee
+          sponsorship for any specific role.
+        </p>
       )}
-      {job.sponsors_visa === false && (
-        <Badge variant="outline">No visa sponsorship</Badge>
-      )}
-      {job.source === MANUAL_SOURCE && <Badge variant="muted">Curated</Badge>}
     </div>
   );
 }

@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
+from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.candidate import DEMO_SLUG, Candidate
 from app.models.parse_run import ParseRun
@@ -118,13 +119,16 @@ def parse_profile_text(
     payload: ParseRequest,
     response: Response,
     user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
 ) -> ParseStartResponse:
     """Kick off a resume parse and return immediately with a `run_id`.
 
-    The parse runs in milliseconds (deterministic Python parser),
-    but the background-job + polling shape stays so the frontend
-    code path is unchanged."""
-    run_id = start_background_parse(payload.text, user_id=user.id)
+    The parse is hybrid: regex for deterministic contact fields, Claude
+    for structural ones (name, experience, education, skills). The
+    background-job + polling shape stays so the frontend code path is
+    unchanged. `settings` is captured at request time and forwarded to
+    the worker so the LLM call uses the request-scoped configuration."""
+    run_id = start_background_parse(payload.text, user_id=user.id, settings=settings)
     status_url = f"/api/profile/parse/{run_id}"
     response.headers["Location"] = status_url
     return ParseStartResponse(run_id=run_id, status_url=status_url)
