@@ -31,3 +31,23 @@ export function formatLongDate(iso: string | null): string {
     day: "numeric",
   });
 }
+
+/** Strip HTML tags + collapse whitespace to plain text (for card snippets
+ * and meta). Not for rendering back into the DOM — display only. */
+export function stripTags(html: string | null): string {
+  if (!html) return "";
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Title-case a work-model token ("remote" → "Remote"). */
+export function workModelLabel(wm: string | null): string | null {
+  if (!wm) return null;
+  return wm.charAt(0).toUpperCase() + wm.slice(1);
+}

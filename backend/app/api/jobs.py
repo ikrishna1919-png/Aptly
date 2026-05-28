@@ -13,6 +13,7 @@ warrants.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -27,6 +28,48 @@ from app.models.job import MANUAL_SOURCE, Job
 from app.services.sponsorship import lookup_signals_for_companies
 
 router = APIRouter()
+
+# `posted_within` window → hours. "any" (or unknown) means no filter.
+_POSTED_WITHIN_HOURS: dict[str, int] = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+
+# Heuristic, JD-text regexes computed at query time (no stored column).
+# `_HYBRID_RE` derives the "hybrid" work model from the JD/location text.
+_HYBRID_RE = re.compile(r"\bhybrid\b", re.IGNORECASE)
+# `_ADVANCED_DEGREE_REQUIRED_RE` flags a JD that REQUIRES a master's/PhD
+# (not merely "preferred" — a preferred advanced degree is still
+# bachelor's-friendly). Two orderings: "<degree> ... required" and
+# "require(s) ... <degree>", within a short same-clause window. This is
+# deliberately conservative and admittedly imperfect; the UI tooltip says
+# so. Used to compute the `bachelors_friendly` filter on the fly.
+_ADV_DEGREE = r"(master'?s?|m\.?s\.?|m\.eng|ph\.?\s?d\.?|doctorate|graduate degree)"
+_REQUIRE = r"(required|must have|minimum)"
+# Tempered gap: don't match ACROSS a "preferred" or "not" between the degree
+# and the requirement word, so "PhD preferred but not required" is NOT read
+# as a hard requirement (it's still bachelor's-friendly).
+_GAP = r"(?:(?!\bpreferred\b|\bnot\b)[^.\n]){0,60}?"
+_ADVANCED_DEGREE_REQUIRED_RE = re.compile(
+    rf"\b{_ADV_DEGREE}\b{_GAP}\b{_REQUIRE}\b" rf"|\b{_REQUIRE}\b{_GAP}\b{_ADV_DEGREE}\b",
+    re.IGNORECASE,
+)
+
+
+def _derive_work_model(job: Job) -> str | None:
+    """Display work model derived at serve time (no stored column).
+    JD/location mentioning "hybrid" wins; else fall back to the `remote`
+    boolean. `None` when we genuinely can't tell."""
+    haystack = " ".join(filter(None, (job.location, job.title, job.description or "")))
+    if _HYBRID_RE.search(haystack):
+        return "hybrid"
+    if job.remote is True:
+        return "remote"
+    if job.remote is False:
+        return "onsite"
+    return None
+
+
+def _jd_requires_advanced_degree(job: Job) -> bool:
+    """True when the JD appears to REQUIRE a master's/PhD. Heuristic."""
+    return bool(job.description and _ADVANCED_DEGREE_REQUIRED_RE.search(job.description))
 
 
 class JobOut(BaseModel):
@@ -45,6 +88,10 @@ class JobOut(BaseModel):
     description: str | None
     posted_at: datetime | None
     source_updated_at: datetime | None
+
+    # Derived at serve time from `remote` + a JD "hybrid" heuristic — there
+    # is no stored work_model column. "remote" | "hybrid" | "onsite" | None.
+    work_model: str | None = None
 
     # ── Sponsorship intelligence (DOL H-1B LCA) ────────────────────────────
     # Both signals derive from the public LCA disclosure data and are
@@ -112,6 +159,7 @@ def _serialise_with_signals(
                 description=r.description,
                 posted_at=r.posted_at,
                 source_updated_at=r.source_updated_at,
+                work_model=_derive_work_model(r),
                 sponsors_h1b=bool(sig and sig.sponsors_h1b),
                 past_h1b_activity=bool(sig and sig.past_h1b_activity),
                 lca_count_12mo=int(sig.lca_count_12mo) if sig else 0,
@@ -146,6 +194,21 @@ def list_jobs(
             "True returns jobs with any LCA history; False is treated as 'no filter'."
         ),
     ),
+    work_model: str | None = Query(
+        None,
+        description='Work model filter: "remote" | "hybrid" | "onsite". "any"/None = no filter.',
+    ),
+    posted_within: str | None = Query(
+        None,
+        description='Recency window: "24h" | "7d" | "30d". "any"/None = no filter.',
+    ),
+    bachelors_friendly: bool | None = Query(
+        None,
+        description=(
+            "When true, exclude jobs whose JD appears to REQUIRE a master's/PhD "
+            "(heuristic regex on the description; may not catch every case)."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> JobsListResponse:
@@ -170,6 +233,18 @@ def list_jobs(
         base = base.where(func.lower(Job.employment_type) == employment_type.lower())
     if sponsors_visa is not None:
         base = base.where(Job.sponsors_visa.is_(sponsors_visa))
+
+    # Work model is filtered in Python (below) against the SAME derived value
+    # the UI shows, so the filter and the badge never disagree — e.g. a job
+    # whose JD says "hybrid" but whose `remote` flag is False must NOT match
+    # the "onsite" filter.
+    wm = (work_model or "").strip().lower()
+
+    # Recency window — filter on the freshest of posted_at / source_updated_at.
+    posted_hours = _POSTED_WITHIN_HOURS.get((posted_within or "").strip().lower())
+    if posted_hours is not None:
+        cutoff = datetime.now(UTC) - timedelta(hours=posted_hours)
+        base = base.where(func.coalesce(Job.posted_at, Job.source_updated_at) >= cutoff)
 
     # Sponsorship filters: only `True` is meaningful — we DO NOT
     # honour `sponsors_h1b=false` as a negative filter, because a
@@ -214,12 +289,31 @@ def list_jobs(
             )
         base = base.where(Job.company.in_(keep))
 
-    total = int(db.execute(select(func.count()).select_from(base.subquery())).scalar_one())
-    rows = (
-        db.execute(base.order_by(Job.source_updated_at.desc()).limit(limit).offset(offset))
-        .scalars()
-        .all()
-    )
+    # Stable, newest-first ordering with `id` as a deterministic tiebreaker
+    # so pagination never reshuffles rows that share a timestamp.
+    ordered = base.order_by(Job.source_updated_at.desc(), Job.id.desc())
+
+    # JD-text filters ("hybrid" work model, bachelor's-friendly) can't be
+    # expressed in portable SQL, so when either is active we materialise the
+    # windowed rows, filter in Python, then paginate the filtered list — that
+    # keeps `total`/`page` correct. Otherwise we let the DB do count + slice.
+    needs_python_filter = wm in {"remote", "hybrid", "onsite"} or bachelors_friendly is True
+    if needs_python_filter:
+        all_rows = list(db.execute(ordered).scalars().all())
+
+        def _passes(job: Job) -> bool:
+            if wm in {"remote", "hybrid", "onsite"} and _derive_work_model(job) != wm:
+                return False
+            if bachelors_friendly is True and _jd_requires_advanced_degree(job):
+                return False
+            return True
+
+        filtered = [r for r in all_rows if _passes(r)]
+        total = len(filtered)
+        rows = filtered[offset : offset + limit]
+    else:
+        total = int(db.execute(select(func.count()).select_from(base.subquery())).scalar_one())
+        rows = list(db.execute(ordered.limit(limit).offset(offset)).scalars().all())
 
     jobs_out = _serialise_with_signals(
         list(rows), db, conservative_threshold=conservative_threshold
