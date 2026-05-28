@@ -210,7 +210,11 @@ export default async function JobDetailPage({
               rel="noopener noreferrer"
               aria-label={`Apply to ${job.title} at ${job.company}`}
             >
-              Apply on {prettySource(job.source)}
+              {/* Apply CTA names the company, not the ATS platform —
+                  keeps internal/technical labels off the user-facing
+                  surface (the platform is still stored in the DB for
+                  admin use). */}
+              Apply at {job.company}
               <ExternalIcon />
             </a>
           </Button>
@@ -272,17 +276,14 @@ export default async function JobDetailPage({
 
       <Separator className="my-10" />
 
-      <footer className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
-        <span>
-          Source:{" "}
-          <span className="font-medium text-foreground">
-            {prettySource(job.source)}
-          </span>{" "}
-          · ID {job.external_id}
-        </span>
+      <footer className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted-foreground">
+        {/* Per the cleanup spec: the source-platform / external-id is
+            kept in the DB and admin views but NOT surfaced here. The
+            "View original" link is still useful — it just doesn't
+            need to name which ATS the posting lives on. */}
         <Button asChild variant="outline" size="sm" className="rounded-full">
           <a href={job.url} target="_blank" rel="noopener noreferrer">
-            View original
+            View original posting
             <ExternalIcon />
           </a>
         </Button>
@@ -298,11 +299,6 @@ function Meta({ label, value }: { label: string; value: string }) {
       <span>{value}</span>
     </span>
   );
-}
-
-function prettySource(source: string): string {
-  if (source === MANUAL_SOURCE) return "Aptly";
-  return source.charAt(0).toUpperCase() + source.slice(1);
 }
 
 function BackArrow() {

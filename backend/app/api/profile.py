@@ -1,10 +1,16 @@
 """Profile editor endpoints — Phase 5 per-user, session-authenticated.
 
-  GET  /api/profile                  → load the current user's profile
-  PUT  /api/profile                  → save the current user's profile
-  POST /api/profile/parse            → kick off a background parse,
-                                       return 202 + a `run_id`
-  GET  /api/profile/parse/{run_id}   → poll the parse run's status
+  GET  /api/profile                       → load the current user's profile
+  PUT  /api/profile                       → save the current user's profile
+  POST /api/profile/parse                 → kick off a background parse
+                                            from pasted text (202 + run_id)
+  POST /api/profile/parse/upload          → kick off a background parse
+                                            from a PDF / DOCX upload
+                                            (202 + run_id). Returns 400 on
+                                            unsupported type, 413 on
+                                            oversized file, 422 when the
+                                            file has no text layer.
+  GET  /api/profile/parse/{run_id}        → poll the parse run's status
 
 Each user has at most one Candidate row (unique on `user_id`). Reads
 seed from `DEMO_CANDIDATE` when the row doesn't yet exist — that's
@@ -21,7 +27,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -34,6 +40,13 @@ from app.models.parse_run import ParseRun
 from app.models.user import User
 from app.services.demo_candidate import DEMO_CANDIDATE
 from app.services.profile_parser import Profile, start_background_parse
+from app.services.resume_extractor import (
+    MAX_UPLOAD_BYTES,
+    SUPPORTED_SUFFIXES,
+    EmptyExtractionError,
+    UnsupportedResumeFile,
+    extract_text,
+)
 
 router = APIRouter()
 
@@ -132,6 +145,75 @@ def parse_profile_text(
     status_url = f"/api/profile/parse/{run_id}"
     response.headers["Location"] = status_url
     return ParseStartResponse(run_id=run_id, status_url=status_url)
+
+
+@router.post(
+    "/profile/parse/upload",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ParseStartResponse,
+)
+async def parse_profile_upload(
+    response: Response,
+    file: UploadFile = File(..., description="PDF or DOCX resume."),
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> ParseStartResponse:
+    """Accept a PDF or DOCX resume, extract its plain text, and kick
+    off the same background parse the paste endpoint uses. The
+    extraction step is the only thing different from
+    `POST /api/profile/parse` — everything downstream (hybrid parser,
+    run row, polling endpoint, frontend status loop) is shared.
+
+    Failure surfaces:
+      * 400 — extension isn't `.pdf` or `.docx`.
+      * 413 — file is larger than `MAX_UPLOAD_BYTES`.
+      * 422 — file parsed cleanly but produced no text (almost always
+              a scanned / image-only PDF). The frontend turns this
+              into a "paste your text instead" message.
+    """
+    # Read bytes with a hard cap. `UploadFile.read(size)` returns up
+    # to `size` bytes; if we got the cap we read one more byte to
+    # confirm the file is genuinely oversized before 413ing.
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Resume too large. Maximum size is " f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+            ),
+        )
+
+    filename = file.filename or ""
+    try:
+        text = extract_text(filename, data)
+    except UnsupportedResumeFile as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+    except EmptyExtractionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        ) from e
+    except ValueError as e:
+        # Corrupt / unreadable file — `extract_text` wraps the
+        # underlying pdfminer/docx exception in a `ValueError` with
+        # a clear "couldn't read" message.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e) or "Couldn't read uploaded file.",
+        ) from e
+
+    run_id = start_background_parse(text, user_id=user.id, settings=settings)
+    status_url = f"/api/profile/parse/{run_id}"
+    response.headers["Location"] = status_url
+    return ParseStartResponse(run_id=run_id, status_url=status_url)
+
+
+# Re-exported for the OpenAPI docs / frontend constants.
+SUPPORTED_RESUME_SUFFIXES = SUPPORTED_SUFFIXES
+MAX_RESUME_UPLOAD_BYTES = MAX_UPLOAD_BYTES
 
 
 @router.get("/profile/parse/{run_id}", response_model=ParseRunOut)

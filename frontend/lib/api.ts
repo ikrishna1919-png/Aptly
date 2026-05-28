@@ -35,6 +35,11 @@ export type JobsResponse = {
   total: number;
   limit: number;
   offset: number;
+  // Backend-derived page math — present since the pagination work
+  // landed alongside the jobs-page redesign. `page` is 1-indexed;
+  // `total_pages` is 0 when `total` is 0.
+  page: number;
+  total_pages: number;
   window_hours: number;
 };
 
@@ -132,6 +137,21 @@ export type ProfileEducation = {
   graduation: string;
 };
 
+export type ProfileProject = {
+  name: string;
+  description: string;
+  technologies: string[];
+  link?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+};
+
+export type ProfileAchievement = {
+  title: string;
+  description: string;
+  date?: string | null;
+};
+
 export type Profile = {
   name: string;
   headline?: string | null;
@@ -143,6 +163,13 @@ export type Profile = {
   skills: string[];
   experience: ProfileExperience[];
   education: ProfileEducation[];
+  projects: ProfileProject[];
+  achievements: ProfileAchievement[];
+  // Order the user's resume presents sections in (lowercase
+  // identifiers). The tailor service mirrors this in the generated
+  // resume. Defaulted to [] on the backend so the form always sees
+  // an array.
+  section_order: string[];
 };
 
 // All user-facing endpoints carry the session cookie via
@@ -234,6 +261,69 @@ export async function startParse(text: string): Promise<{ run_id: string }> {
   }
   const body = (await res.json()) as { run_id: string };
   return body;
+}
+
+export const RESUME_UPLOAD_ACCEPT = ".pdf,.docx" as const;
+export const RESUME_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Kick off a parse from a PDF or DOCX upload. The backend extracts
+ * the text and then runs the same hybrid parser the paste path
+ * uses. Returns the run id for polling.
+ *
+ * Surfaces friendly error messages for the three expected failure
+ * modes:
+ *   * Unsupported extension — `.pdf` and `.docx` only (400).
+ *   * Empty extract — almost always a scanned / image-only PDF.
+ *     The caller turns this into a "paste your text instead"
+ *     prompt (422).
+ *   * Oversize file — 413.
+ */
+export async function startParseUpload(file: File): Promise<{ run_id: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/api/profile/parse/upload`, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error((await safeDetail(res)) || `Upload failed (${res.status})`);
+  }
+  return (await res.json()) as { run_id: string };
+}
+
+/** Same shape as `parseProfileText` but kicks off from an uploaded
+ * file. Polls until success / failed. Throws the same error subclasses
+ * so the page's existing error-handling branches work unchanged. */
+export async function parseProfileFile(
+  file: File,
+  opts: { signal?: AbortSignal; onProgress?: (status: ParseRunStatus) => void } = {},
+): Promise<Profile> {
+  const { signal, onProgress } = opts;
+  const { run_id } = await startParseUpload(file);
+  onProgress?.("running");
+
+  const deadline = Date.now() + PARSE_MAX_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new DOMException("Parse polling aborted", "AbortError");
+    }
+    const run = await fetchParseRun(run_id);
+    if (run.status === "success") {
+      if (!run.profile) {
+        throw new Error("Parse succeeded but no profile was returned. Retry.");
+      }
+      if (isEmptyProfile(run.profile)) {
+        throw new ParseEmptyResultError();
+      }
+      return run.profile;
+    }
+    if (run.status === "failed") {
+      throw new Error(run.error || "Parse failed");
+    }
+    await sleep(PARSE_POLL_INTERVAL_MS);
+  }
+  throw new ParseTimeoutError();
 }
 
 /** Fetch the current state of a parse run. */

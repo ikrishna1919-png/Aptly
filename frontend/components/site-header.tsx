@@ -73,9 +73,6 @@ export function SiteHeader() {
               Sign in
             </Link>
           )}
-          <span className="hidden sm:inline-flex items-center rounded-full border border-border/80 bg-secondary/60 px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            48h rolling
-          </span>
         </div>
       </div>
 

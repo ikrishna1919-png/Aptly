@@ -172,33 +172,87 @@ def render_docx(resume: TailoredResume, candidate: dict[str, Any] | None = None)
 
     _h_rule(doc)
 
-    # ── Summary ─────────────────────────────────────────────────────────────
-    _section_heading(doc, "Summary")
-    doc.add_paragraph(condensed.summary)
+    # Section order: honour the model's `section_order` when it pinned
+    # one, otherwise fall back to the canonical ordering. Sections with
+    # no content are skipped so an empty Projects array doesn't print
+    # a bare heading. Unknown identifiers in the user's order list are
+    # ignored — keeps the renderer robust to a future spelling drift.
+    default_order = (
+        "summary",
+        "skills",
+        "experience",
+        "projects",
+        "education",
+        "achievements",
+    )
+    order = [s for s in (condensed.section_order or []) if s in default_order]
+    if not order:
+        order = list(default_order)
+    # Ensure every supported section gets a chance to render even if
+    # the model left a key out of the order list.
+    for key in default_order:
+        if key not in order:
+            order.append(key)
 
-    # ── Skills ──────────────────────────────────────────────────────────────
-    _section_heading(doc, "Skills")
-    doc.add_paragraph(", ".join(condensed.skills))
-
-    # ── Experience ──────────────────────────────────────────────────────────
-    _section_heading(doc, "Experience")
-    for exp in condensed.experience:
-        right = " · ".join(part for part in (exp.location, exp.dates) if part)
-        _two_column_line(
-            doc,
-            left_text=f"{exp.title}, {exp.company}",
-            right_text=right,
-            right_tab_pos=right_tab_pos,
-            left_bold=True,
-        )
-        for bullet in exp.bullets:
-            doc.add_paragraph(bullet, style="List Bullet")
-
-    # ── Education ───────────────────────────────────────────────────────────
-    _section_heading(doc, "Education")
-    for line in condensed.education:
-        # Education lines from the model are free-text — render plainly.
-        doc.add_paragraph(line)
+    for section in order:
+        if section == "summary" and condensed.summary:
+            _section_heading(doc, "Summary")
+            doc.add_paragraph(condensed.summary)
+        elif section == "skills" and condensed.skills:
+            _section_heading(doc, "Skills")
+            doc.add_paragraph(", ".join(condensed.skills))
+        elif section == "experience" and condensed.experience:
+            _section_heading(doc, "Experience")
+            for exp in condensed.experience:
+                right = " · ".join(part for part in (exp.location, exp.dates) if part)
+                _two_column_line(
+                    doc,
+                    left_text=f"{exp.title}, {exp.company}",
+                    right_text=right,
+                    right_tab_pos=right_tab_pos,
+                    left_bold=True,
+                )
+                for bullet in exp.bullets:
+                    doc.add_paragraph(bullet, style="List Bullet")
+        elif section == "projects" and condensed.projects:
+            _section_heading(doc, "Projects")
+            for proj in condensed.projects:
+                right = proj.dates or ""
+                _two_column_line(
+                    doc,
+                    left_text=proj.name,
+                    right_text=right,
+                    right_tab_pos=right_tab_pos,
+                    left_bold=True,
+                )
+                if proj.description:
+                    doc.add_paragraph(proj.description)
+                if proj.technologies:
+                    p = doc.add_paragraph()
+                    tech_run = p.add_run("Tech: " + ", ".join(proj.technologies))
+                    tech_run.font.size = Pt(10)
+                    tech_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+                if proj.link:
+                    link_p = doc.add_paragraph(proj.link)
+                    link_p.runs[0].font.size = Pt(10)
+                    link_p.runs[0].font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+        elif section == "education" and condensed.education:
+            _section_heading(doc, "Education")
+            for line in condensed.education:
+                doc.add_paragraph(line)
+        elif section == "achievements" and condensed.achievements:
+            _section_heading(doc, "Achievements")
+            for ach in condensed.achievements:
+                right = ach.date or ""
+                _two_column_line(
+                    doc,
+                    left_text=ach.title,
+                    right_text=right,
+                    right_tab_pos=right_tab_pos,
+                    left_bold=True,
+                )
+                if ach.description:
+                    doc.add_paragraph(ach.description)
 
     buf = io.BytesIO()
     doc.save(buf)
