@@ -1,28 +1,39 @@
-"""Deterministic Python resume parser.
+"""Hybrid resume parser — regex for deterministic contact fields, Claude
+for structural ones.
 
-The "Paste resume to autofill" feature POSTs raw pasted text to
-`POST /api/admin/profile/parse`. That input has already been
-copy-pasted by the user — there's no image, no PDF, no DOCX layout —
-so the parsing step is plain text-pattern extraction, not something
-that needs an LLM. This module replaces the previous Anthropic-based
-parser (which hit 400s and timeouts) with regex + heuristic extraction
-that runs in milliseconds on the backend, has no external dependencies,
-and never throws on bad input.
+The "Paste resume to autofill" feature POSTs raw text to
+`POST /api/profile/parse`. We used to run a pure-regex parser here. It
+got the easy bits right (email, phone, LinkedIn, GitHub, location) but
+was unreliable on the structural shape of experience / education
+entries — title vs. company vs. dates vs. location all look like
+"some capitalised words separated by punctuation" and regex can't tell
+them apart confidently. Examples in the wild that broke:
 
-Public API and the Pydantic shape are unchanged so the frontend autofill
-UI keeps working:
+  * "Senior Engineer, Acme Inc — San Francisco, CA"     (no @, no ·)
+  * "Acme Inc\nSenior Engineer\nJan 2020 – Present"     (3-line block)
+  * "Software Engineer (Backend)\nAcme · Remote · 2022" (parens + ·)
 
-  * `parse_resume(text) -> Profile`   — best-effort extraction; an
-    input that doesn't look like a resume returns an empty Profile
-    (`name=""`, empty lists, null optionals) instead of raising. The
-    frontend reads that as "fill the form manually".
+This module now takes a hybrid approach:
+
+  * **Regex** (cheap, deterministic, never wrong) handles the contact
+    fields: email, phone, LinkedIn URL, GitHub URL, personal website,
+    location. These have hard-edged patterns and the LLM adds no value.
+  * **Anthropic structured output** handles the structural fields:
+    name, experience array, education array, skills. The model is
+    prompted conservatively — return null for any field it can't
+    confidently extract, never guess or fabricate.
+
+When `ANTHROPIC_API_KEY` is empty (local dev, tests without a key) or
+the LLM call fails / times out, we fall back to the regex extractor for
+the structural fields too. Partial extraction is better than no
+extraction — the frontend renders whatever fields came back and lets
+the user fill the rest in by hand.
+
+Public API and the Pydantic shapes are unchanged so the frontend
+autofill UI keeps working:
+
+  * `parse_resume(text, *, settings=None) -> Profile`
   * `Profile` / `ProfileLinks` / `ProfileExperience` / `ProfileEducation`
-    — same `Candidate.profile` shape the tailor service consumes via
-    `get_candidate(db)`.
-
-Anthropic stays in use ONLY for the tailoring step (`app/services/
-tailor.py`). The resume-parse code path no longer imports `anthropic`
-or touches any structured-output schema.
 """
 
 from __future__ import annotations
@@ -32,12 +43,12 @@ import re
 import threading
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.database import SessionLocal
 from app.models.parse_run import (
     PARSE_STATUS_FAILED,
@@ -45,6 +56,10 @@ from app.models.parse_run import (
     PARSE_STATUS_SUCCESS,
     ParseRun,
 )
+from app.services._anthropic_schema import prepare_schema
+
+if TYPE_CHECKING:
+    from anthropic import Anthropic
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +67,20 @@ log = logging.getLogger(__name__)
 # could in theory grind on absurd input. 200K characters is well above
 # any real resume; truncate beyond that to keep the worker bounded.
 _MAX_RESUME_CHARS = 200_000
+
+# How much resume text we hand to Claude. Long resumes get truncated;
+# the parser's accuracy past ~12k chars degrades anyway (it's almost
+# always boilerplate / older role bullets by that point) and the
+# truncation keeps token spend bounded.
+_LLM_MAX_CHARS = 14_000
+
+# Hard ceiling on the LLM call. The parser is in the user-facing
+# request path (via the background worker + polling), so a stuck
+# Anthropic call shouldn't hang the run indefinitely — we want a clear
+# "fall back to regex" path instead.
+_LLM_TIMEOUT_SECONDS = 30.0
+
+MODEL = "claude-sonnet-4-6"
 
 
 # ─── Schema (mirrors the Candidate.profile shape the tailor service reads) ──
@@ -80,7 +109,7 @@ class ProfileEducation(BaseModel):
 
 class Profile(BaseModel):
     """The candidate profile the tailor service runs against. Stored as
-    JSON in `candidates.profile` (slug='demo' for the single-user phase)."""
+    JSON in `candidates.profile`."""
 
     name: str
     headline: str | None = None
@@ -98,10 +127,71 @@ class Profile(BaseModel):
 
 
 class ResumeParseError(RuntimeError):
-    """Base class for resume-parse failures. The deterministic parser
-    never raises this — it's retained so callers that previously
-    caught `ResumeParseError` keep compiling. Future parse-related
-    exceptions should subclass this."""
+    """Base class for resume-parse failures. The parser never raises
+    this on its own — `parse_resume` always returns a Profile — but
+    callers that previously caught it keep compiling."""
+
+
+# ─── LLM-side schema (what we ask Claude for) ───────────────────────────────
+
+
+class _LLMExperience(BaseModel):
+    """One work-experience entry as extracted by the model. Every field
+    is nullable so the model can return null when it can't confidently
+    extract a value — the prompt enforces that rule explicitly."""
+
+    company: str | None = None
+    title: str | None = None
+    location: str | None = None
+    start_date: str | None = Field(
+        default=None,
+        description="Free-form (e.g. 'Jan 2022', '2022-01', '2022'). Normalised post-parse.",
+    )
+    end_date: str | None = Field(
+        default=None,
+        description="Same format as start_date, or the literal string 'Present'.",
+    )
+    description_bullets: list[str] = Field(default_factory=list)
+
+
+class _LLMEducation(BaseModel):
+    school: str | None = None
+    degree: str | None = None
+    field_of_study: str | None = None
+    location: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+class _LLMSkillGroup(BaseModel):
+    """Resumes that group skills by category (e.g. Languages, Cloud,
+    Frameworks) get returned in this shape — preserved so the model
+    doesn't have to lose structure. We flatten in post-processing
+    because the downstream Profile model carries skills as a single
+    list."""
+
+    category: str
+    items: list[str] = Field(default_factory=list)
+
+
+class _LLMStructuralExtract(BaseModel):
+    """The structured output the resume-parse Claude call returns. The
+    `skills` field can be either a flat list (most resumes) OR a list
+    of category groups (resumes with `Technical Skills:` /
+    `Languages:` etc.). Pydantic produces an `anyOf` in the JSON schema
+    that Anthropic accepts."""
+
+    name: str | None = None
+    experience: list[_LLMExperience] = Field(default_factory=list)
+    education: list[_LLMEducation] = Field(default_factory=list)
+    skills: list[str] | list[_LLMSkillGroup] = Field(default_factory=list)
+
+
+# Precompute the schema once. `prepare_schema` strips the Anthropic-
+# unsupported keywords (default, title, minLength, etc.) AND adds
+# `additionalProperties: false` to every object node — both rules the
+# tailor module also relies on.
+_LLM_SCHEMA: dict[str, Any] = prepare_schema(_LLMStructuralExtract)
 
 
 # ─── Patterns ───────────────────────────────────────────────────────────────
@@ -109,10 +199,8 @@ class ResumeParseError(RuntimeError):
 
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 
-# Phone numbers in their common shapes. Allows `+1 (555) 123-4567`,
-# `555.123.4567`, `555-123-4567`, `(555) 123 4567`, with optional
-# international prefix. Length-validated by the digit count (10 or 11)
-# inside `_extract_phone` to keep this regex permissive.
+# Phone numbers in their common shapes. Length-validated by the digit
+# count (10 or 11) inside `_extract_phone` to keep this regex permissive.
 _PHONE_RE = re.compile(
     r"(?:(?:\+?\d{1,3})[\s.\-]?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}",
 )
@@ -121,8 +209,6 @@ _LINKEDIN_RE = re.compile(
     r"(?:https?://)?(?:www\.)?linkedin\.com/(?:in|pub)/[A-Za-z0-9_\-./]+",
     re.IGNORECASE,
 )
-# `github.com/<user>` but not `<user>.github.io`. Stop at the next
-# whitespace or `)` so trailing punctuation doesn't end up in the slug.
 _GITHUB_RE = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/[A-Za-z0-9_\-]+(?:/[A-Za-z0-9_\-./]*)?",
     re.IGNORECASE,
@@ -130,10 +216,6 @@ _GITHUB_RE = re.compile(
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
-# Date-range matcher: `Jan 2020 - Mar 2022`, `January 2020 – Present`,
-# `2020 – present`, `2020-2022`, `Jan. 2020 to Present`, etc. Captures
-# the two endpoints. Uses ASCII hyphen-minus (-), en-dash (–), em-dash
-# (—), and the literal word "to" as separators.
 _MONTH_GROUP = (
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
     r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
@@ -145,13 +227,8 @@ _DATE_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Bullet markers a typical resume uses. The exact glyph differs by
-# template; covering the common set is enough to recognise the line as
-# part of an entry's bullets rather than its header.
 _BULLET_PREFIX_RE = re.compile(r"^\s*(?:[•◦▪●‣⁃*\-–—])\s+")
 
-# Location heuristic: matches `City, ST` or `City, Country`. Used both
-# for the top-of-resume contact location and for per-experience locations.
 _LOCATION_RE = re.compile(
     r"\b([A-Z][A-Za-z][A-Za-zÀ-ſ.'\- ]{0,40}?),\s+"
     r"(?:([A-Z]{2})\b|([A-Z][a-zA-ZÀ-ſ]+(?:\s+[A-Z][a-zA-ZÀ-ſ]+)?))"
@@ -184,9 +261,6 @@ _MONTHS = {
     "december": "12",
 }
 
-# Section-header recognisers. Each value is a tuple of acceptable
-# header strings; the parser matches case-insensitively against the
-# whole stripped line so "Skills" and "TECHNICAL SKILLS" both work.
 _SECTION_HEADERS: dict[str, tuple[str, ...]] = {
     "summary": (
         "summary",
@@ -208,11 +282,7 @@ _SECTION_HEADERS: dict[str, tuple[str, ...]] = {
         "career history",
         "relevant experience",
     ),
-    "education": (
-        "education",
-        "academic background",
-        "educational background",
-    ),
+    "education": ("education", "academic background", "educational background"),
     "skills": (
         "skills",
         "technical skills",
@@ -250,26 +320,278 @@ _INSTITUTION_KEYWORDS_RE = re.compile(
 # ─── Public API ─────────────────────────────────────────────────────────────
 
 
-def parse_resume(text: str, *, settings: Settings | None = None) -> Profile:
-    """Best-effort parse of pasted resume text. Always returns a Profile —
-    fields that can't be confidently extracted are left empty / null and
-    the frontend lets the user fill them in. `settings` is accepted to
-    keep the call signature backwards-compatible with the previous
-    Anthropic-based path; this function ignores it."""
-    del settings  # no longer used; kept for caller compatibility
+def parse_resume(
+    text: str,
+    *,
+    settings: Settings | None = None,
+    client: Anthropic | None = None,
+) -> Profile:
+    """Best-effort parse of pasted resume text. Always returns a Profile.
+
+    Strategy:
+      1. Run the regex extractors for everything — these become the
+         fallback if the LLM call fails.
+      2. If `ANTHROPIC_API_KEY` is configured, call Claude to extract
+         the structural fields (name, experience, education, skills).
+         Merge the LLM result over the regex fallback.
+      3. Contact fields (email, phone, links, location) always come
+         from regex — the LLM result for those is ignored.
+
+    On any Anthropic error or timeout, we log the full error and
+    return the regex-only result. Partial > empty.
+    """
+    settings = settings or get_settings()
     if not isinstance(text, str) or not text.strip():
         return _empty_profile()
 
     text = text[:_MAX_RESUME_CHARS]
     lines = [ln.rstrip() for ln in text.splitlines()]
-
     sections = _segment_sections(lines)
     header_lines = sections.get("_preamble", [])
-    # Many resumes don't have an explicit "Contact" section; the contact
-    # info sits in the pre-amble before the first detected header.
-    # Globs from any section are fine too — pull links + email + phone
-    # from the whole text so a layout that puts the LinkedIn URL at the
-    # bottom still extracts cleanly.
+
+    # Regex pass — runs unconditionally. Provides every contact field
+    # AND the structural fallback.
+    regex_profile = _regex_extract(text, lines, sections, header_lines)
+
+    if not settings.has_anthropic_key:
+        return regex_profile
+
+    # LLM pass for structural fields. Failures don't propagate; we just
+    # return the regex result.
+    try:
+        llm = _llm_extract_structural(text, settings=settings, client=client)
+    except Exception as exc:  # noqa: BLE001 — broad on purpose, fall through to regex
+        # Log the full error so the operator has something to debug
+        # with. `log.exception` includes the traceback.
+        log.exception("resume LLM extraction failed; falling back to regex: %s", exc)
+        return regex_profile
+
+    return _merge(regex_profile, llm)
+
+
+def _empty_profile() -> Profile:
+    return Profile(name="")
+
+
+# ─── LLM extraction ─────────────────────────────────────────────────────────
+
+
+_SYSTEM_PROMPT = (
+    "You extract structured fields from a candidate's pasted resume "
+    "text. You will be shown the raw resume; return JSON matching the "
+    "provided schema.\n"
+    "\n"
+    "Be CONSERVATIVE. The cost of being wrong is worse than the cost "
+    "of being incomplete:\n"
+    "  * Return null for any field you cannot confidently extract.\n"
+    "  * Never invent or guess a value. If the resume doesn't clearly "
+    "    state the company, title, dates, or location, leave it null.\n"
+    "  * Pull values VERBATIM from the resume text. Do not paraphrase "
+    "    titles or shorten company names.\n"
+    "\n"
+    "Field-by-field guidance:\n"
+    "  - name: the candidate's full name, exactly as written at the "
+    "    top of the resume. null if the resume doesn't start with a "
+    "    clearly-formatted name.\n"
+    "  - experience: each entry is one role. `company` is the "
+    "    employer name; `title` is the role; do NOT swap them. "
+    "    `start_date` / `end_date` are free-form date strings as they "
+    "    appear in the resume (e.g. 'Jan 2022', '2022', '2022-01'); "
+    "    end_date is the literal string 'Present' for ongoing roles. "
+    "    `description_bullets` is the achievement bullets verbatim, "
+    "    one string per bullet, stripped of leading glyphs.\n"
+    "  - education: one entry per institution. `school` is the "
+    "    institution; `degree` is the credential (B.S., M.A., Ph.D., "
+    "    etc.); `field_of_study` is the major (separate field — do "
+    "    not pack it into `degree`).\n"
+    "  - skills: a flat list of strings IF the resume lists skills as "
+    "    one ungrouped collection. If the resume groups skills by "
+    "    category (e.g. 'Languages: Python, Go; Cloud: AWS, GCP'), "
+    "    return a list of `{category, items}` objects so the "
+    "    structure is preserved.\n"
+    "\n"
+    "Output strictly the JSON schema requested — no prose, no markdown."
+)
+
+
+def _llm_extract_structural(
+    text: str,
+    *,
+    settings: Settings,
+    client: Anthropic | None = None,
+) -> _LLMStructuralExtract:
+    api = _build_client(settings, client)
+    # Truncate the input that goes to the model. Past ~14k characters
+    # we're almost certainly past the useful structural content (older
+    # bullets, references, hobbies) and the LLM accuracy on the head of
+    # the resume matters far more.
+    payload = text[:_LLM_MAX_CHARS]
+    response = api.messages.create(
+        model=MODEL,
+        max_tokens=4000,
+        system=_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Raw resume text:\n---\n"
+                    + payload
+                    + "\n---\n\nReturn the extracted fields as JSON matching the schema."
+                ),
+            }
+        ],
+        output_config={"format": {"type": "json_schema", "schema": _LLM_SCHEMA}},
+    )
+    return _LLMStructuralExtract.model_validate_json(_first_text(response))
+
+
+def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
+    """Construct (or return) an Anthropic client with the parser's
+    timeout applied. Tests monkeypatch this to inject a mock."""
+    if client is not None:
+        return client
+    from anthropic import Anthropic  # noqa: PLC0415 — lazy import
+
+    return Anthropic(api_key=settings.anthropic_api_key, timeout=_LLM_TIMEOUT_SECONDS)
+
+
+def _first_text(response: Any) -> str:
+    """Pull the first text block out of a Messages API response."""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    raise ResumeParseError("Anthropic response contained no text block")
+
+
+# ─── Merge: structural from LLM, contact from regex ────────────────────────
+
+
+def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
+    """Build the final Profile: contact fields from `regex_profile`,
+    structural fields from `llm` where present (otherwise the regex
+    fallback). An empty experience list from the LLM keeps the regex
+    list — partial > empty."""
+    name = (llm.name or regex_profile.name or "").strip()
+
+    llm_experience = [_to_profile_experience(e) for e in llm.experience]
+    llm_experience = [e for e in llm_experience if e is not None]
+    experience = llm_experience or regex_profile.experience
+
+    llm_education = [_to_profile_education(e) for e in llm.education]
+    llm_education = [e for e in llm_education if e is not None]
+    education = llm_education or regex_profile.education
+
+    llm_skills = _flatten_skills(llm.skills)
+    skills = llm_skills or regex_profile.skills
+
+    return Profile(
+        name=name,
+        headline=regex_profile.headline,
+        email=regex_profile.email,
+        phone=regex_profile.phone,
+        location=regex_profile.location,
+        links=regex_profile.links,
+        summary=regex_profile.summary,
+        skills=skills,
+        experience=experience,
+        education=education,
+    )
+
+
+def _to_profile_experience(entry: _LLMExperience) -> ProfileExperience | None:
+    """Convert an LLM experience entry to the Profile shape. Drops
+    entries where neither title nor company was confidently extracted —
+    those are noise rows the LLM hallucinated structure into."""
+    company = (entry.company or "").strip()
+    title = (entry.title or "").strip()
+    if not company and not title:
+        return None
+    start = _normalise_date(entry.start_date or "")
+    end_raw = (entry.end_date or "").strip()
+    if end_raw.lower() in {"present", "current", "now"}:
+        end = "Present"
+    else:
+        end = _normalise_date(end_raw)
+    location = (entry.location or "").strip() or None
+    bullets = [b.strip() for b in entry.description_bullets if b and b.strip()]
+    return ProfileExperience(
+        company=company,
+        title=title,
+        location=location,
+        start=start,
+        end=end,
+        bullets=bullets[:20],
+    )
+
+
+def _to_profile_education(entry: _LLMEducation) -> ProfileEducation | None:
+    school = (entry.school or "").strip()
+    degree = (entry.degree or "").strip()
+    field = (entry.field_of_study or "").strip()
+    if not school and not degree and not field:
+        return None
+    # Combine degree + field of study into the single `degree` slot the
+    # downstream Profile model carries. "B.S." + "Computer Science" →
+    # "B.S. Computer Science".
+    if degree and field:
+        degree_full = f"{degree} {field}"
+    else:
+        degree_full = degree or field
+    location = (entry.location or "").strip() or None
+    graduation = _extract_graduation_year(entry.end_date or entry.start_date or "")
+    return ProfileEducation(
+        school=school,
+        degree=degree_full,
+        location=location,
+        graduation=graduation,
+    )
+
+
+def _extract_graduation_year(s: str) -> str:
+    """Pull the last YYYY out of a date string. `'2018'`, `'2014 - 2018'`,
+    `'May 2018'` all yield `'2018'`. Empty string when no year found."""
+    if not s:
+        return ""
+    years = _YEAR_RE.findall(s)
+    if not years:
+        return ""
+    return years[-1]
+
+
+def _flatten_skills(skills: list[str] | list[_LLMSkillGroup]) -> list[str]:
+    """The Profile model carries skills as a flat list. If the LLM
+    returned category groups, flatten them — categories are dropped
+    because there's nowhere to store them downstream. Dedupe
+    case-insensitively, preserving the first-seen order."""
+    flat: list[str] = []
+    for item in skills:
+        if isinstance(item, _LLMSkillGroup):
+            flat.extend(item.items)
+        elif isinstance(item, str):
+            flat.append(item)
+    seen: set[str] = set()
+    out: list[str] = []
+    for s in flat:
+        s = s.strip()
+        if not s:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+# ─── Regex extraction (fallback + contact-field source of truth) ────────────
+
+
+def _regex_extract(
+    text: str,
+    lines: list[str],
+    sections: dict[str, list[str]],
+    header_lines: list[str],
+) -> Profile:
     name = _extract_name(header_lines)
     email = _extract_email(text)
     phone = _extract_phone(text)
@@ -295,19 +617,10 @@ def parse_resume(text: str, *, settings: Settings | None = None) -> Profile:
     )
 
 
-def _empty_profile() -> Profile:
-    return Profile(name="")
-
-
 # ─── Section segmentation ──────────────────────────────────────────────────
 
 
 def _segment_sections(lines: list[str]) -> dict[str, list[str]]:
-    """Walk the lines and chop them into sections by header. Lines
-    before the first detected header land under `_preamble` (where the
-    contact block usually lives). Unknown headers are folded into the
-    most recently-opened section so a niche header like
-    "VOLUNTEERING" doesn't make us drop content."""
     sections: dict[str, list[str]] = {"_preamble": []}
     current = "_preamble"
     for line in lines:
@@ -321,9 +634,6 @@ def _segment_sections(lines: list[str]) -> dict[str, list[str]]:
 
 
 def _header_to_section(line: str) -> str | None:
-    """Return the canonical section name if `line` looks like a section
-    header; None otherwise. Headers are short, mostly word-only lines
-    matching one of the known headings (case-insensitive)."""
     stripped = line.strip().rstrip(":")
     if not stripped or len(stripped) > 60:
         return None
@@ -338,9 +648,6 @@ def _header_to_section(line: str) -> str | None:
 
 
 def _extract_name(preamble_lines: list[str]) -> str | None:
-    """Pick the first non-empty pre-amble line that looks like a name:
-    no `@`, mostly letters, length 2–60. Falls back to `None` if the
-    pre-amble is empty or the first line is junk."""
     for line in preamble_lines[:10]:
         stripped = line.strip()
         if not stripped:
@@ -349,9 +656,6 @@ def _extract_name(preamble_lines: list[str]) -> str | None:
             continue
         if "@" in stripped or any(ch.isdigit() for ch in stripped):
             continue
-        # Strip role tag lines like "Software Engineer" that some
-        # templates put first — heuristic: a name usually has at most
-        # one comma and at least one capitalised word.
         if not any(w[:1].isupper() for w in stripped.split() if w):
             continue
         return stripped
@@ -364,10 +668,6 @@ def _extract_email(text: str) -> str | None:
 
 
 def _extract_phone(text: str) -> str | None:
-    """Find the first phone-shaped sequence with exactly 10 or 11
-    digits. The regex is permissive on separators; the digit-count
-    check rejects accidental matches like ZIP codes or version
-    strings."""
     for m in _PHONE_RE.finditer(text):
         digits = re.sub(r"\D", "", m.group(0))
         if len(digits) in (10, 11):
@@ -394,11 +694,6 @@ def _strip_url_trailing_punct(url: str) -> str:
 
 
 def _extract_contact_location(preamble_lines: list[str]) -> str | None:
-    """Look for a `City, ST` shape in the first few pre-amble lines.
-    The location regex is specific enough that email addresses on the
-    same line don't match — so we DON'T skip `@`-bearing lines:
-    contact-block templates often pack name + email + phone + location
-    onto one line separated by `·` or `|`."""
     for line in preamble_lines[:12]:
         m = _LOCATION_RE.search(line)
         if m:
@@ -410,9 +705,6 @@ def _extract_contact_location(preamble_lines: list[str]) -> str | None:
 
 
 def _extract_summary(lines: list[str]) -> str:
-    """Join the non-empty lines of the summary section into one
-    whitespace-normalised paragraph. Caps at ~600 chars so a runaway
-    section doesn't dominate the profile."""
     body = "\n".join(ln for ln in lines if ln.strip())
     body = re.sub(r"[ \t]+", " ", body).strip()
     if len(body) > 600:
@@ -420,23 +712,16 @@ def _extract_summary(lines: list[str]) -> str:
     return body
 
 
-# ─── Skills ─────────────────────────────────────────────────────────────────
+# ─── Skills (regex fallback) ────────────────────────────────────────────────
 
 
 def _extract_skills(lines: list[str]) -> list[str]:
-    """Split the skills section on commas / pipes / bullets, dedupe
-    preserving order, trim each entry."""
     if not lines:
         return []
     combined = " ".join(ln for ln in lines if ln.strip())
     if not combined:
         return []
-    # Strip common bullet markers first so they don't end up inside
-    # the first skill's text.
     combined = _BULLET_PREFIX_RE.sub("", combined)
-    # Split on commas, pipes, or bullet glyphs. Keep newlines so a
-    # one-per-line layout works too — `splitlines()` handled that
-    # already; we now split each line on the in-line separators.
     raw_parts = re.split(r"[,|·•/•]|\s{2,}|\s{0,}\n\s{0,}", combined)
     seen: set[str] = set()
     out: list[str] = []
@@ -444,7 +729,6 @@ def _extract_skills(lines: list[str]) -> list[str]:
         item = part.strip(" .;:\t")
         if not item or len(item) > 80:
             continue
-        # Drop trailing parenthetical metadata like `(advanced)`.
         item = re.sub(r"\s*\([^)]*\)\s*$", "", item)
         key = item.lower()
         if key in seen:
@@ -454,16 +738,12 @@ def _extract_skills(lines: list[str]) -> list[str]:
     return out
 
 
-# ─── Experience ────────────────────────────────────────────────────────────
+# ─── Experience (regex fallback) ────────────────────────────────────────────
 
 
 def _extract_experience(lines: list[str]) -> list[ProfileExperience]:
-    """Walk the experience section, group lines into entries anchored
-    on date-range matches. Each entry contributes one
-    `ProfileExperience` row."""
     if not lines:
         return []
-    # First pass: pre-compute per-line metadata.
     line_meta: list[dict[str, Any]] = []
     for ln in lines:
         stripped = ln.strip()
@@ -480,17 +760,10 @@ def _extract_experience(lines: list[str]) -> list[ProfileExperience]:
             }
         )
 
-    # Second pass: collect entries. A date-range line opens a new entry
-    # (or extends an under-construction one when title + company sat on
-    # the previous line). Bullet lines belong to the most recent entry.
     entries: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for meta in line_meta:
         if meta["is_blank"]:
-            # Blank lines are entry separators — only commit if we have
-            # something real buffered AND we've already seen the entry's
-            # date (otherwise the buffer is just the previous entry's
-            # trailing whitespace).
             if current and any(m.get("date") for m in current):
                 entries.append(current)
                 current = []
@@ -511,8 +784,6 @@ def _extract_experience(lines: list[str]) -> list[ProfileExperience]:
 
 
 def _entry_to_experience(entry: list[dict[str, Any]]) -> ProfileExperience | None:
-    """Pull title / company / location / dates / bullets out of one
-    experience-section entry block."""
     bullets: list[str] = []
     header_lines: list[str] = []
     date_match = None
@@ -525,9 +796,6 @@ def _entry_to_experience(entry: list[dict[str, Any]]) -> ProfileExperience | Non
         header_lines.append(meta["line"])
 
     if date_match is None:
-        # No usable date — skip the entry. The Pydantic model requires
-        # `start` and `end`; a date-less block is almost always a
-        # leftover summary blurb rather than a real role.
         return None
     start = _normalise_date(date_match.group(1))
     end_raw = date_match.group(2)
@@ -537,8 +805,6 @@ def _entry_to_experience(entry: list[dict[str, Any]]) -> ProfileExperience | Non
 
     title, company, location = _split_title_company_location(header_lines, date_match.group(0))
     if not title and not company:
-        # Couldn't recover either field — better to drop the entry
-        # than to ship a `title=""` row the Pydantic model rejects.
         return None
     return ProfileExperience(
         company=company or "",
@@ -553,16 +819,6 @@ def _entry_to_experience(entry: list[dict[str, Any]]) -> ProfileExperience | Non
 def _split_title_company_location(
     header_lines: list[str], date_text: str
 ) -> tuple[str | None, str | None, str | None]:
-    """Header lines for an entry tend to use one of:
-      "Senior Engineer @ Acme — Detroit, MI"
-      "Senior Engineer, Acme"
-      "Acme · Senior Engineer"
-      "Acme\nSenior Engineer\nJan 2020 – Present"
-    Best-effort split. The first separator-tokenised line gives us
-    title + company; the location is whatever City-ST shape we find on
-    any header line."""
-    # Strip the date substring itself from the header lines — it
-    # otherwise pollutes the title/company guess.
     cleaned: list[str] = []
     for line in header_lines:
         without_date = line.replace(date_text, "").strip(" \t,–—-|·•")
@@ -576,21 +832,13 @@ def _split_title_company_location(
             location = m.group(0).strip()
             break
 
-    # Look at each header line: split on common title|company
-    # separators and keep the first two-token line.
     for line in cleaned:
-        # Drop trailing location, if any, so it doesn't end up as the
-        # company field.
         if location and line.endswith(location):
             line = line[: -len(location)].rstrip(" \t,–—-|·•")
         parts = [p.strip() for p in re.split(r"\s+(?:@|at|·|•|\||—|–|,|-)\s+", line) if p.strip()]
         if len(parts) >= 2:
             return parts[0], parts[1], location
 
-    # Two consecutive non-bullet header lines: assume first is one of
-    # title/company and the second is the other. We can't tell which
-    # is which deterministically; default to (title, company) which
-    # matches the most common template.
     non_empty = [c for c in cleaned if c]
     if len(non_empty) >= 2:
         return non_empty[0], non_empty[1], location
@@ -599,16 +847,12 @@ def _split_title_company_location(
     return None, None, location
 
 
-# ─── Education ──────────────────────────────────────────────────────────────
+# ─── Education (regex fallback) ─────────────────────────────────────────────
 
 
 def _extract_education(lines: list[str]) -> list[ProfileEducation]:
-    """Group education-section lines into entries (blank-line separated
-    or institution/degree-line anchored) and pull school / degree /
-    graduation year out of each."""
     if not lines:
         return []
-    # Split into blocks on blank lines.
     blocks: list[list[str]] = []
     current: list[str] = []
     for ln in lines:
@@ -623,8 +867,6 @@ def _extract_education(lines: list[str]) -> list[ProfileEducation]:
     if not blocks:
         return []
 
-    # If everything ran together as one block but mentions multiple
-    # institutions, split again on lines that start a new institution.
     if len(blocks) == 1 and len(blocks[0]) >= 4:
         splat: list[list[str]] = []
         buf: list[str] = []
@@ -653,11 +895,6 @@ def _block_to_education(block: list[str]) -> ProfileEducation | None:
     graduation: str = ""
     for raw_line in block:
         line = raw_line.strip()
-        # A line that's pure "City, ST" parses as the entry's location
-        # — and crucially we do NOT run the degree regex on it,
-        # because two-letter state codes like `MA` would otherwise
-        # match the bare-letter `M.A.` degree pattern and clobber the
-        # real degree on the next line.
         loc_match = _LOCATION_RE.fullmatch(line)
         if loc_match:
             if location is None:
@@ -676,8 +913,6 @@ def _block_to_education(block: list[str]) -> ProfileEducation | None:
         if not graduation:
             years = _YEAR_RE.findall(line)
             if years:
-                # The graduation year is the last YYYY on the line —
-                # `2014 - 2018` should yield "2018".
                 graduation = years[-1]
 
     if not school and not degree_text:
@@ -696,16 +931,7 @@ _TRAILING_LOCATION_RE = re.compile(
 
 
 def _strip_degree_remainder(line: str) -> str:
-    """Drop trailing degree text (", Bachelor's in CS") AND a trailing
-    inline location (", Berkeley, CA") from a school line so the
-    `school` field is just the institution name. Templates often pack
-    "University, City, ST" onto one line and we don't want the city/
-    state to leak into the school name."""
     out = line.strip()
-    # Trailing `, City, ST` (or `, City, Country`) gets stripped first.
-    # The dedicated trailing-anchored regex is stricter than the
-    # general `_LOCATION_RE` so it won't eat parts of the institution
-    # name itself.
     m_loc = _TRAILING_LOCATION_RE.search(out)
     if m_loc:
         out = out[: m_loc.start()].rstrip(" ,—–-")
@@ -716,9 +942,6 @@ def _strip_degree_remainder(line: str) -> str:
 
 
 def _trim_degree_line(line: str, start: int) -> str:
-    """Trim a degree line to the degree phrase + nearby qualifier
-    (e.g. "B.S. Computer Science"). Strips trailing year + location
-    that may have been concatenated."""
     tail = line[start:]
     tail = _YEAR_RE.sub("", tail)
     tail = _LOCATION_RE.sub("", tail)
@@ -730,14 +953,21 @@ def _trim_degree_line(line: str, start: int) -> str:
 
 
 def _normalise_date(token: str) -> str:
-    """Turn `Jan 2020` / `January 2020` / `2020` / `Present` into the
-    `YYYY-MM` / `YYYY` / `Present` form the Profile model expects."""
+    """Turn `Jan 2020` / `January 2020` / `2020` / `2020-01` / `Present`
+    into the canonical `YYYY-MM` / `YYYY` / `Present` form. Empty input
+    or unrecognised input → empty string."""
     if not token:
         return ""
     s = token.strip()
     low = s.lower()
     if low in {"present", "current", "now"}:
         return "Present"
+    # Already in YYYY-MM form? Pass through after light validation.
+    m_iso = re.match(r"^(\d{4})-(\d{1,2})(?:-\d{1,2})?$", s)
+    if m_iso:
+        year = m_iso.group(1)
+        month = m_iso.group(2).zfill(2)
+        return f"{year}-{month}"
     m = re.match(rf"({_MONTH_GROUP})\.?\s+(\d{{4}})", s, re.IGNORECASE)
     if m:
         month_key = m.group(1).lower().rstrip(".")
@@ -769,9 +999,6 @@ def _finish_parse(
     profile: dict[str, Any] | None,
     error: str | None,
 ) -> None:
-    """Write the terminal status onto a ParseRun row. Silent if the row
-    is missing (e.g. operator-deleted) — log + move on rather than
-    crash the worker."""
     with SessionLocal() as db:
         run = db.execute(select(ParseRun).where(ParseRun.run_id == run_id)).scalar_one_or_none()
         if run is None:
@@ -784,13 +1011,13 @@ def _finish_parse(
         db.commit()
 
 
-def _execute_parse_run(run_id: str, text: str) -> None:
-    """Worker entrypoint. The deterministic `parse_resume` never
-    raises on input — `_execute_parse_run` therefore only ever lands
-    on the `failed` branch when something underneath (e.g. the DB)
-    blows up, which is the right shape."""
+def _execute_parse_run(run_id: str, text: str, settings: Settings | None = None) -> None:
+    """Worker entrypoint. `parse_resume` itself never raises on input —
+    the LLM failure path is caught internally and falls back to the
+    regex extractor. The only failure surface is something underneath
+    (DB unreachable, etc.), which the outer `except` catches."""
     try:
-        profile = parse_resume(text)
+        profile = parse_resume(text, settings=settings)
         _finish_parse(
             run_id,
             status=PARSE_STATUS_SUCCESS,
@@ -810,19 +1037,27 @@ def _execute_parse_run(run_id: str, text: str) -> None:
             log.exception("failed to record parse-run %s failure — DB unreachable?", run_id)
 
 
-def start_background_parse(text: str, *, user_id: int | None = None) -> str:
+def start_background_parse(
+    text: str,
+    *,
+    user_id: int | None = None,
+    settings: Settings | None = None,
+) -> str:
     """Create a ParseRun row + spawn a worker. Returns the run_id so
     the HTTP handler can hand it back to the client immediately (202)
     and let the frontend poll for completion.
 
     `user_id` ownership is set at row-creation time so the polling
     endpoint can filter by it — without that filter a guessed `run_id`
-    would leak another user's parsed profile. `user_id=None` is
-    accepted for test paths that don't model multi-user (the field
-    is nullable on the column, see migration 0012)."""
+    would leak another user's parsed profile. The caller's `settings`
+    is captured here (rather than read inside the worker) so that the
+    HTTP-layer dependency override is honoured — `get_settings()`
+    inside a background thread sees the raw env, not the FastAPI
+    override."""
     run_id = uuid.uuid4().hex
+    settings = settings or get_settings()
     with SessionLocal() as db:
         db.add(ParseRun(run_id=run_id, status=PARSE_STATUS_RUNNING, user_id=user_id))
         db.commit()
-    _launch_worker(_execute_parse_run, (run_id, text))
+    _launch_worker(_execute_parse_run, (run_id, text, settings))
     return run_id

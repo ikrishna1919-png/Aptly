@@ -56,6 +56,32 @@ export function JobCard({ job }: { job: Job }) {
         {job.sponsors_visa === true && (
           <Badge variant="highlight">Sponsors visa</Badge>
         )}
+        {/*
+         * H-1B sponsorship signals from public DOL LCA filings. The two
+         * badges are deliberately distinct — the conservative one
+         * ("Sponsors H-1B") implies a real ongoing pipeline; the
+         * inclusive one ("Past H-1B activity") only that the company
+         * has at least one filing in the last three years. Both can
+         * render; only the inclusive one can render alone. A company
+         * with no LCA history gets NEITHER badge — never a "doesn't
+         * sponsor" badge.
+         */}
+        {job.sponsors_h1b && (
+          <Badge
+            variant="highlight"
+            title={`Filed ${job.lca_count_12mo} H-1B LCAs in the past 12 months (public DOL data).`}
+          >
+            Sponsors H-1B
+          </Badge>
+        )}
+        {!job.sponsors_h1b && job.past_h1b_activity && (
+          <Badge
+            variant="outline"
+            title={`Filed ${job.lca_count_3yr} H-1B LCAs in the past 3 years (public DOL data).`}
+          >
+            Past H-1B activity
+          </Badge>
+        )}
         {job.source === MANUAL_SOURCE && (
           <Badge variant="muted" title="Added manually by an admin">
             Curated

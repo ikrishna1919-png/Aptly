@@ -1,0 +1,108 @@
+name: Sponsorship Refresh
+
+# Quarterly refresh of the H-1B sponsorship-intelligence aggregates,
+# sourced from the public DOL LCA disclosure files. Runs on the 5th
+# day of each quarter (DOL publishes the previous quarter's
+# disclosure usually within the first few weeks) so the data is
+# reasonably fresh without slipping when DOL is late.
+#
+# Triggers:
+#   * Scheduled — first of each quarter (Jan / Apr / Jul / Oct), 09:00 UTC
+#   * Manual    — `workflow_dispatch` lets the operator point at a
+#                 specific file or backfill an earlier quarter.
+#
+# Required GitHub Actions secrets / variables:
+#   DATABASE_URL          — Postgres connection string for the prod DB.
+#   APTLY_DOL_CSV_URL     — direct URL of the DOL LCA disclosure CSV
+#                           for the quarter being loaded. The DOL
+#                           hosts these on
+#                           https://www.dol.gov/agencies/eta/foreign-labor/performance
+#                           — the URLs change each release, so the
+#                           operator must keep this variable up to date
+#                           or pass the URL via `workflow_dispatch`.
+#   APTLY_DOL_SOURCE_TAG  — short identifier for the quarter being
+#                           loaded, e.g. `FY2024_Q4`. Stored on every
+#                           sponsorship row so a stale-data complaint
+#                           can be traced back to the file.
+
+on:
+  schedule:
+    # First of each quarter at 09:00 UTC. `1 1,4,7,10` = month-day 1 of
+    # Jan/Apr/Jul/Oct.
+    - cron: "0 9 1 1,4,7,10 *"
+  workflow_dispatch:
+    inputs:
+      csv_url:
+        description: "DOL disclosure CSV URL (overrides APTLY_DOL_CSV_URL)."
+        required: false
+      source_tag:
+        description: "Source-file tag stored on each row (e.g. FY2024_Q4)."
+        required: false
+
+concurrency:
+  group: aptly-sponsorship-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" || pip install -e .
+
+      - name: Resolve inputs
+        id: inputs
+        env:
+          CSV_URL: ${{ github.event.inputs.csv_url || vars.APTLY_DOL_CSV_URL }}
+          SOURCE_TAG: ${{ github.event.inputs.source_tag || vars.APTLY_DOL_SOURCE_TAG }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CSV_URL:-}" ] || [ -z "${SOURCE_TAG:-}" ]; then
+            echo "::error::APTLY_DOL_CSV_URL and APTLY_DOL_SOURCE_TAG must be set as repository variables OR passed via workflow_dispatch inputs."
+            exit 1
+          fi
+          echo "csv_url=${CSV_URL}" >> "$GITHUB_OUTPUT"
+          echo "source_tag=${SOURCE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download DOL disclosure CSV
+        env:
+          CSV_URL: ${{ steps.inputs.outputs.csv_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          # `-L` follows redirects; the DOL host occasionally serves
+          # disclosure files behind a redirect to a CDN.
+          curl -L --fail-with-body --silent --show-error \
+            --max-time 600 \
+            -o tmp/lca.csv "${CSV_URL}"
+          echo "Downloaded $(wc -l < tmp/lca.csv) lines"
+
+      - name: Ingest into employer_sponsorship
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SOURCE_TAG: ${{ steps.inputs.outputs.source_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL secret must be set."
+            exit 1
+          fi
+          python -m app.cli sponsorship-ingest \
+            --file ../tmp/lca.csv \
+            --source "${SOURCE_TAG}" \
+            --report-unmatched | tee ../tmp/ingest_report.json
+          echo "::group::Ingest summary"
+          cat ../tmp/ingest_report.json
+          echo "::endgroup::"

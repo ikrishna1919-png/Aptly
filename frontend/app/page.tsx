@@ -28,6 +28,13 @@ function buildQuery(sp: SearchParams): JobsQuery {
   const sponsors = first(sp.sponsors_visa);
   if (sponsors === "true") q.sponsors_visa = true;
   if (sponsors === "false") q.sponsors_visa = false;
+  // H-1B filters only honour `true`. The backend rejects `false` as a
+  // negative filter (silence in the DOL data isn't evidence) so we
+  // never forward it.
+  const sponsorsH1b = first(sp.sponsors_h1b);
+  if (sponsorsH1b === "true") q.sponsors_h1b = true;
+  const pastH1b = first(sp.past_h1b_activity);
+  if (pastH1b === "true") q.past_h1b_activity = true;
   const et = first(sp.employment_type);
   if (et) q.employment_type = et;
   return q;

@@ -14,6 +14,18 @@ export type Job = {
   description: string | null;
   posted_at: string | null;
   source_updated_at: string | null;
+  // ── Sponsorship intelligence (DOL H-1B LCA) ────────────────────────────
+  // `sponsors_h1b` is the conservative signal (≥N LCAs in the past
+  // 12 months); `past_h1b_activity` is the inclusive one (any LCA in
+  // the past 3 years). Both default to `false` when the backend has
+  // no row for the employer — a `false` is NOT a claim that the
+  // company doesn't sponsor, and the UI must never render it as a
+  // negative badge.
+  sponsors_h1b: boolean;
+  past_h1b_activity: boolean;
+  lca_count_12mo: number;
+  lca_count_3yr: number;
+  most_recent_lca_filing: string | null;
 };
 
 export const MANUAL_SOURCE = "manual";
@@ -33,6 +45,14 @@ export type JobsQuery = {
   remote?: boolean;
   employment_type?: string;
   sponsors_visa?: boolean;
+  /** Conservative H-1B signal: only jobs at employers with ≥ 5 LCAs
+   * filed in the past 12 months. `false` is not a meaningful filter
+   * value — silence in the DOL data isn't evidence the company
+   * doesn't sponsor — and the backend treats it as 'no filter'. */
+  sponsors_h1b?: boolean;
+  /** Inclusive H-1B signal: jobs at employers with any LCA filed in
+   * the past 3 years. Same `false`-is-no-filter contract as above. */
+  past_h1b_activity?: boolean;
   limit?: number;
   offset?: number;
 };
