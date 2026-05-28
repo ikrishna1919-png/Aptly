@@ -320,15 +320,14 @@ async def google_callback(
     user = find_or_link_user(db, google_info)
 
     request.session[SESSION_USER_KEY] = user.id
-    # Post-login destination. The frontend stashes `next=/profile`
-    # when the user comes through the create-account flow; falling
-    # back to `/profile` (NOT `/`) for any login with no `next`
-    # routes returning users to the editor where they can
-    # confirm/update their profile before the gated `/jobs` feed
-    # opens. The home route's server-side check still bounces
-    # users with a saved profile straight to `/jobs`, so this
-    # only adds the desired "profile first" hop for newcomers.
-    next_path = request.session.pop("next", None) or "/profile"
+    # Post-login destination. Honour an explicit `next` (the login
+    # modal / route guard stash the originally-requested path there)
+    # over the default. The default is now `/jobs` — the feed is the
+    # signed-in home. New accounts (profile_saved=false) are still
+    # routed to `/profile` first by the frontend's `RequireProfile`
+    # gate on `/jobs`, so the "profile first" hop is preserved without
+    # forcing every returning user through the editor.
+    next_path = request.session.pop("next", None) or "/jobs"
     return RedirectResponse(
         url=_build_frontend_url(settings, next_path), status_code=status.HTTP_302_FOUND
     )

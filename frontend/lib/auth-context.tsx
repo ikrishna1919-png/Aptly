@@ -62,7 +62,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     await signOutApi();
     setUser(null);
-    router.push("/sign-in");
+    // Land on the public home page (logged out) rather than the
+    // login modal — signing out shouldn't immediately nag a sign-in.
+    router.push("/");
   }, [router]);
 
   return (
@@ -80,12 +82,23 @@ export function useAuth(): AuthState {
   return ctx;
 }
 
-/** Wraps a route that requires a signed-in user. Redirects to
- * `/sign-in?next=<current-path>` when the auth check resolves
- * un-authenticated. Renders nothing until the first /me call
- * settles — avoids the "flash of unauthenticated content" that
- * would otherwise leak protected-page chrome to anonymous
- * viewers before the redirect lands. */
+/** Redirect target for an un-authenticated visitor: the landing page
+ * with the login modal open (`?login=1`) and the originally-requested
+ * path preserved as `next` so OAuth returns them there. Centralised so
+ * every guard (and `middleware.ts`) opens sign-in the same way. */
+function loginRedirect(pathname: string | null): string {
+  const next = pathname && pathname !== "/" ? pathname : "/jobs";
+  return `/?login=1&next=${encodeURIComponent(next)}`;
+}
+
+/** Wraps a route that requires a signed-in user. Redirects to the
+ * landing page with the login modal open when the auth check resolves
+ * un-authenticated. Renders nothing until the first /me call settles —
+ * avoids the "flash of unauthenticated content" that would otherwise
+ * leak protected-page chrome to anonymous viewers before the redirect
+ * lands. (A direct URL hit is usually caught earlier by
+ * `middleware.ts`; this is the client-side backstop for expired or
+ * partial sessions.) */
 export function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
   const router = useRouter();
@@ -93,8 +106,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!loading && !user) {
-      const next = encodeURIComponent(pathname || "/");
-      router.replace(`/sign-in?next=${next}`);
+      router.replace(loginRedirect(pathname));
     }
   }, [loading, user, pathname, router]);
 
@@ -118,8 +130,7 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (loading) return;
     if (!user) {
-      const next = encodeURIComponent(pathname || "/");
-      router.replace(`/sign-in?next=${next}`);
+      router.replace(loginRedirect(pathname));
       return;
     }
     if (!user.is_admin) {
@@ -156,8 +167,7 @@ export function RequireProfile({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (loading) return;
     if (!user) {
-      const next = encodeURIComponent(pathname || "/");
-      router.replace(`/sign-in?next=${next}`);
+      router.replace(loginRedirect(pathname));
       return;
     }
     const saved = user.profile_saved ?? true;
