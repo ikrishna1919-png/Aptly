@@ -381,14 +381,91 @@ export class ParseEmptyResultError extends Error {
   }
 }
 
+/** Thrown when the kickoff POST can't reach the backend at all (as
+ * opposed to reaching it and getting an HTTP error). The dominant
+ * cause in production is Render's free tier: the service sleeps after
+ * inactivity and the first request blocks while the container cold-
+ * starts (~30s), which an unbounded `fetch` surfaces as a bare
+ * `TypeError: Failed to fetch` with no context. We retry these a few
+ * times before giving up; this is what the user sees if every attempt
+ * fails. */
+export class KickoffNetworkError extends Error {
+  constructor(cause?: unknown) {
+    super(
+      "Couldn't reach the server to start the parse — it may be waking " +
+        "from sleep. Wait a few seconds and try again, or fill in the " +
+        "form below manually.",
+    );
+    this.name = "KickoffNetworkError";
+    if (cause instanceof Error) this.cause = cause;
+  }
+}
+
+// Per-attempt ceiling on the kickoff POST. Long enough to absorb a
+// ~30s Render cold start in a single attempt, short enough that a
+// genuinely dead connection doesn't hang the UI indefinitely.
+const KICKOFF_ATTEMPT_TIMEOUT_MS = 35_000;
+// Total kickoff attempts before surfacing KickoffNetworkError. Three
+// covers the common case (server asleep → wakes on attempt 1 or 2)
+// without retrying so long that a truly-down backend feels frozen.
+const KICKOFF_MAX_ATTEMPTS = 3;
+// Linear backoff base between kickoff attempts (×attempt number).
+const KICKOFF_RETRY_BACKOFF_MS = 1_500;
+
+/** Run the kickoff POST with a per-attempt timeout and retry on
+ * network-level failure (cold start, dropped connection) or our own
+ * attempt-timeout. Calls `onWaking` before each retry so the UI can
+ * explain the wait. Does NOT retry HTTP error *responses* (4xx/5xx) —
+ * those reached the server and are real; the caller handles them.
+ *
+ * Note: a retry can in theory create a second parse_runs row if the
+ * first attempt's request actually landed but its response was lost
+ * (e.g. attempt timed out after the server already created the row).
+ * That extra row is harmless — the caller only ever polls the run_id
+ * from the attempt that returned, and the backend's startup sweep
+ * reaps any abandoned `running` row. The far likelier cold-start
+ * failure is the connection never establishing, which creates no row
+ * at all. */
+async function kickoffFetch(
+  input: string,
+  init: RequestInit,
+  onWaking?: () => void,
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= KICKOFF_MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), KICKOFF_ATTEMPT_TIMEOUT_MS);
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } catch (e) {
+      lastErr = e;
+      if (attempt < KICKOFF_MAX_ATTEMPTS) {
+        onWaking?.();
+        await sleep(KICKOFF_RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new KickoffNetworkError(lastErr);
+}
+
 /** Kick off the parse. Returns the run_id the caller can poll. */
-export async function startParse(text: string): Promise<{ run_id: string }> {
-  const res = await fetch(`${API_URL}/api/profile/parse`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
+export async function startParse(
+  text: string,
+  onWaking?: () => void,
+): Promise<{ run_id: string }> {
+  const res = await kickoffFetch(
+    `${API_URL}/api/profile/parse`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    },
+    onWaking,
+  );
   if (!res.ok) {
     throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   }
@@ -411,14 +488,21 @@ export const RESUME_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
  *     prompt (422).
  *   * Oversize file — 413.
  */
-export async function startParseUpload(file: File): Promise<{ run_id: string }> {
+export async function startParseUpload(
+  file: File,
+  onWaking?: () => void,
+): Promise<{ run_id: string }> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_URL}/api/profile/parse/upload`, {
-    method: "POST",
-    credentials: "include",
-    body: form,
-  });
+  const res = await kickoffFetch(
+    `${API_URL}/api/profile/parse/upload`,
+    {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    },
+    onWaking,
+  );
   if (!res.ok) {
     throw new Error((await safeDetail(res)) || `Upload failed (${res.status})`);
   }
@@ -430,10 +514,14 @@ export async function startParseUpload(file: File): Promise<{ run_id: string }> 
  * so the page's existing error-handling branches work unchanged. */
 export async function parseProfileFile(
   file: File,
-  opts: { signal?: AbortSignal; onProgress?: (status: ParseRunStatus) => void } = {},
+  opts: {
+    signal?: AbortSignal;
+    onProgress?: (status: ParseRunStatus) => void;
+    onWaking?: () => void;
+  } = {},
 ): Promise<Profile> {
-  const { signal, onProgress } = opts;
-  const { run_id } = await startParseUpload(file);
+  const { signal, onProgress, onWaking } = opts;
+  const { run_id } = await startParseUpload(file, onWaking);
   onProgress?.("running");
 
   const deadline = Date.now() + PARSE_MAX_WAIT_MS;
@@ -488,10 +576,14 @@ export async function fetchParseRun(run_id: string): Promise<ParseRun> {
  */
 export async function parseProfileText(
   text: string,
-  opts: { signal?: AbortSignal; onProgress?: (status: ParseRunStatus) => void } = {},
+  opts: {
+    signal?: AbortSignal;
+    onProgress?: (status: ParseRunStatus) => void;
+    onWaking?: () => void;
+  } = {},
 ): Promise<Profile> {
-  const { signal, onProgress } = opts;
-  const { run_id } = await startParse(text);
+  const { signal, onProgress, onWaking } = opts;
+  const { run_id } = await startParse(text, onWaking);
   onProgress?.("running");
 
   const deadline = Date.now() + PARSE_MAX_WAIT_MS;

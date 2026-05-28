@@ -18,6 +18,7 @@ never transitions to `success` or `failed` — leaves the row at
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -244,6 +245,69 @@ class TestErrorMessageFidelity:
         assert run.status == PARSE_STATUS_FAILED
         # The verbatim original message survives.
         assert "could not read file: bad magic bytes" in (run.error or "")
+
+
+class TestStartupSweep:
+    """`sweep_orphaned_parse_runs` reaps rows that the worker's
+    try/except/finally can't cover: a process killed mid-parse leaves
+    the daemon thread dead and the row stuck at `running` forever. The
+    sweep runs once at boot and flips stale `running` rows to `failed`."""
+
+    def _seed_at(self, Session, run_id: str, *, status: str, age: timedelta) -> None:
+        with Session() as s:
+            s.add(
+                ParseRun(
+                    run_id=run_id,
+                    status=status,
+                    user_id=None,
+                    started_at=datetime.now(UTC) - age,
+                )
+            )
+            s.commit()
+
+    def test_old_running_row_is_marked_failed(self, factories, monkeypatch):
+        monkeypatch.setattr(parser_module, "SessionLocal", factories)
+        self._seed_at(factories, "stale", status=PARSE_STATUS_RUNNING, age=timedelta(minutes=10))
+
+        swept = parser_module.sweep_orphaned_parse_runs()
+
+        assert swept == 1
+        run = _row(factories, "stale")
+        assert run.status == PARSE_STATUS_FAILED
+        assert run.error and "restart" in run.error
+        assert run.finished_at is not None
+
+    def test_recent_running_row_is_left_alone(self, factories, monkeypatch):
+        """A row inside the cutoff might belong to a parse still
+        legitimately in flight — the sweep must not touch it."""
+        monkeypatch.setattr(parser_module, "SessionLocal", factories)
+        self._seed_at(factories, "fresh", status=PARSE_STATUS_RUNNING, age=timedelta(seconds=30))
+
+        swept = parser_module.sweep_orphaned_parse_runs()
+
+        assert swept == 0
+        assert _row(factories, "fresh").status == PARSE_STATUS_RUNNING
+
+    def test_terminal_rows_are_never_touched(self, factories, monkeypatch):
+        """Old `success`/`failed` rows are done — the sweep only
+        targets `running`, so terminal rows survive untouched."""
+        monkeypatch.setattr(parser_module, "SessionLocal", factories)
+        self._seed_at(factories, "done", status=PARSE_STATUS_SUCCESS, age=timedelta(hours=2))
+
+        swept = parser_module.sweep_orphaned_parse_runs()
+
+        assert swept == 0
+        assert _row(factories, "done").status == PARSE_STATUS_SUCCESS
+
+    def test_sweep_swallows_db_errors(self, monkeypatch):
+        """The sweep runs in app startup — a DB hiccup must be logged
+        and swallowed (return 0), never propagate and block boot."""
+
+        def _boom():
+            raise RuntimeError("db unreachable at boot")
+
+        monkeypatch.setattr(parser_module, "SessionLocal", _boom)
+        assert parser_module.sweep_orphaned_parse_runs() == 0
 
 
 def test_log_lines_emit_a_run_id_tag(inline_worker, monkeypatch, caplog):

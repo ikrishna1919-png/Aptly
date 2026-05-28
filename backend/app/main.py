@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -11,11 +13,23 @@ from app.api.jobs import router as jobs_router
 from app.api.profile import router as profile_router
 from app.api.tailor import router as tailor_router
 from app.config import get_settings
+from app.services.profile_parser import sweep_orphaned_parse_runs
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # Reap any ParseRun rows left at `running` by a process that died
+    # mid-parse — the worker's `finally` can't write a terminal status
+    # if the process itself is killed. Running this once per boot means
+    # a stuck row can't outlive the restart that orphaned it, so the
+    # polling client never waits out its full ceiling on a dead parse.
+    sweep_orphaned_parse_runs()
+    yield
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="Aptly API", version="0.1.0")
+    app = FastAPI(title="Aptly API", version="0.1.0", lifespan=_lifespan)
 
     # SessionMiddleware must wrap the request before any handler that
     # touches `request.session`.

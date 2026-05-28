@@ -248,8 +248,8 @@ function ProfileEditor() {
 
   async function onParse() {
     if (!pasted.trim()) return setError("Paste your resume text first");
-    await runParse("Parsing your resume…", (signal, onProgress) =>
-      parseProfileText(pasted, { signal, onProgress }),
+    await runParse("Parsing your resume…", (signal, onProgress, onWaking) =>
+      parseProfileText(pasted, { signal, onProgress, onWaking }),
     );
   }
 
@@ -263,8 +263,8 @@ function ProfileEditor() {
       );
       return;
     }
-    await runParse(`Parsing ${file.name}…`, (signal, onProgress) =>
-      parseProfileFile(file, { signal, onProgress }),
+    await runParse(`Parsing ${file.name}…`, (signal, onProgress, onWaking) =>
+      parseProfileFile(file, { signal, onProgress, onWaking }),
     );
   }
 
@@ -280,6 +280,7 @@ function ProfileEditor() {
     call: (
       signal: AbortSignal,
       onProgress: (status: ParseRunStatus) => void,
+      onWaking: () => void,
     ) => Promise<Profile>,
   ) {
     const signal = getParseSignal();
@@ -299,11 +300,23 @@ function ProfileEditor() {
     }, PARSE_STILL_WORKING_AFTER_MS);
 
     try {
-      const parsed = await call(signal, (_status) => {
-        // Polling-progress callback fires on each poll. We only use
-        // it to keep the spinner alive — the still-working swap is
-        // time-based above.
-      });
+      const parsed = await call(
+        signal,
+        (_status) => {
+          // Polling-progress callback fires on each poll. We only use
+          // it to keep the spinner alive — the still-working swap is
+          // time-based above.
+        },
+        () => {
+          // Fires when the kickoff POST is being retried because the
+          // backend didn't answer — on Render's free tier that's a
+          // cold start. Tell the user what the wait is instead of
+          // leaving the generic "Parsing…" copy on a stalled request.
+          setInfo(
+            "Waking the server up — the first request after a quiet spell can take up to a minute. Hang tight…",
+          );
+        },
+      );
       setProfile(normaliseProfile(parsed));
       setInfo("Parsed — review and edit, then click Save.");
     } catch (e) {
