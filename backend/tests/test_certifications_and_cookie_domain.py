@@ -245,35 +245,35 @@ def test_docx_renders_certifications_section_with_issuer_and_date():
     the credential name, and a credential-ID sub-line when present.
     """
     from app.services.docx_export import render_docx
-    from app.services.tailor import TailoredCertification, TailoredResume
+    from app.services.tailor import (
+        CertificationEntry,
+        Contact,
+        EducationEntry,
+        ResumeMeta,
+        SkillGroup,
+        TailoredResume,
+    )
 
     resume = TailoredResume(
+        meta=ResumeMeta(mode="visual"),
+        contact=Contact(name="Jordan Singh", email="jordan@example.com"),
         summary="Backend engineer.",
-        skills=["Python"],
+        skills=[SkillGroup(category="Languages", items=["Python"])],
         experience=[],
-        education=["B.S. CS, MIT (2018)"],
-        certifications=[
-            TailoredCertification(
-                name="AWS Certified Solutions Architect – Associate",
-                issuer="Amazon Web Services",
-                date="2024-03",
-                credential_id="ABC-12345",
+        education=[
+            EducationEntry(
+                degree="B.S. Computer Science", institution="MIT", graduation_date="May 2018"
             )
         ],
-        section_order=["summary", "skills", "education", "certifications"],
-        ats_notes="…",
+        certifications=[
+            CertificationEntry(
+                name="AWS Certified Solutions Architect - Associate",
+                issuer="Amazon Web Services",
+                date="Mar 2024",
+            )
+        ],
     )
-    candidate = {
-        "name": "Jordan Singh",
-        "headline": None,
-        "email": "jordan@example.com",
-        "phone": None,
-        "location": None,
-        "summary": "",
-        "experience": [],
-        "education": [],
-    }
-    blob = render_docx(resume, candidate=candidate)
+    blob = render_docx(resume, mode="visual")
     # Round-trip through python-docx to inspect the rendered text.
     from io import BytesIO
 
@@ -281,11 +281,11 @@ def test_docx_renders_certifications_section_with_issuer_and_date():
 
     doc = Document(BytesIO(blob))
     body_text = "\n".join(p.text for p in doc.paragraphs)
-    assert "CERTIFICATIONS" in body_text
-    assert "AWS Certified Solutions Architect – Associate" in body_text
+    # Title-case heading (closed-list); issuer + date on the entry line.
+    assert "Certifications" in body_text
+    assert "AWS Certified Solutions Architect - Associate" in body_text
     assert "Amazon Web Services" in body_text
-    assert "2024-03" in body_text
-    assert "Credential ID: ABC-12345" in body_text
+    assert "Mar 2024" in body_text
 
 
 # ─── Task B: session cookie carries no `Domain` attribute ───────────────────

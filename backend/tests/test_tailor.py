@@ -194,10 +194,10 @@ def test_generate_demo_mode_confirms_gap_via_affirmative_answer(client):
     assert res.status_code == 200
     body = res.json()
     assert body["demo_mode"] is True
-    assert "demo mode" in body["resume"]["ats_notes"].lower()
     assert body["resume"]["experience"]
-    # The confirmed gap appears in the rewritten skills list.
-    assert "Rust" in body["resume"]["skills"]
+    # The confirmed gap appears in the rewritten (categorized) skills.
+    skills = [item for group in body["resume"]["skills"] for item in group["items"]]
+    assert "Rust" in skills
 
 
 def test_generate_demo_mode_skips_unconfirmed_gap(client):
@@ -215,7 +215,8 @@ def test_generate_demo_mode_skips_unconfirmed_gap(client):
         json={"job_id": job.id, "answers": {rust_q: "no"}},
     )
     assert res.status_code == 200
-    assert "Rust" not in res.json()["resume"]["skills"]
+    skills = [item for group in res.json()["resume"]["skills"] for item in group["items"]]
+    assert "Rust" not in skills
 
 
 def test_docx_export(client):
@@ -227,7 +228,7 @@ def test_docx_export(client):
 
     res = test_client.post(
         "/api/tailor/docx",
-        json={"resume": gen["resume"], "filename": "alex-acme"},
+        json={"resume": gen["resume"], "filename": "alex-acme", "mode": "visual"},
     )
     assert res.status_code == 200
     assert res.headers["content-type"] == (
@@ -237,6 +238,44 @@ def test_docx_export(client):
     # DOCX files are ZIP archives — they start with "PK".
     assert res.content[:2] == b"PK"
     assert len(res.content) > 1500
+
+    # PDF endpoint (plain mode) streams a real PDF.
+    pdf = test_client.post(
+        "/api/tailor/pdf",
+        json={"resume": gen["resume"], "filename": "alex-acme", "mode": "plain"},
+    )
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert 'filename="alex-acme.pdf"' in pdf.headers["content-disposition"]
+    assert pdf.content[:4] == b"%PDF"
+
+
+def test_generate_smoke_matches_ats_schema_no_dashes(client):
+    """Spec smoke test: the tailor endpoint returns JSON matching the new
+    ATS schema, with no em/en dashes in any string, at least one matched
+    keyword, and pages_estimate of 1 or 2."""
+    from app.services.tailor import TailoredResume
+
+    test_client, Session = client
+    with Session() as s:
+        job = _seed_job(s)
+
+    body = test_client.post("/api/tailor/generate", json={"job_id": job.id, "answers": {}}).json()
+    resume = body["resume"]
+
+    # 1. Valid JSON matching the schema (round-trips through the model).
+    parsed = TailoredResume.model_validate(resume)
+
+    # 2. No en/em dashes (or decorative bullets / smart quotes) anywhere.
+    blob = json.dumps(resume, ensure_ascii=False)
+    for bad in ("–", "—", "•", "‘", "’", "“", "”"):
+        assert bad not in blob, f"found disallowed char {bad!r} in output"
+
+    # 3. At least one matched keyword (the seeded job overlaps the candidate).
+    assert len(parsed.ats.matched_keywords) >= 1
+
+    # 4. pages_estimate is 1 or 2.
+    assert parsed.meta.pages_estimate in (1, 2)
 
 
 # ── LLM path with mocked Anthropic client ───────────────────────────────────
@@ -323,18 +362,46 @@ def test_analyze_cache_hits_avoid_second_llm_call(factories, settings_with_key, 
 
 def test_generate_uses_anthropic_when_key_present(factories, settings_with_key, monkeypatch):
     payload = {
-        "summary": "Senior backend engineer with Kafka + Python experience...",
-        "skills": ["Python", "Kafka", "AWS", "PostgreSQL"],
+        "contact": {
+            "name": "Alex Rivera",
+            "headline": "Backend Engineer",
+            "location": "Remote",
+            "email": "alex@example.com",
+            "phone": "",
+            "links": [{"label": "GitHub", "url": "github.com/alex"}],
+        },
+        "summary": "Backend engineer with Kafka and Python experience building services on AWS.",
+        "skills": [
+            {"category": "Languages", "items": ["Python"]},
+            {"category": "Streaming", "items": ["Kafka"]},
+            {"category": "Cloud", "items": ["AWS"]},
+        ],
         "experience": [
             {
-                "company": "Forge Labs",
                 "title": "Senior Software Engineer",
-                "dates": "2023 – Present",
-                "bullets": ["Led migration to event-driven Kafka services."],
+                "company": "Forge Labs",
+                "location": "Remote",
+                "start_date": "Feb 2023",
+                "end_date": "Present",
+                "bullets": ["Led migration to event-driven Kafka services on AWS."],
             }
         ],
-        "education": ["B.S. CS, CMU (2018)"],
-        "ats_notes": "Re-ordered skills to lead with Python + Kafka per the JD.",
+        "education": [
+            {
+                "degree": "B.S. Computer Science",
+                "field": "",
+                "institution": "CMU",
+                "location": "Pittsburgh, PA",
+                "graduation_date": "May 2018",
+            }
+        ],
+        "projects": [],
+        "certifications": [],
+        "ats": {
+            "matched_keywords": ["Python", "Kafka", "AWS"],
+            "missing_keywords": ["Rust"],
+            "score_estimate": 82,
+        },
     }
     mock = _MockAnthropicClient(payload)
     monkeypatch.setattr(tailor_module, "_build_client", lambda s, c: mock)
@@ -345,12 +412,17 @@ def test_generate_uses_anthropic_when_key_present(factories, settings_with_key, 
             s, job, {"q1": "5 yrs Kafka"}, settings=settings_with_key
         )
 
-    assert resume.skills[:2] == ["Python", "Kafka"]
-    assert "Kafka" in resume.ats_notes or "Kafka" in resume.summary
+    # Skills are categorized groups now.
+    flat_skills = [item for group in resume.skills for item in group.items]
+    assert "Python" in flat_skills and "Kafka" in flat_skills
+    assert "Kafka" in resume.summary
+    assert resume.ats.matched_keywords  # carried through
+    assert resume.meta.pages_estimate in (1, 2)
+    # The single generation call (the small payload renders to 1 page, so no
+    # tighten-retry fires).
     assert len(mock.calls) == 1
-    # Generate must send a strict schema too — the TailoredResume has a
-    # nested ExperienceBullet object, so this exercises the recursive walk
-    # into $defs / array items.
+    # Generate must send a strict schema — TailoredResume nests several
+    # object types, so this exercises the recursive walk into $defs / items.
     schema = mock.calls[0]["output_config"]["format"]["schema"]
     _assert_schema_accepted_by_anthropic(schema)
 
@@ -398,27 +470,38 @@ def test_analysis_schema_is_strict_at_every_object_level():
 
 
 def test_tailored_resume_schema_is_strict_at_every_object_level():
-    schema = tailor_module.TAILORED_RESUME_SCHEMA
+    schema = tailor_module.GENERATED_RESUME_SCHEMA
     assert _every_object_has_additional_properties_false(schema)
-    # Sanity: the nested ExperienceBullet definition is present and strict.
+    # `meta` is server-owned, so it must NOT be in the schema sent to the model.
+    assert "meta" not in schema["properties"]
+    # Sanity: a nested entry definition is present and strict.
     defs = schema.get("$defs") or schema.get("definitions") or {}
-    exp_def = defs.get("ExperienceBullet")
-    assert exp_def is not None, "ExperienceBullet $def should exist on TailoredResume"
+    exp_def = defs.get("ExperienceEntry")
+    assert exp_def is not None, "ExperienceEntry $def should exist on GeneratedResume"
     assert exp_def["additionalProperties"] is False
-    # And the parser still accepts well-formed payloads — the strictification
+    # And the model still accepts well-formed payloads — strictification
     # didn't drop required/properties.
     parsed = tailor_module.TailoredResume.model_validate(
         {
+            "meta": {"mode": "visual", "pages_estimate": 1},
+            "contact": {"name": "Alex Rivera", "email": "a@example.com"},
             "summary": "s",
-            "skills": ["Python"],
+            "skills": [{"category": "Languages", "items": ["Python"]}],
             "experience": [
-                {"company": "C", "title": "T", "dates": "2020 – 2022", "bullets": ["b"]}
+                {
+                    "title": "T",
+                    "company": "C",
+                    "start_date": "Jan 2020",
+                    "end_date": "Present",
+                    "bullets": ["b"],
+                }
             ],
-            "education": ["edu"],
-            "ats_notes": "n",
+            "education": [{"degree": "B.S.", "institution": "CMU", "graduation_date": "May 2018"}],
+            "ats": {"matched_keywords": ["Python"], "missing_keywords": [], "score_estimate": 70},
         }
     )
     assert parsed.experience[0].company == "C"
+    assert parsed.skills[0].items == ["Python"]
 
 
 # Constraints Anthropic's structured-output validator rejects (kept in sync
@@ -550,18 +633,22 @@ def test_analyze_prompt_embodies_the_ats_spec():
     assert "never invent" in p
 
 
-def test_generate_prompt_embodies_step_4_and_2_page_max():
-    """The generate prompt MUST: only use confirmed skills, mirror JD
-    terminology, demand metric-driven bullets, enforce ATS-safe
-    formatting, and cap output at 2 pages."""
+def test_generate_prompt_embodies_ats_spec():
+    """The generate prompt MUST encode the ATS spec: never fabricate, only
+    confirmed content, mirror JD terminology, the strict character rules
+    (no en/em dashes), the closed section list, and a 2-page target."""
     p = tailor_module._SYSTEM_GENERATE.lower()
-    assert "confirmed skill" in p
     assert "never fabricate" in p
+    assert "confirmed" in p
     assert "mirror" in p and "terminology" in p
-    assert "no tables" in p and ("columns" in p or "graphics" in p)
-    assert "metric" in p
-    # 2-page max
-    assert "max 2 pages" in p or "2 pages" in p
+    # Character rules — the defining new constraint.
+    assert "en dash" in p and "em dash" in p
+    assert "quantified" in p
+    # Closed section list + categorized skills.
+    assert "professional summary" in p
+    assert "categor" in p  # "labeled categories"
+    # 2-page target.
+    assert "2 page" in p
 
 
 def test_pydantic_models_still_validate_responses_against_their_constraints():
