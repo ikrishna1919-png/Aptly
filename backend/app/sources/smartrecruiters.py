@@ -41,10 +41,18 @@ DETAIL_URL = "https://api.smartrecruiters.com/v1/companies/{company}/postings/{p
 # Public apply URLs are convention-based when the API omits `applyUrl`.
 APPLY_URL_TEMPLATE = "https://jobs.smartrecruiters.com/{company}/{posting_id}"
 
-# Cap to avoid one giant company dominating a run. Versant3-scale boards
-# are well under this; larger boards will get the first N.
-_MAX_POSTINGS_PER_COMPANY = 200
+# Defensive cap to bound a single huge company from grinding an
+# ingest run. Tuned well above any real public SmartRecruiters board
+# we expect to ingest — the cap is a last-resort circuit-breaker, not
+# a routine truncation point. We log a warning when it's hit so a
+# future giant board is visible to the operator.
+_MAX_POSTINGS_PER_COMPANY = 1500
 _PAGE_SIZE = 100  # SmartRecruiters max per page.
+
+# Per-request HTTP timeout. Bumped from 20s for headroom on slow
+# tenants; the per-source isolation in `run_ingest` keeps one slow
+# board from stalling the rest of the run.
+_DEFAULT_TIMEOUT = 30.0
 
 
 class SmartRecruitersSource(JobSource):
@@ -53,7 +61,7 @@ class SmartRecruitersSource(JobSource):
     def __init__(
         self,
         client: httpx.Client | None = None,
-        timeout: float = 20.0,
+        timeout: float = _DEFAULT_TIMEOUT,
         max_postings_per_company: int = _MAX_POSTINGS_PER_COMPANY,
         page_size: int = _PAGE_SIZE,
     ) -> None:
@@ -73,6 +81,13 @@ class SmartRecruitersSource(JobSource):
         if not summaries:
             return []
 
+        if len(summaries) >= self._max_postings:
+            log.warning(
+                "smartrecruiters:%s cap reached (%d postings) — raise "
+                "_MAX_POSTINGS_PER_COMPANY if more were expected",
+                token,
+                self._max_postings,
+            )
         # Cap defensively in case the list endpoint returns more than the
         # paginator promised.
         summaries = summaries[: self._max_postings]

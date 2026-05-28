@@ -102,23 +102,26 @@ def test_bulk_lists_are_non_trivial_and_well_formed():
 
 
 def test_workday_tokens_unpack_to_full_triple():
-    """Every Workday bulk entry must satisfy `tenant:dc:site` — the
-    adapter's `_parse_token` raises `SourceUnavailable` on a half-
+    """Every Workday bulk entry must satisfy `tenant:dc:site[:host]` —
+    the adapter's `_parse_token` raises `SourceUnavailable` on a half-
     formed token and the operator would see those rows churn
     forever. The spec is explicit: skip Workday entries we can't
     form a complete triple for."""
     rows = bulk_tokens.all_bulk_rows()["workday"]
     for row in rows:
         # `_parse_token` raises on malformed input; reach into it to
-        # confirm the triple shape AND that each component is
-        # non-empty.
-        tenant, dc, site = parse_workday_token(row["token"])
+        # confirm the shape AND that each component is non-empty.
+        # `_parse_token` returns a 4-tuple — the 4th element is the
+        # host, which defaults to `myworkdayjobs.com` for the
+        # three-part form.
+        tenant, dc, site, host = parse_workday_token(row["token"])
         assert tenant and dc and site, f"workday token has empty component: {row['token']!r}"
         # Sanity: data center looks like `wdN` or `wdNNN`. Pinning
         # the shape catches a typo like `wd-5` that the adapter
         # would dutifully send into the URL template and 404 on
         # forever.
         assert dc.startswith("wd"), f"workday dc {dc!r} doesn't look like wd*"
+        assert host, f"workday token has empty host: {row['token']!r}"
 
 
 def test_smartrecruiters_tokens_preserve_case():

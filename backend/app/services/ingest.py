@@ -423,14 +423,14 @@ def _process_outcome(
             unchanged += 1
 
     log.info(
-        "%s (%s): fetched %d, added %d, updated %d, skipped %d "
-        "(outside %d / dup %d / unchanged %d)",
+        "%s (%s): fetched %d, saved %d (within window) "
+        "[inserted %d / updated %d / outside %d / dup %d / unchanged %d]",
         token,
         source_name,
         fetched_n,
+        added + updated,
         added,
         updated,
-        outside + duplicates + unchanged,
         outside,
         duplicates,
         unchanged,
