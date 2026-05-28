@@ -33,7 +33,6 @@ from docx.shared import Pt, RGBColor
 
 from app.services.resume_layout import (
     SEP,
-    Block,
     Bullet,
     Entry,
     Header,

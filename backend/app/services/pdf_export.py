@@ -22,6 +22,7 @@ by `tailor.generate_resume` to enforce the 2-page hard cap.
 from __future__ import annotations
 
 import io
+from xml.sax.saxutils import escape
 
 from reportlab.lib.colors import Color
 from reportlab.lib.enums import TA_LEFT
@@ -36,7 +37,6 @@ from reportlab.platypus import (
     Paragraph,
     Spacer,
 )
-from xml.sax.saxutils import escape
 
 from app.services.resume_layout import (
     SEP,

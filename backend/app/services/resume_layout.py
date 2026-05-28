@@ -23,7 +23,7 @@ identical either way.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.services.tailor import TailoredResume
@@ -86,7 +86,7 @@ class Bullet:
     text: str
 
 
-Block = Union[Header, Heading, Para, Entry, Bullet]
+Block = Header | Heading | Para | Entry | Bullet
 
 
 def _contact_line(resume: TailoredResume) -> str:

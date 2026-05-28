@@ -171,7 +171,10 @@ class AtsBlock(BaseModel):
     )
     missing_keywords: list[str] = Field(
         default_factory=list,
-        description="JD keywords still not covered (reported honestly; not a target to fix by inventing content).",
+        description=(
+            "JD keywords still not covered (reported honestly; not a target "
+            "to fix by inventing content)."
+        ),
     )
     score_estimate: int = Field(
         default=0,
@@ -189,7 +192,9 @@ class GeneratedResume(BaseModel):
     content are returned as empty lists and omitted at render time."""
 
     contact: Contact = Field(default_factory=Contact)
-    summary: str = Field(default="", description="2-4 sentence professional summary, no first person")
+    summary: str = Field(
+        default="", description="2-4 sentence professional summary, no first person"
+    )
     skills: list[SkillGroup] = Field(default_factory=list)
     experience: list[ExperienceEntry] = Field(default_factory=list)
     education: list[EducationEntry] = Field(default_factory=list)
@@ -309,7 +314,10 @@ def _links_from_candidate(candidate: dict[str, Any]) -> list[ContactLink]:
         for item in raw:
             if isinstance(item, dict) and item.get("url"):
                 out.append(
-                    ContactLink(label=str(item.get("label") or "").strip(), url=str(item["url"]).strip())
+                    ContactLink(
+                        label=str(item.get("label") or "").strip(),
+                        url=str(item["url"]).strip(),
+                    )
                 )
     return out
 
@@ -832,7 +840,9 @@ def _is_affirmative(answer: str | None) -> bool:
     return True
 
 
-def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]) -> GeneratedResume:
+def _demo_resume(
+    job: Job, answers: dict[str, str], *, candidate: dict[str, Any]
+) -> GeneratedResume:
     """Deterministic mock in the new ATS schema. Echoes the candidate
     profile, folds in any gap skills the user confirmed, and emits the
     spec's categorized-skills / dated-entry / ats shapes. Skills the user
@@ -852,7 +862,8 @@ def _demo_resume(job: Job, answers: dict[str, str], *, candidate: dict[str, Any]
     candidate_lower = {x.lower() for x in candidate_skills}
     # Lead with user-confirmed gaps (the JD asked about them), then the
     # candidate's existing skills.
-    ordered_skills = [s for s in confirmed_gaps if s.lower() not in candidate_lower] + candidate_skills
+    confirmed_first = [s for s in confirmed_gaps if s.lower() not in candidate_lower]
+    ordered_skills = confirmed_first + candidate_skills
 
     skill_groups: list[SkillGroup] = []
     if ordered_skills:

@@ -51,7 +51,7 @@ def _resume(**overrides) -> TailoredResume:
                 start_date="Feb 2023",
                 end_date="Present",
                 bullets=[
-                    "Led migration of billing service to event-driven Kafka; cut p95 latency to 110ms.",
+                    "Led billing migration to event-driven Kafka; cut p95 latency to 110ms.",
                     "Designed a feature-flag platform (FastAPI, Postgres) used by 6 teams.",
                 ],
             ),
@@ -61,7 +61,9 @@ def _resume(**overrides) -> TailoredResume:
                 location="Remote",
                 start_date="Jun 2020",
                 end_date="Jan 2023",
-                bullets=["Built a data ingestion pipeline (Airflow, Snowflake) for 4B events per day."],
+                bullets=[
+                    "Built a data ingestion pipeline (Airflow, Snowflake) for 4B events per day.",
+                ],
             ),
         ],
         "education": [
@@ -111,7 +113,9 @@ def test_visual_mode_uses_right_tab_stop_for_dates():
         if 'w:val="right"' in m and re.search(r'w:pos="\d+"', m)
     ]
     # One per experience + education entry (2 + 1 = 3 here).
-    assert len(right_tab_stops) >= 3, f"expected right-aligned tab stops; got {len(right_tab_stops)}"
+    assert len(right_tab_stops) >= 3, (
+        f"expected right-aligned tab stops; got {len(right_tab_stops)}"
+    )
     # Inline `\t` between the company and the date run.
     assert re.findall(r"<w:tab\s*/>", xml)
     # Visual mode draws heading rules (paragraph bottom borders).
