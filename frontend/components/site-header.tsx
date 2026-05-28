@@ -65,7 +65,7 @@ const APP_NAV: NavItem[] = (
 ).map((item) => ({ ...item, gated: isGatedPath(item.href) }));
 
 export function SiteHeader() {
-  const { user, loading } = useAuth();
+  const { status } = useAuth();
   const pathname = usePathname() || "/";
   const openLogin = useOpenLogin();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -79,14 +79,14 @@ export function SiteHeader() {
     return pathname === href || pathname.startsWith(`${href}/`);
   };
 
-  // When logged out, intercept clicks on gated nav items: keep the
-  // user on the page, open the login modal, and remember where they
-  // were trying to go. Logged-in users (and public links) navigate
-  // normally. While auth is still loading we let the click through —
-  // the route guard / client gate will sort it out.
+  // Intercept a gated nav click ONLY when the user is DEFINITIVELY signed
+  // out (a real 401). During "loading" or "error" we let the click
+  // through and trust the cookie + server to authorize — treating those
+  // as "logged out" is exactly the bug that kept popping the modal for
+  // signed-in users on a cold-start `/me` failure.
   const handleNavClick =
     (item: NavItem) => (e: MouseEvent<HTMLAnchorElement>) => {
-      if (item.gated && !loading && !user) {
+      if (item.gated && status === "unauthenticated") {
         e.preventDefault();
         openLogin(item.href);
       }
@@ -152,7 +152,7 @@ export function SiteHeader() {
             {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
           </button>
 
-          {!loading && !user && (
+          {status === "unauthenticated" && (
             <Button
               size="sm"
               className="font-semibold"

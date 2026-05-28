@@ -55,7 +55,7 @@ const ITEMS: Item[] = [
 ];
 
 export function SettingsMenu() {
-  const { user, loading, signOut } = useAuth();
+  const { user, status, signOut } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const openLogin = useOpenLogin();
@@ -83,17 +83,16 @@ export function SettingsMenu() {
     setOpen(false);
   }, [pathname]);
 
-  const signedIn = !loading && !!user;
+  const signedIn = status === "authenticated" && !!user;
   const initials = user ? computeInitials(user.name, user.email) : null;
 
   const handleItemClick =
     (item: Item) => (e: MouseEvent<HTMLAnchorElement>) => {
-      // Intercept gated items ONLY when auth has resolved AND the user is
-      // logged out. While `loading` we let the click through (the route
-      // guard / client gate handles it); a logged-in user always navigates.
-      // Treating `loading` as logged-out here would wrongly pop the modal
-      // for authenticated users on first paint.
-      if (item.gated && !loading && !user) {
+      // Intercept gated items ONLY when the user is DEFINITIVELY signed
+      // out (a real 401). During "loading"/"error" we let the click
+      // through and trust the cookie + server — never pop the modal for a
+      // signed-in user whose `/me` is slow or errored.
+      if (item.gated && status === "unauthenticated") {
         e.preventDefault();
         setOpen(false);
         openLogin(item.href);

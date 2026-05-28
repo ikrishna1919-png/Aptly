@@ -2,14 +2,26 @@
 
 /**
  * Client-side auth context — fetches `/api/auth/me` on mount and
- * exposes the result to any descendant via `useAuth()`. Used by
- * the layout to render the header (signed-in name + sign-out
- * link) and by `RequireAuth` to redirect unauthenticated visitors
- * to the sign-in page.
+ * exposes the result to any descendant via `useAuth()`.
  *
- * We deliberately do NOT persist anything to localStorage — the
- * session cookie is the source of truth. Any client-side cache
- * would lie when the cookie expires.
+ * Four-state model (this is load-bearing — see the history below):
+ *
+ *   "loading"        first `/me` hasn't resolved yet.
+ *   "authenticated"  `/me` returned a user.
+ *   "unauthenticated" `/me` returned 401 — definitively signed out.
+ *   "error"          `/me` could not be reached (network / 5xx / CORS /
+ *                    cold-start timeout). We DON'T know the user's
+ *                    status, so we must NOT treat this as signed out.
+ *
+ * Why the "error" state exists: previously a failed `/me` was caught and
+ * collapsed into `user = null`, which every consumer read as "logged
+ * out" — so a logged-in user whose `/me` timed out (Render free-tier
+ * cold start) got the login modal on every gated nav click and got
+ * bounced off `/jobs` on reload. `unauthenticated` now means ONLY a real
+ * 401; transient failures are `error` and are retried.
+ *
+ * We deliberately do NOT persist anything to localStorage — the session
+ * cookie is the source of truth.
  */
 
 import { usePathname, useRouter } from "next/navigation";
@@ -24,11 +36,14 @@ import {
 
 import { CurrentUser, fetchCurrentUser, signOut as signOutApi } from "@/lib/api";
 
+export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "error";
+
 type AuthState = {
   user: CurrentUser | null;
-  // `loading=true` is the in-flight state before the first
-  // `/api/auth/me` resolves. We render a placeholder while it's true
-  // so the header doesn't flicker between "signed out" and "signed in".
+  /** The authoritative auth state. Prefer this over `user`/`loading`
+   * when deciding to intercept a click or redirect a route. */
+  status: AuthStatus;
+  /** Convenience: `status === "loading"`. Kept for existing call sites. */
   loading: boolean;
   refresh: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -36,22 +51,42 @@ type AuthState = {
 
 const AuthContext = createContext<AuthState | null>(null);
 
+// Retry the `/me` probe a few times before giving up — rides out a
+// Render free-tier cold start (~30s) without declaring the user logged
+// out. Backoff is deliberately gentle and bounded.
+const ME_RETRY_DELAYS_MS = [1500, 3000, 5000];
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState<AuthStatus>("loading");
   const router = useRouter();
 
   const refresh = useCallback(async () => {
-    try {
-      const u = await fetchCurrentUser();
-      setUser(u);
-    } catch (e) {
-      // Network error fetching /me — treat as signed-out and let
-      // the user retry. Don't throw on the layout's first render.
-      console.error("auth: fetchCurrentUser failed:", e);
-      setUser(null);
-    } finally {
-      setLoading(false);
+    for (let attempt = 0; attempt <= ME_RETRY_DELAYS_MS.length; attempt++) {
+      try {
+        const u = await fetchCurrentUser();
+        if (u) {
+          setUser(u);
+          setStatus("authenticated");
+        } else {
+          // A clean 401 — genuinely signed out.
+          setUser(null);
+          setStatus("unauthenticated");
+        }
+        return;
+      } catch (e) {
+        // Network / 5xx / CORS / timeout. We do NOT know if the user is
+        // signed in. Retry; only after exhausting retries do we settle
+        // on "error" — never on "unauthenticated".
+        console.error(`auth: /api/auth/me attempt ${attempt + 1} failed:`, e);
+        const delay = ME_RETRY_DELAYS_MS[attempt];
+        if (delay !== undefined) {
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        setStatus("error");
+        return;
+      }
     }
   }, []);
 
@@ -62,13 +97,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     await signOutApi();
     setUser(null);
-    // Land on the public home page (logged out) rather than the
-    // login modal — signing out shouldn't immediately nag a sign-in.
+    setStatus("unauthenticated");
+    // Land on the public home page (logged out) rather than the login
+    // modal — signing out shouldn't immediately nag a sign-in.
     router.push("/");
   }, [router]);
 
   return (
-    <AuthContext.Provider value={{ user, loading, refresh, signOut }}>
+    <AuthContext.Provider
+      value={{ user, status, loading: status === "loading", refresh, signOut }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -82,105 +120,100 @@ export function useAuth(): AuthState {
   return ctx;
 }
 
-/** Redirect target for an un-authenticated visitor: the landing page
- * with the login modal open (`?login=1`) and the originally-requested
- * path preserved as `next` so OAuth returns them there. Centralised so
- * every guard (and `middleware.ts`) opens sign-in the same way. */
+/** Redirect target for a definitively-signed-out visitor: the landing
+ * page with the login modal open (`?login=1`) and the originally-
+ * requested path preserved as `next`. Centralised so every guard opens
+ * sign-in the same way. */
 function loginRedirect(pathname: string | null): string {
   const next = pathname && pathname !== "/" ? pathname : "/jobs";
   return `/?login=1&next=${encodeURIComponent(next)}`;
 }
 
-/** Wraps a route that requires a signed-in user. Redirects to the
- * landing page with the login modal open when the auth check resolves
- * un-authenticated. Renders nothing until the first /me call settles —
- * avoids the "flash of unauthenticated content" that would otherwise
- * leak protected-page chrome to anonymous viewers before the redirect
- * lands. (A direct URL hit is usually caught earlier by
- * `middleware.ts`; this is the client-side backstop for expired or
- * partial sessions.) */
+/** Wraps a route that requires a signed-in user.
+ *
+ *   loading        → render nothing (brief; avoids a flash).
+ *   unauthenticated→ redirect to the login modal.
+ *   error          → render children optimistically. The user almost
+ *                    certainly IS signed in (middleware only lets a
+ *                    cookie-bearing request reach a gated route), and
+ *                    the backend endpoints are the real authorization
+ *                    gate — so a transient `/me` failure must not lock
+ *                    them out.
+ *   authenticated  → render children.
+ */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { status } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
-    if (!loading && !user) {
+    if (status === "unauthenticated") {
       router.replace(loginRedirect(pathname));
     }
-  }, [loading, user, pathname, router]);
+  }, [status, pathname, router]);
 
-  if (loading || !user) return null;
+  if (status === "loading" || status === "unauthenticated") return null;
+  // authenticated | error → show the page.
   return <>{children}</>;
 }
 
-/** Like `RequireAuth`, but additionally requires the user to be an
- * admin (`is_admin=true` on the `/me` response, which the backend
- * derives from the `ADMIN_EMAILS` allowlist).
- *
- * The BACKEND `require_admin_user` dependency is the actual access
- * gate — every admin endpoint 403s non-admins regardless of what
- * the UI did. This wrapper is purely about not showing the admin
- * surface to people who can't use it. */
+/** Like `RequireAuth`, but additionally requires admin. The BACKEND
+ * `require_admin_user` dependency is the real gate; this only hides the
+ * admin surface. On "error" we render nothing (don't expose admin UI
+ * under uncertainty). */
 export function RequireAdmin({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, status } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
-    if (loading) return;
-    if (!user) {
+    if (status === "unauthenticated") {
       router.replace(loginRedirect(pathname));
       return;
     }
-    if (!user.is_admin) {
-      // Bounce non-admins back to the canonical signed-in landing
-      // (`/profile`, which itself routes to `/jobs` once saved).
-      // Avoids a half-rendered admin page flash before the access
-      // gate's 403.
+    if (status === "authenticated" && user && !user.is_admin) {
       router.replace("/profile");
     }
-  }, [loading, user, pathname, router]);
+  }, [status, user, pathname, router]);
 
-  if (loading || !user || !user.is_admin) return null;
+  if (status !== "authenticated" || !user || !user.is_admin) return null;
   return <>{children}</>;
 }
 
-/** Like `RequireAuth`, but additionally requires the user to have
- * SAVED their profile at least once (`profile_saved=true` on the
- * `/me` response).
+/** Like `RequireAuth`, but additionally requires a saved profile.
  *
- * Brand-new accounts get auto-seeded with a demo profile so the
- * editor has a shape to render; without this gate they'd be able
- * to browse `/jobs` and trigger tailoring against the demo
- * template, producing nonsense output. Routes them to `/profile`
- * first; once they save, `refresh()` flips the flag and they can
- * navigate back to `/jobs` normally.
+ * Brand-new accounts are auto-seeded with a demo profile; without this
+ * gate they could trigger tailoring against the template. Routes them to
+ * `/profile` first; once saved, `refresh()` flips the flag.
  *
- * Older backends without the field default to `profile_saved=true`
- * so a deploy version skew doesn't soft-lock users out of their feed. */
+ *   loading        → nothing.
+ *   unauthenticated→ login modal.
+ *   error          → render children (optimistic — see RequireAuth).
+ *   authenticated  → if profile not saved, go to `/profile`; else render.
+ *
+ * Older backends without the field default to `profile_saved=true` so a
+ * version skew doesn't soft-lock users out of their feed.
+ */
 export function RequireProfile({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, status } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
-    if (loading) return;
-    if (!user) {
+    if (status === "unauthenticated") {
       router.replace(loginRedirect(pathname));
       return;
     }
-    const saved = user.profile_saved ?? true;
-    if (!saved) {
-      // Stash where the user was headed so the profile page's
-      // post-save redirect can bring them back. Falls back to
-      // `/jobs` when the user navigated to `/` directly.
+    if (status === "authenticated" && user && !(user.profile_saved ?? true)) {
       const dest = pathname && pathname !== "/" ? pathname : "/jobs";
       router.replace(`/profile?next=${encodeURIComponent(dest)}`);
     }
-  }, [loading, user, pathname, router]);
+  }, [status, user, pathname, router]);
 
-  if (loading || !user) return null;
-  if (!(user.profile_saved ?? true)) return null;
+  if (status === "loading" || status === "unauthenticated") return null;
+  if (status === "authenticated" && user && !(user.profile_saved ?? true)) {
+    return null;
+  }
+  // authenticated + saved, OR error (optimistic) → render.
   return <>{children}</>;
 }
