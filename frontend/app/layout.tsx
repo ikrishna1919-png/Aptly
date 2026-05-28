@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Fraunces, Manrope } from "next/font/google";
+import { Fraunces, Plus_Jakarta_Sans } from "next/font/google";
 
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
@@ -21,13 +21,15 @@ const fraunces = Fraunces({
   axes: ["opsz", "SOFT"],
 });
 
-// Body face. Manrope is a humanist sans with rounded geometry — more
-// character than Inter / Roboto / system stacks (which the design
-// brief explicitly rules out as "generic AI aesthetic").
-const manrope = Manrope({
+// Body face. Plus Jakarta Sans is a contemporary humanist sans with
+// sharper, more characterful glyph shapes than Inter / Roboto / the
+// system stack. Picked specifically to land outside the
+// "generic AI-app aesthetic" the design brief rules out.
+const body = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
+  weight: ["400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
@@ -47,7 +49,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         className={cn(
           "min-h-screen bg-background font-sans text-foreground antialiased",
           fraunces.variable,
-          manrope.variable,
+          body.variable,
         )}
       >
         <a

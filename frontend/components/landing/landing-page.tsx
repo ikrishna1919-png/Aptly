@@ -234,7 +234,12 @@ function Hero() {
         style={{ backgroundImage: `url("${NOISE_DATA_URI}")` }}
       />
 
-      <div className="container py-20 sm:py-28 lg:py-36">
+      {/* Hero padding sized so the badge / headline / subhead / CTA
+          all fit above the fold on typical viewport heights (~640px
+          for short laptop, 800px+ for desktop). The headline ramp
+          stops earlier (max 4rem) so on shorter screens the CTA
+          stays visible without scrolling. */}
+      <div className="container py-12 sm:py-16 lg:py-20">
         <motion.div
           initial="hidden"
           animate="show"
@@ -251,7 +256,7 @@ function Hero() {
           <motion.h1
             variants={fadeUp}
             style={{ y: headlineY }}
-            className="mt-7 font-display text-4xl font-medium leading-[1.05] tracking-tight text-foreground sm:text-5xl md:text-6xl lg:text-[4.5rem]"
+            className="mt-5 font-display text-[2.25rem] font-medium leading-[1.05] tracking-tight text-foreground sm:text-5xl md:text-[3.5rem] lg:text-[4rem]"
           >
             Find the jobs that{" "}
             <span className="relative inline-block whitespace-nowrap">
@@ -269,7 +274,7 @@ function Hero() {
           </motion.h1>
           <motion.p
             variants={fadeUp}
-            className="mx-auto mt-7 max-w-xl text-base leading-relaxed text-muted-foreground sm:text-lg"
+            className="mx-auto mt-5 max-w-xl text-base leading-relaxed text-muted-foreground sm:text-lg"
           >
             Aptly pulls real openings straight from company career pages and
             flags which employers have a track record of H-1B sponsorship —
@@ -278,13 +283,13 @@ function Hero() {
           </motion.p>
           <motion.div
             variants={fadeUp}
-            className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row"
+            className="mt-7 flex flex-col items-center justify-center gap-3 sm:flex-row"
           >
             <CtaButton href="/get-started" />
           </motion.div>
           <motion.p
             variants={fadeUp}
-            className="mt-5 text-xs text-muted-foreground"
+            className="mt-4 text-xs text-muted-foreground"
           >
             Free while in early access · No credit card · One-click Google sign-up
           </motion.p>
