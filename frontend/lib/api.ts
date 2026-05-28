@@ -61,12 +61,15 @@ export type JobsQuery = {
   /** Inclusive H-1B signal: jobs at employers with any LCA filed in
    * the past 3 years. Same `false`-is-no-filter contract as above. */
   past_h1b_activity?: boolean;
-  /** Work model: "remote" | "hybrid" | "onsite". Omit for "any". */
+  /** Job type: "full-time" | "part-time" | "contract" | "internship".
+   * Omit for "any". Backend matches `employment_type` with a JD-regex
+   * fallback; jobs of indeterminate type are kept (treated as "any"). */
+  job_type?: string;
+  /** Work model: "remote" | "hybrid" | "onsite". Omit for "any". (Still a
+   * supported API filter; the UI now exposes `job_type` instead.) */
   work_model?: string;
   /** Recency window: "24h" | "7d" | "30d". Omit for "any". */
   posted_within?: string;
-  /** When true, exclude jobs whose JD appears to require a master's/PhD. */
-  bachelors_friendly?: boolean;
   limit?: number;
   offset?: number;
 };

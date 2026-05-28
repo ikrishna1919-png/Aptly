@@ -35,22 +35,19 @@ _POSTED_WITHIN_HOURS: dict[str, int] = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
 # Heuristic, JD-text regexes computed at query time (no stored column).
 # `_HYBRID_RE` derives the "hybrid" work model from the JD/location text.
 _HYBRID_RE = re.compile(r"\bhybrid\b", re.IGNORECASE)
-# `_ADVANCED_DEGREE_REQUIRED_RE` flags a JD that REQUIRES a master's/PhD
-# (not merely "preferred" — a preferred advanced degree is still
-# bachelor's-friendly). Two orderings: "<degree> ... required" and
-# "require(s) ... <degree>", within a short same-clause window. This is
-# deliberately conservative and admittedly imperfect; the UI tooltip says
-# so. Used to compute the `bachelors_friendly` filter on the fly.
-_ADV_DEGREE = r"(master'?s?|m\.?s\.?|m\.eng|ph\.?\s?d\.?|doctorate|graduate degree)"
-_REQUIRE = r"(required|must have|minimum)"
-# Tempered gap: don't match ACROSS a "preferred" or "not" between the degree
-# and the requirement word, so "PhD preferred but not required" is NOT read
-# as a hard requirement (it's still bachelor's-friendly).
-_GAP = r"(?:(?!\bpreferred\b|\bnot\b)[^.\n]){0,60}?"
-_ADVANCED_DEGREE_REQUIRED_RE = re.compile(
-    rf"\b{_ADV_DEGREE}\b{_GAP}\b{_REQUIRE}\b" rf"|\b{_REQUIRE}\b{_GAP}\b{_ADV_DEGREE}\b",
-    re.IGNORECASE,
+
+# Job-type heuristics. We classify a job into one of these tokens from its
+# `employment_type` field first, then fall back to a JD-text regex. A job we
+# can't classify is treated as "any" (kept) — see `_passes`.
+_JOB_TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # Order matters: check internship before full/part-time so an
+    # "internship (full-time)" posting classifies as an internship.
+    ("internship", re.compile(r"\bintern(ship)?\b", re.IGNORECASE)),
+    ("part-time", re.compile(r"\bpart[\s-]?time\b", re.IGNORECASE)),
+    ("contract", re.compile(r"\b(contract|contractor|temporary|temp|freelance)\b", re.IGNORECASE)),
+    ("full-time", re.compile(r"\bfull[\s-]?time\b", re.IGNORECASE)),
 )
+_JOB_TYPES = {token for token, _ in _JOB_TYPE_PATTERNS}
 
 
 def _derive_work_model(job: Job) -> str | None:
@@ -67,9 +64,17 @@ def _derive_work_model(job: Job) -> str | None:
     return None
 
 
-def _jd_requires_advanced_degree(job: Job) -> bool:
-    """True when the JD appears to REQUIRE a master's/PhD. Heuristic."""
-    return bool(job.description and _ADVANCED_DEGREE_REQUIRED_RE.search(job.description))
+def _derive_job_type(job: Job) -> str | None:
+    """Classify a job as full-time / part-time / contract / internship.
+    Prefers the structured `employment_type`; falls back to a JD-text regex.
+    Returns None when indeterminate (treated as "any")."""
+    for haystack in (job.employment_type or "", job.description or ""):
+        if not haystack:
+            continue
+        for token, pattern in _JOB_TYPE_PATTERNS:
+            if pattern.search(haystack):
+                return token
+    return None
 
 
 class JobOut(BaseModel):
@@ -198,16 +203,17 @@ def list_jobs(
         None,
         description='Work model filter: "remote" | "hybrid" | "onsite". "any"/None = no filter.',
     ),
+    job_type: str | None = Query(
+        None,
+        description=(
+            'Job type: "full-time" | "part-time" | "contract" | "internship". '
+            "Matched from `employment_type` with a JD-regex fallback; jobs of "
+            'indeterminate type are kept (treated as "any"). None = no filter.'
+        ),
+    ),
     posted_within: str | None = Query(
         None,
         description='Recency window: "24h" | "7d" | "30d". "any"/None = no filter.',
-    ),
-    bachelors_friendly: bool | None = Query(
-        None,
-        description=(
-            "When true, exclude jobs whose JD appears to REQUIRE a master's/PhD "
-            "(heuristic regex on the description; may not catch every case)."
-        ),
     ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -234,11 +240,13 @@ def list_jobs(
     if sponsors_visa is not None:
         base = base.where(Job.sponsors_visa.is_(sponsors_visa))
 
-    # Work model is filtered in Python (below) against the SAME derived value
-    # the UI shows, so the filter and the badge never disagree — e.g. a job
-    # whose JD says "hybrid" but whose `remote` flag is False must NOT match
-    # the "onsite" filter.
+    # Work model + job type are filtered in Python (below). Work model uses
+    # the SAME derived value the UI shows, so filter and badge never disagree.
+    # Job type matches `employment_type`/JD; jobs of indeterminate type are
+    # kept (treated as "any").
     wm = (work_model or "").strip().lower()
+    jt = (job_type or "").strip().lower()
+    jt = jt if jt in _JOB_TYPES else ""
 
     # Recency window — filter on the freshest of posted_at / source_updated_at.
     posted_hours = _POSTED_WITHIN_HOURS.get((posted_within or "").strip().lower())
@@ -293,19 +301,22 @@ def list_jobs(
     # so pagination never reshuffles rows that share a timestamp.
     ordered = base.order_by(Job.source_updated_at.desc(), Job.id.desc())
 
-    # JD-text filters ("hybrid" work model, bachelor's-friendly) can't be
-    # expressed in portable SQL, so when either is active we materialise the
-    # windowed rows, filter in Python, then paginate the filtered list — that
-    # keeps `total`/`page` correct. Otherwise we let the DB do count + slice.
-    needs_python_filter = wm in {"remote", "hybrid", "onsite"} or bachelors_friendly is True
+    # JD-text filters (work model, job type) can't be expressed in portable
+    # SQL, so when either is active we materialise the windowed rows, filter
+    # in Python, then paginate the filtered list — that keeps `total`/`page`
+    # correct. Otherwise we let the DB do count + slice.
+    needs_python_filter = wm in {"remote", "hybrid", "onsite"} or bool(jt)
     if needs_python_filter:
         all_rows = list(db.execute(ordered).scalars().all())
 
         def _passes(job: Job) -> bool:
             if wm in {"remote", "hybrid", "onsite"} and _derive_work_model(job) != wm:
                 return False
-            if bachelors_friendly is True and _jd_requires_advanced_degree(job):
-                return False
+            if jt:
+                derived = _derive_job_type(job)
+                # Keep indeterminate jobs (treated as "any").
+                if derived is not None and derived != jt:
+                    return False
             return True
 
         filtered = [r for r in all_rows if _passes(r)]

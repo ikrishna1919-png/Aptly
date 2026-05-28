@@ -20,11 +20,10 @@ function queryFromParams(params: URLSearchParams): JobsQuery {
   if (text) q.q = text;
   const location = params.get("location");
   if (location) q.location = location;
-  const wm = params.get("work_model");
-  if (wm) q.work_model = wm;
+  const jobType = params.get("job_type");
+  if (jobType) q.job_type = jobType;
   const pw = params.get("posted_within");
   if (pw) q.posted_within = pw;
-  if (params.get("bachelors_friendly") === "true") q.bachelors_friendly = true;
   return q;
 }
 
@@ -52,7 +51,7 @@ export function JobsShell({ children }: { children: ReactNode }) {
   // Re-fetch only when the filter params change (not on selection change).
   const queryKey = useMemo(() => {
     const p = new URLSearchParams();
-    for (const k of ["q", "location", "work_model", "posted_within", "bachelors_friendly"]) {
+    for (const k of ["q", "location", "job_type", "posted_within"]) {
       const v = params.get(k);
       if (v) p.set(k, v);
     }

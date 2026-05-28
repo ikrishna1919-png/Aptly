@@ -8,11 +8,12 @@ import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-const WORK_MODELS = [
-  { value: "", label: "Any work model" },
-  { value: "remote", label: "Remote" },
-  { value: "hybrid", label: "Hybrid" },
-  { value: "onsite", label: "Onsite" },
+const JOB_TYPES = [
+  { value: "", label: "Any job type" },
+  { value: "full-time", label: "Full-time" },
+  { value: "part-time", label: "Part-time" },
+  { value: "contract", label: "Contract" },
+  { value: "internship", label: "Internship" },
 ];
 
 const POSTED_WITHIN = [
@@ -120,14 +121,13 @@ function FilterControls({
   setParam: (u: Record<string, string | boolean | null>) => void;
   stacked?: boolean;
 }) {
-  const bachelors = params.get("bachelors_friendly") === "true";
   return (
     <div className={cn("flex gap-2", stacked ? "flex-col" : "items-center")}>
       <SelectControl
-        label="Work model"
-        value={params.get("work_model") ?? ""}
-        options={WORK_MODELS}
-        onChange={(v) => setParam({ work_model: v })}
+        label="Job type"
+        value={params.get("job_type") ?? ""}
+        options={JOB_TYPES}
+        onChange={(v) => setParam({ job_type: v })}
         className={stacked ? "w-full" : undefined}
       />
       <SelectControl
@@ -137,26 +137,6 @@ function FilterControls({
         onChange={(v) => setParam({ posted_within: v })}
         className={stacked ? "w-full" : undefined}
       />
-      <button
-        type="button"
-        role="switch"
-        aria-checked={bachelors}
-        onClick={() => setParam({ bachelors_friendly: !bachelors })}
-        title="Filters out jobs that require a Master's or PhD based on JD wording. Heuristic; may not catch every case."
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          stacked && "w-full justify-center",
-          bachelors
-            ? "border-primary/40 bg-primary-soft text-primary-soft-foreground"
-            : "border-border bg-card text-muted-foreground hover:bg-secondary",
-        )}
-      >
-        <span
-          aria-hidden="true"
-          className={cn("h-1.5 w-1.5 rounded-full", bachelors ? "bg-primary" : "bg-border")}
-        />
-        Bachelor&apos;s-friendly
-      </button>
 
       {/* Sponsorship-status filter — visible but disabled until LCA data ships. */}
       <span

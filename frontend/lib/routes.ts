@@ -3,22 +3,13 @@
  * user. Consumed by `middleware.ts` for a server-side redirect of a
  * logged-out direct hit to `/?login=1&next=<path>`.
  *
- * Strategic shift: pages are PUBLIC; we gate ACTIONS (apply, tailor,
- * track) instead — see `useAuthGate`. Only routes that render
- * user-specific data stay page-gated:
- *   * `/profile`     — the user's career data.
- *   * `/settings`    — subscription/billing + per-user preferences.
- *   * `/admin`       — admin-only surface (also backend-gated).
- *
- * Everything else (`/jobs`, `/jobs/[id]`, `/applications`,
- * `/interview-prep`, `/ats`, `/email-finder`, `/support`) is publicly
- * viewable; their primary actions open the login modal when needed.
- *
- * This is a UX gate, NOT the security boundary — the backend
- * `/api/auth/me` check + per-endpoint `require_*_user` dependencies are
- * authoritative.
+ * Strategic stance: pages are PUBLIC; we gate ACTIONS (apply, tailor,
+ * track) via `useAuthGate`, and personal-data pages (Profile,
+ * Subscription) render a "sign in" empty state rather than redirecting.
+ * The ONLY page-gated prefix left is `/admin` — an admin-only surface
+ * that's also enforced by the backend.
  */
-export const GATED_PREFIXES = ["/profile", "/settings", "/admin"] as const;
+export const GATED_PREFIXES = ["/admin"] as const;
 
 /** True when `pathname` is under a gated prefix (exact match or a
  * sub-path). `/jobs` matches `/jobs` and `/jobs/123` but not

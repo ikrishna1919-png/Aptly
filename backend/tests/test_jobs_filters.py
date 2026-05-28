@@ -1,6 +1,6 @@
-"""Query-time filters added for the split-pane Jobs redesign:
-`work_model` (derived + filter), `posted_within`, and `bachelors_friendly`.
-All are computed at serve time — no stored columns / migrations.
+"""Query-time filters for the Jobs page: `work_model` (derived + filter),
+`posted_within`, and `job_type` (employment_type + JD-regex fallback). All
+are computed at serve time — no stored columns / migrations.
 """
 
 from __future__ import annotations
@@ -100,26 +100,30 @@ def test_work_model_filter(client):
     assert hybrid["total"] == 1  # total reflects the python-filtered count
 
 
-def test_bachelors_friendly_excludes_masters_required(client):
+def test_job_type_filter_matches_employment_type_and_jd(client):
     test_client, Session = client
     with Session() as s:
-        _job(s, title="BachelorsOK", description="Bachelor's degree required. Build APIs.")
-        _job(
-            s,
-            title="MastersRequired",
-            description="A Master's degree is required for this position.",
-        )
-        _job(
-            s,
-            title="PhdPreferred",
-            description="PhD preferred but not required; we value experience.",
-        )
-    body = test_client.get("/api/jobs?bachelors_friendly=true").json()
-    titles = _titles(body)
-    assert "MastersRequired" not in titles  # required advanced degree → excluded
-    assert "BachelorsOK" in titles
-    assert "PhdPreferred" in titles  # "preferred" is still bachelor's-friendly
-    assert body["total"] == 2
+        _job(s, title="FT", employment_type="Full-time")
+        _job(s, title="Contract", employment_type="Contract")
+        _job(s, title="InternJD", description="This is a summer internship for students.")
+        # No employment_type, no JD signal → indeterminate ("any").
+        _job(s, title="Unknown", description="Build great software with the team.")
+
+    ft = test_client.get("/api/jobs?job_type=full-time").json()
+    # Full-time match PLUS the indeterminate job (kept as "any").
+    assert "FT" in _titles(ft)
+    assert "Unknown" in _titles(ft)
+    assert "Contract" not in _titles(ft)
+    assert "InternJD" not in _titles(ft)
+
+    intern = test_client.get("/api/jobs?job_type=internship").json()
+    assert "InternJD" in _titles(intern)  # classified from the JD text
+    assert "Unknown" in _titles(intern)  # indeterminate kept
+    assert "FT" not in _titles(intern)
+
+    # Unknown job type value → treated as no filter (all jobs returned).
+    allj = test_client.get("/api/jobs?job_type=bogus").json()
+    assert allj["total"] == 4
 
 
 def test_posted_within_filters_by_recency(client):

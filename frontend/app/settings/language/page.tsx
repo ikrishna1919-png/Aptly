@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { RequireAuth } from "@/lib/auth-context";
 
 /** Languages we plan to support. English is the only one wired up
  * today; the rest list with a `disabled` flag so the picker is real
@@ -20,15 +19,9 @@ const LANGUAGES: { code: string; label: string; available: boolean }[] = [
 
 const STORAGE_KEY = "aptly.language";
 
+// Language is a UI preference (stored in localStorage), not personal data —
+// fully public, no gating, no empty state.
 export default function LanguageSettingsPage() {
-  return (
-    <RequireAuth>
-      <LanguageInner />
-    </RequireAuth>
-  );
-}
-
-function LanguageInner() {
   const [selected, setSelected] = useState<string>("en");
 
   useEffect(() => {

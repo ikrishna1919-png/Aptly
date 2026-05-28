@@ -57,6 +57,14 @@ const REASON_COPY: Record<string, { title: string; body: string }> = {
     title: "Sign in to save jobs",
     body: "Sign in with Google to save jobs and come back to them later. We only read your name & email.",
   },
+  profile: {
+    title: "Sign in to set up your profile",
+    body: "Sign in with Google to build your profile and tailor your resume. We only read your name & email.",
+  },
+  subscription: {
+    title: "Sign in to manage your subscription",
+    body: "Sign in with Google to view and manage your plan. We only read your name & email.",
+  },
 };
 
 export function LoginModal() {
