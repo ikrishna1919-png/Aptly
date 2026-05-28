@@ -614,8 +614,8 @@ function ProfileEditor() {
   }
 
   return (
-    <div className="bg-secondary/30">
-      <div className="container max-w-6xl space-y-10 py-10">
+    <div className="bg-secondary/40">
+      <div className="container max-w-6xl space-y-10 py-10 sm:py-14">
         {/* Header strip — keeps the same Aptly accent + serif voice
             the landing page uses, so the in-app surface doesn't feel
             like a different product. */}
@@ -667,7 +667,12 @@ function ProfileEditor() {
               Portfolio. */}
           <div className="grid gap-6 lg:grid-cols-12">
             <div className="lg:col-span-4">
-              <IdentityCard profile={profile} />
+              {/* Sticky on desktop so the live identity preview
+                  stays in view while the user edits the form on
+                  long scrolls; stacks normally on mobile. */}
+              <div className="lg:sticky lg:top-20">
+                <IdentityCard profile={profile} />
+              </div>
             </div>
 
             <div className="lg:col-span-5">
@@ -1506,33 +1511,35 @@ function IdentityCard({ profile }: { profile: Profile }) {
   ].filter((x): x is { href: string; label: string } => x !== null);
 
   return (
-    <Card className="h-full border-border/70 shadow-sm">
-      <CardContent className="space-y-5 pt-6">
-        <div className="flex items-center gap-4">
+    <Card className="h-full border-border/70 bg-card shadow-card">
+      <CardContent className="space-y-6 px-6 py-8 text-center sm:px-7">
+        <div className="space-y-4">
           <div
             aria-hidden="true"
-            className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-accent font-display text-2xl font-medium text-accent-foreground"
+            className="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-accent font-display text-3xl font-medium text-accent-foreground ring-1 ring-inset ring-border/60"
           >
             {initials}
           </div>
-          <div className="min-w-0 space-y-1">
-            <p className="truncate font-display text-xl font-medium tracking-tight">
+          <div className="space-y-1">
+            <p className="font-display text-2xl font-medium leading-tight tracking-tight text-foreground">
               {profile.name.trim() || "Your name"}
             </p>
-            <p className="truncate text-sm text-muted-foreground">
+            <p className="text-sm text-muted-foreground">
               {(profile.headline ?? "").trim() || "Your headline"}
             </p>
           </div>
         </div>
 
-        <dl className="space-y-2 text-sm">
-          <ContactRow label="Email" value={profile.email} />
-          <ContactRow label="Phone" value={profile.phone} />
-          <ContactRow label="Location" value={profile.location} />
-        </dl>
+        <div className="border-t border-border/60 pt-5">
+          <dl className="space-y-3 text-left text-sm">
+            <ContactRow label="Email" value={profile.email} />
+            <ContactRow label="Phone" value={profile.phone} />
+            <ContactRow label="Location" value={profile.location} />
+          </dl>
+        </div>
 
         {links.length > 0 && (
-          <div className="flex flex-wrap gap-2 pt-1">
+          <div className="flex flex-wrap justify-center gap-2 border-t border-border/60 pt-5">
             {links.map((l) => (
               <a
                 key={l.label}
@@ -1555,10 +1562,14 @@ function ContactRow({ label, value }: { label: string; value: string | null | un
   const v = (value ?? "").trim();
   return (
     <div className="flex gap-3">
-      <dt className="w-16 shrink-0 text-xs uppercase tracking-wide text-muted-foreground">
+      <dt className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
         {label}
       </dt>
-      <dd className={`truncate ${v ? "text-foreground" : "text-muted-foreground/60"}`}>
+      <dd
+        className={`flex-1 truncate ${
+          v ? "text-foreground" : "text-muted-foreground/60"
+        }`}
+      >
         {v || "—"}
       </dd>
     </div>

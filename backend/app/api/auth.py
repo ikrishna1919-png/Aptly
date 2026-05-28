@@ -44,7 +44,7 @@ from urllib.parse import urlencode
 
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -286,13 +286,53 @@ async def google_callback(
 
 
 @router.post("/auth/logout")
-def auth_logout(request: Request) -> dict[str, bool]:
-    """Drop the session entry. The cookie itself stays (signed) but
-    no longer carries a `user_id`, so subsequent requests are
-    treated as unauthenticated."""
+def auth_logout(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Sign the user out and DELETE the session cookie cleanly so the
+    next sign-in starts from a clean slate.
+
+    Two reasons we have to be explicit about the deletion rather than
+    relying on `request.session.clear()` + Starlette's implicit
+    cookie refresh:
+
+    1. **Carrying stale OAuth state across sign-ins.** The session
+       holds `next` plus authlib's `_state_google_<nonce>` /
+       `_nonce_google` entries from any in-flight or completed OAuth
+       handshakes. If the cookie survives logout (even with the
+       `user_id` removed), the next "Sign in with Google" click
+       layers a fresh state on top of the stale ones and the callback
+       sometimes validates against the WRONG state, 400ing the user
+       back to `/sign-in?error=oauth`. Wiping the cookie outright
+       avoids this entirely.
+
+    2. **Browser quirks around implicit clearing.** Starlette's
+       SessionMiddleware emits a delete-cookie header when the
+       session goes from "had data" to "no data", but Safari ITP and
+       certain Chrome cookie policies don't always honour that
+       implicit clear when the response is a plain JSON 200.
+       `Response.delete_cookie(...)` with the SAME attributes used on
+       set (path, samesite, secure, httponly) is unambiguous and
+       portable.
+
+    The cookie is named `session` (Starlette's default — see
+    `app.main.create_app`). `secure` tracks the environment: HTTPS
+    only in prod, plain HTTP for `next dev` so local sign-out works.
+    """
     if hasattr(request, "session"):
         request.session.clear()
-    return {"ok": True}
+
+    response = JSONResponse({"ok": True})
+    is_dev = settings.environment == "development"
+    response.delete_cookie(
+        key="session",
+        path="/",
+        samesite="lax",
+        secure=not is_dev,
+        httponly=True,
+    )
+    return response
 
 
 def _build_frontend_url(settings: Settings, path: str, **query: str) -> str:
