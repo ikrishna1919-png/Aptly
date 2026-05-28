@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  PARSE_STILL_WORKING_AFTER_MS,
   ParseEmptyResultError,
   ParseTimeoutError,
   RESUME_UPLOAD_ACCEPT,
@@ -24,6 +25,7 @@ import {
   parseProfileFile,
   parseProfileText,
   saveProfile,
+  type ParseRunStatus,
   type Profile,
   type ProfileAchievement,
   type ProfileEducation,
@@ -122,11 +124,8 @@ function ProfileEditor() {
 
   async function onParse() {
     if (!pasted.trim()) return setError("Paste your resume text first");
-    await runParse(() =>
-      parseProfileText(pasted, {
-        signal: getParseSignal(),
-        onProgress: () => setInfo("Parsing your resume…"),
-      }),
+    await runParse("Parsing your resume…", (signal, onProgress) =>
+      parseProfileText(pasted, { signal, onProgress }),
     );
   }
 
@@ -140,12 +139,8 @@ function ProfileEditor() {
       );
       return;
     }
-    setInfo(`Reading ${file.name}…`);
-    await runParse(() =>
-      parseProfileFile(file, {
-        signal: getParseSignal(),
-        onProgress: () => setInfo(`Parsing ${file.name}…`),
-      }),
+    await runParse(`Parsing ${file.name}…`, (signal, onProgress) =>
+      parseProfileFile(file, { signal, onProgress }),
     );
   }
 
@@ -156,12 +151,35 @@ function ProfileEditor() {
     return controller.signal;
   }
 
-  async function runParse(call: () => Promise<Profile>) {
+  async function runParse(
+    initialMessage: string,
+    call: (
+      signal: AbortSignal,
+      onProgress: (status: ParseRunStatus) => void,
+    ) => Promise<Profile>,
+  ) {
+    const signal = getParseSignal();
     setError(null);
-    setInfo("Parsing your resume…");
+    setInfo(initialMessage);
     setParsing(true);
+
+    // Swap the in-flight message to a calmer "still working…" after
+    // a few polls. Backed by the same constant the polling loop
+    // uses so the UI matches the worst-case wait the API has
+    // promised. The timer is cancelled in `finally` so a fast parse
+    // never flashes the calmer copy.
+    const stillWorkingTimer = setTimeout(() => {
+      setInfo(
+        "Still working — the AI structural pass can take up to a minute on a long resume.",
+      );
+    }, PARSE_STILL_WORKING_AFTER_MS);
+
     try {
-      const parsed = await call();
+      const parsed = await call(signal, (_status) => {
+        // Polling-progress callback fires on each poll. We only use
+        // it to keep the spinner alive — the still-working swap is
+        // time-based above.
+      });
       setProfile(normaliseProfile(parsed));
       setInfo("Parsed — review and edit, then click Save.");
     } catch (e) {
@@ -172,9 +190,15 @@ function ProfileEditor() {
       } else if (e instanceof ParseTimeoutError) {
         setError(e.message);
       } else {
+        // The polling loop throws `new Error(run.error)` when the
+        // backend writes status=failed, so `e.message` here carries
+        // the REAL backend error (e.g. "Parse failed — RuntimeError:
+        // bad magic bytes"). Show it verbatim instead of a generic
+        // "took too long" copy.
         setError(e instanceof Error ? e.message : "Parse failed");
       }
     } finally {
+      clearTimeout(stillWorkingTimer);
       setParsing(false);
     }
   }
