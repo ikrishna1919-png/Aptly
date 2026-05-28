@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   motion,
   useInView,
@@ -20,6 +20,13 @@ import {
   Database,
   Sparkles,
   Globe2,
+  Bell,
+  MousePointerClick,
+  Send,
+  GraduationCap,
+  ClipboardList,
+  LineChart,
+  type LucideIcon,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -31,44 +38,43 @@ import { cn } from "@/lib/utils";
  * redirect for signed-in visitors — this component is pure
  * presentation.
  *
+ * Content architecture (honest framing, per the PRD)
+ * ──────────────────────────────────────────────────
+ * The page leads with the working core (sponsorship-aware job
+ * aggregation + AI resume & cover-letter tailoring), then shows the
+ * roadmap as a clearly-labelled "Coming soon" section so a visitor
+ * never mistakes a planned feature for a shipped one. Order:
+ *
+ *   Hero → TrustStrip → HowItWorks → AvailableNow → Differentiator
+ *   → ComingSoon → FinalCta
+ *
  * Motion approach
  * ───────────────
- *
- *   * One orchestrated page-load sequence on the hero: badge →
- *     headline → subhead → CTA → trust-line, each fading + rising
- *     8px with a 80–120ms stagger. Anchored on a single `Variants`
- *     object so the cubic-bezier easing reads consistently across
- *     the whole sequence.
+ *   * One orchestrated page-load sequence on the hero (badge →
+ *     headline → subhead → CTA → trust-line), each fading + rising
+ *     with a small stagger off a single `Variants` object so the
+ *     easing reads consistently.
  *   * Scroll-triggered reveals on every section below the fold via
- *     `useInView` + `viewport={{ once: true }}` so a long-scrolled
- *     page doesn't re-trigger animations and chew CPU. Each section
- *     stagger-children variant carries 60–80ms between its inner
- *     items.
- *   * Subtle atmosphere on the hero: radial-gradient washes + an
- *     SVG noise overlay (one inline data-URI, no extra request),
- *     plus a low-amplitude mouse-follow on the primary wash —
- *     skipped on touch devices and on `prefers-reduced-motion`.
- *   * Refined hover states on feature cards + CTAs: a -2px lift,
- *     a 5–10% shadow ramp, and a tiny scale on the buttons. Stays
- *     under the threshold where motion starts feeling "noisy" on
- *     a marketing page that already moves on scroll.
+ *     `useInView` + `once: true` so a long-scrolled page doesn't
+ *     re-trigger animations and chew CPU.
+ *   * Subtle hero atmosphere: radial-gradient washes + an SVG noise
+ *     overlay (one inline data-URI, no extra request), plus a
+ *     low-amplitude mouse-follow on the primary wash — skipped on
+ *     touch + `prefers-reduced-motion`.
+ *   * Refined hover states on cards + CTAs: a small lift, a soft
+ *     shadow ramp, and a tiny scale on the buttons.
  *
  * Accessibility / performance
  * ───────────────────────────
- *
- *   * `useReducedMotion()` is read at the top and short-circuits
- *     EVERY animation: stagger durations collapse to 0, transitions
- *     vanish, the mouse-follow stops binding listeners. The page
- *     still renders the same DOM; it just becomes static.
+ *   * `useReducedMotion()` short-circuits the mouse-follow and the
+ *     parallax; the global `prefers-reduced-motion` rule in
+ *     `globals.css` collapses transition/animation durations. Same
+ *     DOM either way — it just becomes static.
  *   * The mouse-follow uses `useMotionValue` + a spring, NOT React
- *     state — it bypasses re-renders entirely so the parallax can
- *     run at 60fps without rerunning the React tree.
- *   * No images bigger than the SVG sponsorship-mock; the
- *     atmospheric "graphics" are CSS-generated. Single bundle, fast
- *     mobile.
- *   * Below-the-fold sections are mounted from the start but
- *     `whileInView` keeps their animations cheap — `once: true` and
- *     reasonable margins on the IntersectionObserver root.
+ *     state, so the parallax runs at 60fps without rerunning the
+ *     React tree.
+ *   * The atmospheric "graphics" are CSS-generated — no images.
+ *     Single bundle, fast on mobile.
  */
 export function LandingPage() {
   return (
@@ -76,8 +82,9 @@ export function LandingPage() {
       <Hero />
       <TrustStrip />
       <HowItWorks />
-      <Features />
+      <AvailableNow />
       <Differentiator />
+      <ComingSoon />
       <FinalCta />
     </div>
   );
@@ -85,16 +92,14 @@ export function LandingPage() {
 
 // ── Animation primitives ────────────────────────────────────────────────────
 
-/** Default easing for everything on the page. `easeOutExpo`-ish
- * curve — strong start, gentle settle — reads premium without
- * feeling slow. Stored once so the whole landing inherits the
- * same motion grammar. */
+/** Default easing for everything on the page — an `easeOutExpo`-ish
+ * curve (strong start, gentle settle). Stored once so the whole
+ * landing inherits the same motion grammar. */
 const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
 /** Stagger container for sections that fade their children in
- * sequence. `staggerChildren` is per-item delay between siblings;
- * `delayChildren` is the initial offset before the first child
- * starts. Both collapse to 0 under `prefers-reduced-motion`. */
+ * sequence. Collapses to 0 under `prefers-reduced-motion` via the
+ * global CSS rule. */
 function staggerContainer(staggerChildren = 0.08, delayChildren = 0.08): Variants {
   return {
     hidden: {},
@@ -104,15 +109,13 @@ function staggerContainer(staggerChildren = 0.08, delayChildren = 0.08): Variant
   };
 }
 
-/** The atom every section uses: fade in + small upward translate.
- * 24px → 0 reads as "rising into place" without being theatrical.
- * Distance shrinks on `prefers-reduced-motion`. */
+/** The atom every section uses: fade in + small upward translate. */
 const fadeUp: Variants = {
   hidden: { opacity: 0, y: 16 },
   show: { opacity: 1, y: 0, transition: { duration: 0.6, ease: EASE } },
 };
 
-/** Same shape as fadeUp but enters from the side. Used for the
+/** Same shape as fadeUp but enters from the side — used for the
  * differentiator's two-column reveal. */
 const fadeLeft: Variants = {
   hidden: { opacity: 0, x: -24 },
@@ -123,10 +126,7 @@ const fadeRight: Variants = {
   show: { opacity: 1, x: 0, transition: { duration: 0.7, ease: EASE } },
 };
 
-/** Wraps children with a scroll-triggered reveal. Uses `useInView`
- * with `once: true` so the animation only runs the first time the
- * section enters the viewport — a long scroll doesn't keep
- * re-triggering. */
+/** Wraps children with a scroll-triggered reveal (fires once). */
 function SectionReveal({
   children,
   className,
@@ -137,9 +137,6 @@ function SectionReveal({
   variants?: Variants;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
-  // `margin: "-10% 0px"` fires the animation slightly before the
-  // section is fully in view so it doesn't feel sluggish on long
-  // scrolls.
   const inView = useInView(ref, { once: true, margin: "-10% 0px" });
   return (
     <motion.div
@@ -154,29 +151,61 @@ function SectionReveal({
   );
 }
 
+/** Small section eyebrow — an availability pill + a label. Keeps the
+ * "Available now" / "Coming soon" distinction consistent across the
+ * page so it reads as an intentional product roadmap. */
+function SectionEyebrow({
+  label,
+  tone = "now",
+}: {
+  label: string;
+  tone?: "now" | "soon" | "plain";
+}) {
+  if (tone === "plain") {
+    return (
+      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
+        {label}
+      </p>
+    );
+  }
+  const now = tone === "now";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em]",
+        now
+          ? "border-success/30 bg-success/10 text-success"
+          : "border-highlight/40 bg-highlight-soft text-highlight-foreground",
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "h-1.5 w-1.5 rounded-full",
+          now ? "bg-success" : "bg-highlight",
+        )}
+      />
+      {label}
+    </span>
+  );
+}
+
 // ── Hero ────────────────────────────────────────────────────────────────────
 
 function Hero() {
   const reduced = useReducedMotion();
 
-  // Mouse-follow gradient parallax. Two motion values that track
-  // the cursor position; a spring smooths the trajectory so the
-  // gradient doesn't jitter. Skipped under `prefers-reduced-motion`
-  // and on touch devices (no `mousemove` events fire there anyway,
-  // so the default 0,0 is fine).
+  // Mouse-follow gradient parallax. Two motion values track the
+  // cursor; a spring smooths the trajectory. Skipped on touch +
+  // reduced-motion.
   const mx = useMotionValue(0);
   const my = useMotionValue(0);
   const springX = useSpring(mx, { stiffness: 60, damping: 20 });
   const springY = useSpring(my, { stiffness: 60, damping: 20 });
-  // `xPct` / `yPct` are `0–100`, used inside the radial-gradient
-  // expression. A 5% amplitude is enough to be perceptible without
-  // calling attention to itself.
   const xPct = useTransform(springX, (v) => `${50 + v * 5}%`);
   const yPct = useTransform(springY, (v) => `${30 + v * 5}%`);
 
-  // Subtle vertical parallax on the headline as the user scrolls —
-  // pulls the title up slightly while the rest scrolls normally.
-  // Decoupled from the mouse follow.
+  // Subtle vertical parallax on the headline as the user scrolls.
   const heroRef = useRef<HTMLDivElement | null>(null);
   const { scrollYProgress } = useScroll({
     target: heroRef,
@@ -187,13 +216,10 @@ function Hero() {
 
   useEffect(() => {
     if (reduced) return;
-    // Skip on touch devices — no mouse means the transform stays
-    // pinned at 0,0 which is fine but means we waste the listener.
     if (typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches) return;
     const onMove = (e: MouseEvent) => {
       const w = window.innerWidth;
       const h = window.innerHeight;
-      // Normalise to [-1, 1] then scale into motion values.
       mx.set(e.clientX / w - 0.5);
       my.set(e.clientY / h - 0.5);
     };
@@ -203,10 +229,8 @@ function Hero() {
 
   return (
     <section ref={heroRef} className="relative isolate overflow-hidden">
-      {/* Layered atmosphere. Two radial washes (a violet anchor +
-          an amber highlight), a diagonal grid for texture, and a
-          fine SVG noise overlay to break the gradients. All CSS,
-          no images. The primary wash follows the cursor. */}
+      {/* Layered atmosphere — all CSS, no images. Primary wash
+          follows the cursor. */}
       <motion.div
         aria-hidden="true"
         style={{
@@ -234,12 +258,7 @@ function Hero() {
         style={{ backgroundImage: `url("${NOISE_DATA_URI}")` }}
       />
 
-      {/* Hero padding sized so the badge / headline / subhead / CTA
-          all fit above the fold on typical viewport heights (~640px
-          for short laptop, 800px+ for desktop). The headline ramp
-          stops earlier (max 4rem) so on shorter screens the CTA
-          stays visible without scrolling. */}
-      <div className="container py-12 sm:py-16 lg:py-20">
+      <div className="container py-14 sm:py-20 lg:py-24">
         <motion.div
           initial="hidden"
           animate="show"
@@ -270,16 +289,16 @@ function Hero() {
                 style={{ transformOrigin: "left" }}
               />
             </span>{" "}
-            your visa — and tailor your resume to land them.
+            your visa — and tailor every application to land them.
           </motion.h1>
           <motion.p
             variants={fadeUp}
             className="mx-auto mt-5 max-w-xl text-base leading-relaxed text-muted-foreground sm:text-lg"
           >
-            Aptly pulls real openings straight from company career pages and
-            flags which employers have a track record of H-1B sponsorship —
-            so you spend evenings tailoring resumes for roles you can actually
-            land, not chasing dead ends.
+            Aptly aggregates real tech openings from employers with a track
+            record of H-1B sponsorship, then tailors your resume and cover
+            letter to each one with AI — so you spend evenings on the roles
+            you can actually land, not chasing dead ends.
           </motion.p>
           <motion.div
             variants={fadeUp}
@@ -300,7 +319,7 @@ function Hero() {
 }
 
 /** Primary CTA. Pulled out so the hover/tap motion is consistent
- * across the hero + the final CTA without duplicating prop bags. */
+ * across the hero + the final CTA. */
 function CtaButton({ href }: { href: string }) {
   return (
     <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
@@ -326,7 +345,7 @@ function CtaButton({ href }: { href: string }) {
 const TRUST_SIGNALS = [
   {
     icon: Database,
-    text: "Jobs pulled directly from company career pages — Greenhouse, Lever, Ashby, SmartRecruiters, Workday. Not scraped from aggregators.",
+    text: "Jobs pulled directly from company career pages — Greenhouse, Lever, Ashby, SmartRecruiters, Workday. Never scraped from aggregators.",
   },
   {
     icon: ShieldCheck,
@@ -334,7 +353,7 @@ const TRUST_SIGNALS = [
   },
   {
     icon: Sparkles,
-    text: "AI resume tailoring runs on Anthropic Claude — your data isn't sold or shared.",
+    text: "AI tailoring runs on Anthropic Claude — your data isn't sold or shared.",
   },
 ];
 
@@ -372,18 +391,18 @@ function TrustStrip() {
 const STEPS = [
   {
     n: 1,
-    title: "Browse aggregated jobs",
-    body: "Fresh postings pulled every six hours from real ATS boards. Filter by location, role, skills, sponsorship signals.",
+    title: "Browse jobs that sponsor",
+    body: "Fresh tech postings, aggregated from real ATS boards in one searchable feed. Filter by location, role, skills, and sponsorship signal.",
   },
   {
     n: 2,
     title: "See who actually sponsors",
-    body: "Each employer is checked against public DOL H-1B filings. Heavy sponsors and past-activity companies are surfaced as distinct badges.",
+    body: "Each employer is checked against public DOL H-1B filings, so heavy sponsors and past-activity companies surface as clear badges.",
   },
   {
     n: 3,
-    title: "Tailor your resume with AI",
-    body: "Claude rewrites your resume per job for ATS keyword matching. Export the DOCX, apply on the company's site, done.",
+    title: "Tailor your application with AI",
+    body: "Claude rewrites your resume and drafts a cover letter per role — ATS-clean and grounded in your real experience. Export, apply, done.",
   },
 ];
 
@@ -391,9 +410,7 @@ function HowItWorks() {
   return (
     <section className="container py-24 sm:py-32">
       <SectionReveal className="mx-auto max-w-2xl text-center">
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
-          How it works
-        </p>
+        <SectionEyebrow label="How it works" tone="plain" />
         <h2 className="mt-3 font-display text-3xl font-medium tracking-tight sm:text-4xl md:text-[2.75rem]">
           From feed to filed application in three steps.
         </h2>
@@ -436,27 +453,27 @@ function HowItWorks() {
   );
 }
 
-// ── Feature cards ──────────────────────────────────────────────────────────
+// ── Available now ──────────────────────────────────────────────────────────
 
-const FEATURES = [
+const LIVE_FEATURES: { icon: LucideIcon; title: string; body: string }[] = [
   {
     icon: Briefcase,
-    title: "Real jobs, not ghost listings",
-    body: "Every posting is pulled live from the company's own ATS — Greenhouse, Lever, Ashby, SmartRecruiters, Workday — so you're not chasing roles that closed three months ago.",
+    title: "Jobs that sponsor, in one place",
+    body: "Every posting is pulled live from the employer's own ATS — Greenhouse, Lever, Ashby, SmartRecruiters, Workday — and tagged with its sponsorship signal, so you're not chasing roles that won't sponsor or closed months ago.",
   },
   {
     icon: ShieldCheck,
     title: "H-1B sponsorship signals",
-    body: "Two distinct badges per company: heavy sponsor (≥5 LCAs in 12 months) and past activity (any LCA in 3 years). The signal nobody else surfaces.",
+    body: "Two clear badges per company: heavy sponsor (≥5 LCAs in 12 months) and past activity (any LCA in 3 years), straight from public DOL data. The signal nobody else surfaces.",
   },
   {
     icon: FileText,
-    title: "AI-tailored, ATS-optimized resume",
-    body: "Claude rewrites your resume per role with the job's exact terminology, keeping every claim grounded in what you actually did. DOCX export, two pages, ATS-clean.",
+    title: "AI resume & cover-letter tailoring",
+    body: "Claude rewrites your resume and drafts a cover letter for each role in the job's own terminology — every line grounded in what you actually did, never invented. ATS-clean export.",
   },
 ];
 
-function Features() {
+function AvailableNow() {
   return (
     <section className="relative overflow-hidden bg-card/40 py-24 sm:py-28">
       <div
@@ -465,15 +482,16 @@ function Features() {
       />
       <div className="container">
         <SectionReveal className="mx-auto max-w-2xl text-center">
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
-            What you get today
-          </p>
-          <h2 className="mt-3 font-display text-3xl font-medium tracking-tight sm:text-4xl md:text-[2.75rem]">
-            Three honest tools. No fluff.
+          <div className="flex justify-center">
+            <SectionEyebrow label="Available now" tone="now" />
+          </div>
+          <h2 className="mt-4 font-display text-3xl font-medium tracking-tight sm:text-4xl md:text-[2.75rem]">
+            The working core, today.
           </h2>
           <p className="mt-4 text-sm text-muted-foreground sm:text-base">
-            We only ship what works. Auto-apply, mock interviews, and cover
-            letters aren&apos;t here — yet.
+            Two things, done honestly: surface the jobs that will actually
+            sponsor you, and make each application sharper. Everything below
+            is live in the app right now.
           </p>
         </SectionReveal>
 
@@ -484,7 +502,7 @@ function Features() {
           viewport={{ once: true, margin: "-10% 0px" }}
           className="mx-auto mt-14 grid max-w-5xl gap-5 md:grid-cols-3"
         >
-          {FEATURES.map((f) => (
+          {LIVE_FEATURES.map((f) => (
             <motion.article
               key={f.title}
               variants={fadeUp}
@@ -492,12 +510,9 @@ function Features() {
               transition={{ type: "spring", stiffness: 300, damping: 24 }}
               className="group relative overflow-hidden rounded-2xl border border-border/70 bg-background p-6 transition-shadow hover:shadow-card-hover"
             >
-              {/* Soft inner glow that fades in on hover. Sits behind
-                  the content so it lights the card from below without
-                  shifting any pixels. */}
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-br from-primary/0 via-primary/0 to-primary/0 opacity-0 transition-opacity duration-300 group-hover:from-primary/[0.04] group-hover:via-transparent group-hover:to-primary/[0.04] group-hover:opacity-100"
+                className="pointer-events-none absolute inset-0 -z-10 opacity-0 transition-opacity duration-300 group-hover:opacity-100 group-hover:[background:radial-gradient(ellipse_at_top,hsl(var(--primary)/0.05),transparent_70%)]"
               />
               <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary transition-colors group-hover:bg-primary/15">
                 <f.icon className="h-5 w-5" aria-hidden />
@@ -523,9 +538,7 @@ function Differentiator() {
     <section className="container py-24 sm:py-32">
       <div className="mx-auto grid max-w-5xl items-center gap-12 lg:grid-cols-2">
         <SectionReveal variants={fadeLeft}>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
-            The differentiator
-          </p>
+          <SectionEyebrow label="The differentiator" tone="plain" />
           <h2 className="mt-3 font-display text-3xl font-medium leading-tight tracking-tight sm:text-4xl md:text-[2.75rem]">
             Sponsorship intelligence built into the feed.
           </h2>
@@ -564,9 +577,8 @@ function Differentiator() {
 }
 
 /** A static visual mock of the in-app sponsorship badges. NOT a live
- * card — just a representative example using the same visual
- * language as the real `JobCard`. Conveys the value of the feature
- * without faking data. The shadow-card-back layer adds depth. */
+ * card — a representative example in the same visual language as the
+ * real `JobCard`, conveying the value without faking data. */
 function SignalsMock() {
   return (
     <div className="relative">
@@ -620,13 +632,115 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+// ── Coming soon — the full vision ──────────────────────────────────────────
+
+const ROADMAP: { icon: LucideIcon; title: string; body: string }[] = [
+  {
+    icon: Bell,
+    title: "Job alerts",
+    body: "Get notified the moment a sponsoring employer posts a role that fits — so you're early, not late.",
+  },
+  {
+    icon: MousePointerClick,
+    title: "Apply in fewer clicks",
+    body: "A browser companion that fills the repetitive parts of each application for you. You stay in control and review before anything is sent.",
+  },
+  {
+    icon: Send,
+    title: "Reach the right people",
+    body: "Surface the right recruiter or hiring contact for a role so a thoughtful note can reach them — built to respect privacy and platform norms.",
+  },
+  {
+    icon: GraduationCap,
+    title: "Interview prep",
+    body: "Role-specific practice with a sponsorship lens — including the questions international candidates actually need to ask.",
+  },
+  {
+    icon: ClipboardList,
+    title: "Application tracker",
+    body: "Every application and its status in one place, so your pipeline never goes stale in a spreadsheet again.",
+  },
+  {
+    icon: LineChart,
+    title: "Deeper sponsorship intelligence",
+    body: "Richer insights from public DOL/LCA data — trends, role-level history, and stronger signals as the dataset grows.",
+  },
+];
+
+function ComingSoon() {
+  return (
+    <section className="relative overflow-hidden border-t border-border/60 bg-secondary/30 py-24 sm:py-28">
+      <div className="container">
+        <SectionReveal className="mx-auto max-w-2xl text-center">
+          <div className="flex justify-center">
+            <SectionEyebrow label="Coming soon" tone="soon" />
+          </div>
+          <h2 className="mt-4 font-display text-3xl font-medium tracking-tight sm:text-4xl md:text-[2.75rem]">
+            Where Aptly is headed.
+          </h2>
+          <p className="mt-4 text-sm text-muted-foreground sm:text-base">
+            This is the roadmap, not today&apos;s product. We ship one feature
+            at a time, only when it works end-to-end — so here&apos;s the full
+            vision, labelled honestly.
+          </p>
+        </SectionReveal>
+
+        <motion.ul
+          variants={staggerContainer(0.07, 0.08)}
+          initial="hidden"
+          whileInView="show"
+          viewport={{ once: true, margin: "-10% 0px" }}
+          className="mx-auto mt-14 grid max-w-5xl gap-5 sm:grid-cols-2 lg:grid-cols-3"
+        >
+          {ROADMAP.map((f) => (
+            <motion.li
+              key={f.title}
+              variants={fadeUp}
+              whileHover={{ y: -3 }}
+              transition={{ type: "spring", stiffness: 300, damping: 24 }}
+              className="group relative overflow-hidden rounded-2xl border border-dashed border-border bg-card/60 p-6 transition-colors hover:border-primary/30 hover:bg-card"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-secondary text-muted-foreground transition-colors group-hover:text-primary">
+                  <f.icon className="h-5 w-5" aria-hidden />
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-highlight/40 bg-highlight-soft px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-highlight-foreground">
+                  <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-highlight" />
+                  Coming soon
+                </span>
+              </div>
+              <h3 className="mt-5 text-base font-semibold tracking-tight text-foreground">
+                {f.title}
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                {f.body}
+              </p>
+            </motion.li>
+          ))}
+        </motion.ul>
+
+        <SectionReveal className="mx-auto mt-8 max-w-2xl text-center">
+          <p className="text-sm text-muted-foreground">
+            …and more. Want to shape what comes next?{" "}
+            <Link
+              href="/support"
+              className="font-medium text-primary underline-offset-4 hover:underline"
+            >
+              Tell us what you need
+            </Link>
+            .
+          </p>
+        </SectionReveal>
+      </div>
+    </section>
+  );
+}
+
 // ── Final CTA ──────────────────────────────────────────────────────────────
 
 function FinalCta() {
   return (
     <section className="relative overflow-hidden border-t border-border/60 bg-card/40">
-      {/* Soft re-statement of the hero's atmosphere so the page
-          closes on the same visual key it opened on. */}
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_50%_60%_at_50%_120%,hsl(var(--primary)/0.12),transparent_70%)]"
@@ -638,8 +752,9 @@ function FinalCta() {
             <span className="italic text-primary">actually</span> hire you.
           </h2>
           <p className="mx-auto mt-5 max-w-xl text-base text-muted-foreground">
-            One click to create a profile. We&apos;ll pull the freshest
-            sponsorship-friendly jobs the moment your résumé is in.
+            One click to create a profile. We&apos;ll surface the freshest
+            sponsorship-friendly jobs and tailor your application the moment
+            your resume is in.
           </p>
           <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <CtaButton href="/get-started" />

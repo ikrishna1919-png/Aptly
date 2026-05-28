@@ -1,0 +1,13 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Aptly">
+  <defs>
+    <linearGradient id="aptly-bg" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B9EFF"/>
+      <stop offset="1" stop-color="#1E6FE0"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#aptly-bg)"/>
+  <!-- "A" / upward chevron: the brand's forward-and-up motion -->
+  <path d="M15 45 L32 17 L49 45" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- checkmark crossbar: the "right fit, confirmed" signal -->
+  <path d="M23.5 38 L29.5 44 L41 30" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
