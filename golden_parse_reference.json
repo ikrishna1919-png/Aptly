@@ -1,0 +1,126 @@
+{
+  "_comment": "GOLDEN REFERENCE: the correct parsed output for Krishna_Chikkam_RESUME_AWS.docx. Use this as a regression test target. The parser should produce data structurally equivalent to this for that resume.",
+  "name": "Krishna Chikkam",
+  "headline": "Senior Data Engineer",
+  "headline_inferred": false,
+  "email": "ikrishnachikkam@gmail.com",
+  "phone": "+1 872-303-4264",
+  "location": "Seattle, WA 98055",
+  "links": {
+    "linkedin": "https://www.linkedin.com/in/krishnachikkam",
+    "github": null,
+    "website": null
+  },
+  "summary": "Senior Data Engineer with 7 years of experience in design, development, and maintenance of robust data solutions for complex business problems. Demonstrated expertise in building data pipelines, optimizing database performance, reducing manual intervention, and implementing cost optimization strategies.",
+  "experience": [
+    {
+      "company": "SMBC Manu Bank",
+      "title": "Senior Data Engineer",
+      "location": "Scottsdale, Arizona",
+      "start": "2023-08",
+      "end": "Present",
+      "bullets": [
+        "Designed and implemented a Medallion Architecture (Bronze, Silver, Gold) data lake framework using AWS S3, Delta Lake, and Databricks on Amazon EMR...",
+        "Partnered with stakeholders from PM, Data Scientists, Legal, Privacy Engineers, and SWEs...",
+        "Developed real-time ETL pipelines using Apache Spark on AWS EMR and Kafka in Python...",
+        "Leveraged AWS Glue, Amazon Athena, Redshift, and DBT to process large-scale Salesforce (CRM) data...",
+        "Automated three CI/CD pipelines using Terraform and AWS Lambda..."
+      ]
+    },
+    {
+      "company": "SMBC Manu Bank",
+      "title": "Data Engineer Intern",
+      "location": "Scottsdale, Arizona",
+      "start": "2023-01",
+      "end": "2023-05",
+      "bullets": [
+        "Significantly contributed to a key data pipeline using AWS Glue to process over 50TB...",
+        "Built and optimized end-to-end pipelines integrating risk management data into S3 and Redshift using PySpark...",
+        "Collaborated with cross-functional teams to migrate on-prem databases to AWS, reducing maintenance costs by 20%.",
+        "Processed transactional data across 9 primary sources using SSIS and MS SQL Server..."
+      ]
+    },
+    {
+      "company": "Capgemini",
+      "title": "AWS Data Engineer",
+      "location": "Pune, Maharashtra, India",
+      "start": "2019-02",
+      "end": "2021-11",
+      "bullets": ["...4 bullets..."]
+    },
+    {
+      "company": "Soulpage IT Solutions",
+      "title": "Data Engineer",
+      "location": "Hyderabad, Telangana, India",
+      "start": "2018-07",
+      "end": "2019-01",
+      "bullets": ["...4 bullets..."]
+    },
+    {
+      "company": "Soulpage IT Solutions",
+      "title": "Data Engineer Intern",
+      "location": "Hyderabad, Telangana, India",
+      "start": "2018-01",
+      "end": "2018-05",
+      "bullets": ["...3 bullets..."]
+    }
+  ],
+  "education": [
+    {
+      "school": "Governors State University",
+      "degree": "Master of Science (M.S.) in Computer Science",
+      "field_of_study": "Computer Science",
+      "location": "University Park, IL, USA",
+      "gpa": "3.9",
+      "start": "2022-01",
+      "end": "2023-05",
+      "coursework": ["Big Data Analytics", "Python Programming", "Advanced Database Management", "UNIX"]
+    },
+    {
+      "school": "MLR Institute of Technology",
+      "degree": "Bachelor of Technology (B.Tech) in Computer Science and Engineering",
+      "field_of_study": "Computer Science and Engineering",
+      "location": "Hyderabad, Telangana, India",
+      "gpa": null,
+      "start": "2014-08",
+      "end": "2018-05",
+      "coursework": ["Software Engineering", "Database Management", "Introduction to Analytics", "Cloud Computing"]
+    }
+  ],
+  "skills": [
+    {"category": "Cloud Platforms", "items": ["AWS (S3, Glue, EMR, Redshift, Lambda, Step Functions, Athena, EventBridge, ECS, EC2, RDS, Redshift Spectrum)", "Azure (Data Factory, ADLS, Databricks, Fabric, Synapse)"]},
+    {"category": "ETL & Data Engineering", "items": ["Apache Spark", "Kafka", "Airflow", "DBT", "Data Modeling", "Informatica PowerCenter", "IICS", "SSIS"]},
+    {"category": "Databases & Data Warehousing", "items": ["Redshift", "Snowflake", "SQL Server", "Oracle", "PostgreSQL", "Redshift Spectrum"]},
+    {"category": "BI & Visualization", "items": ["Power BI", "Tableau"]},
+    {"category": "Languages", "items": ["Python", "SQL"]},
+    {"category": "DevOps & Tools", "items": ["Terraform", "Git", "Jenkins", "Autosys", "Tidal", "Power Automate", "Salesforce"]},
+    {"category": "Project & Collaboration", "items": ["Jira", "Confluence", "ServiceNow", "Agile", "Scrum"]},
+    {"category": "Soft Skills", "items": ["Innovative", "problem solving", "strong verbal and written communication skills"]}
+  ],
+  "projects": [
+    {
+      "name": "Algorithmic Trading System (NSE, India)",
+      "bullets": [
+        "Built a Python-based algorithmic trading system integrating Zerodha Kite API for automated signal generation and execution; designed rule-based strategy engine for entry/exit logic and backtesting on historical market data.",
+        "Leveraged AI tools for strategy research and optimization."
+      ],
+      "technologies": ["Python", "ChatGPT", "Claude AI", "Kite API (Zerodha)"],
+      "link": null
+    }
+  ],
+  "certifications": [
+    {"name": "Microsoft Certified: Azure Data Engineer Associate (DP-203)", "issuer": "Microsoft", "date": null},
+    {"name": "AWS Certified Data Analytics – Specialty", "issuer": "AWS", "date": null},
+    {"name": "Databricks Certified Data Engineer Associate", "issuer": "Databricks", "date": "2026"},
+    {"name": "Oracle Database SQL Certified Associate (12c)", "issuer": "Oracle", "date": null}
+  ],
+  "achievements": [
+    {"title": "\"Pat on the Back\" Award", "description": "Issued by Vice President of Capgemini Tech Services India Ltd in Financial Services", "date": null}
+  ],
+  "languages": [],
+  "publications": [],
+  "volunteer": [],
+  "affiliations": [],
+  "additional_sections": [],
+  "section_order": ["summary", "experience", "projects", "education", "skills", "certifications"]
+}
