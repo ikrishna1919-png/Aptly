@@ -25,7 +25,12 @@ const fraunces = Fraunces({
 // sharper, more characterful glyph shapes than Inter / Roboto / the
 // system stack. Picked specifically to land outside the
 // "generic AI-app aesthetic" the design brief rules out.
-const body = Plus_Jakarta_Sans({
+//
+// Named `jakarta` (NOT `body`) so the const doesn't shadow the
+// lowercase `<body>` JSX tag two scopes below — a previous version
+// used `const body = …` which read OK locally but caused enough
+// confusion that we'd rather not have it in the file at all.
+const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
@@ -49,7 +54,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         className={cn(
           "min-h-screen bg-background font-sans text-foreground antialiased",
           fraunces.variable,
-          body.variable,
+          jakarta.variable,
         )}
       >
         <a
