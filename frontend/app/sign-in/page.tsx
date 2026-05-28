@@ -23,39 +23,44 @@ function SignInInner() {
   const errorCode = params.get("error");
 
   return (
-    <main className="container max-w-md py-20">
-      <Card>
-        <CardHeader>
-          <CardTitle>Sign in to Aptly</CardTitle>
-          <CardDescription>
-            We use Google sign-in only. The first time you sign in
-            with the email the owner configured (`INITIAL_USER_EMAIL`),
-            you&apos;ll see all the existing profile data — that&apos;s
-            how the single-user phase migrates over.
-          </CardDescription>
+    <main className="container max-w-md py-16 sm:py-20">
+      <Card className="border-border/70 shadow-card">
+        <CardHeader className="space-y-2 text-center">
+          <CardTitle className="font-display text-2xl font-medium tracking-tight">
+            Sign in to Aptly
+          </CardTitle>
+          <CardDescription>Welcome back.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-5">
           {errorCode && (
-            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              Sign-in didn&apos;t complete. Try again — usually just a stale OAuth code.
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              Sign-in didn&apos;t complete. Please try again.
             </p>
           )}
-          <Button asChild className="w-full">
+          <Button asChild size="lg" className="w-full font-semibold">
             <a href={googleSignInUrl(next)}>
               <GoogleMark /> Sign in with Google
             </a>
           </Button>
-          <p className="text-xs text-muted-foreground">
-            By signing in you agree to use Aptly for personal job-search
-            purposes. We don&apos;t share your data.
-          </p>
-          <p className="text-xs text-muted-foreground">
-            <Link href="/" className="hover:text-foreground">
-              ← Back to home
+          <p className="text-center text-xs text-muted-foreground">
+            New to Aptly?{" "}
+            <Link
+              href="/get-started"
+              className="font-medium text-primary underline-offset-4 hover:underline"
+            >
+              Create a profile
             </Link>
           </p>
         </CardContent>
       </Card>
+      <p className="mt-6 text-center text-xs text-muted-foreground">
+        <Link href="/" className="hover:text-foreground">
+          ← Back to home
+        </Link>
+      </p>
     </main>
   );
 }

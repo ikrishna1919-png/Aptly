@@ -252,6 +252,51 @@ def test_auth_logout_clears_session(factories, settings):
         config_module.get_settings.cache_clear()
 
 
+def test_auth_logout_explicitly_deletes_cookie(factories, settings):
+    """`POST /api/auth/logout` writes a Set-Cookie that DELETES the
+    session cookie (empty value + Max-Age=0 / expired), not just
+    relying on Starlette's implicit clear-on-empty.
+
+    Why this matters: Safari ITP + some Chrome cookie policies don't
+    honour the implicit delete-cookie that SessionMiddleware emits
+    when a session goes from "had data" to "empty". An explicit
+    Set-Cookie with all matching attributes is unambiguous. Without
+    it, stale OAuth state from a previous handshake survives logout
+    and trips up the next sign-in. See the long-form note in the
+    `auth_logout` docstring."""
+    test_client = _client_with_user(factories, settings, user=None)
+    try:
+        res = test_client.post("/api/auth/logout")
+        assert res.status_code == 200
+        # FastAPI returns headers as a multi-dict; pull every
+        # Set-Cookie line so we don't miss one when SessionMiddleware
+        # ALSO emits an implicit delete.
+        set_cookies = res.headers.get_list("set-cookie")
+        # At least one must be the `session` cookie being deleted —
+        # either empty value or an explicit Max-Age=0 / past expiry.
+        deletes = [
+            c
+            for c in set_cookies
+            if c.lower().startswith("session=")
+            and (
+                'session=""' in c.lower()
+                or "session=;" in c.lower()
+                or "max-age=0" in c.lower()
+                or "expires=" in c.lower()
+            )
+        ]
+        assert deletes, f"no session-cookie deletion in Set-Cookie: {set_cookies}"
+        # Attributes that MUST be on the delete so the browser
+        # matches it to the originally-set cookie.
+        delete_header = deletes[0].lower()
+        assert "path=/" in delete_header
+        assert "samesite=lax" in delete_header
+        assert "httponly" in delete_header
+    finally:
+        app.dependency_overrides.clear()
+        config_module.get_settings.cache_clear()
+
+
 # ── OAuth start endpoint config gating ─────────────────────────────────────
 
 
