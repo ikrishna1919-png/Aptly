@@ -155,15 +155,36 @@ export type ProfileEducation = {
    * inside `degree` still render — the parser splits new rows. */
   field_of_study?: string | null;
   location?: string | null;
+  /** Canonical attendance dates. `start` is enrolment, `end` is
+   * graduation (or "Present"). The legacy `graduation` field on
+   * the backend mirrors `end` so old code still works. */
+  start?: string;
+  end?: string;
   graduation: string;
   /** Self-reported GPA when present on the resume ("3.85/4.0",
    * "3.85"). Null when the resume doesn't surface one. */
   gpa?: string | null;
+  /** "Relevant Coursework:" list when the resume includes one.
+   * Empty when the source has no coursework block. */
+  coursework?: string[];
+};
+
+/** One row of categorised skills (`Cloud Platforms: AWS, Azure`).
+ * The Profile's `skills` field can be either a flat list of strings
+ * (legacy / ungrouped resumes) OR a list of these groups (new
+ * categorised resumes). Frontend dispatches on element shape. */
+export type ProfileSkillGroup = {
+  category: string | null;
+  items: string[];
 };
 
 export type ProfileProject = {
   name: string;
   description: string;
+  /** Bullet list of achievements / features. Lives alongside
+   * `description`; older resumes use one paragraph, newer ones use
+   * a bullet list under the project name. Both can coexist. */
+  bullets?: string[];
   technologies: string[];
   link?: string | null;
   start_date?: string | null;
@@ -245,7 +266,10 @@ export type Profile = {
   location?: string | null;
   links: ProfileLinks;
   summary: string;
-  skills: string[];
+  /** Either a flat list of strings (legacy / ungrouped) OR a list
+   * of `{category, items}` groups (new categorised shape). UI code
+   * dispatches on element type. */
+  skills: string[] | ProfileSkillGroup[];
   experience: ProfileExperience[];
   education: ProfileEducation[];
   projects: ProfileProject[];

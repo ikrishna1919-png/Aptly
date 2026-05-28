@@ -144,17 +144,57 @@ class ProfileEducation(BaseModel):
     # degree blob; that's now split out.
     field_of_study: str | None = None
     location: str | None = None
-    graduation: str = Field(default="", description="YYYY")
+    # Canonical date fields — `start` is enrolment, `end` is
+    # graduation (or "Present"). `graduation` is the legacy alias
+    # kept so DB rows from earlier migrations still validate.
+    # `model_post_init` mirrors `end` ↔ `graduation` so both the
+    # legacy tailor service (`graduation`) and the new UI (`end`)
+    # observe the same value regardless of which side wrote it.
+    start: str = ""
+    end: str = ""
+    graduation: str = Field(default="", description="Legacy alias for `end` (back-compat)")
     gpa: str | None = None
+    # Course list when the resume includes a "Relevant Coursework:"
+    # block. Empty by default — display + tailoring only render
+    # this when non-empty.
+    coursework: list[str] = Field(default_factory=list)
+
+    def model_post_init(self, __context: Any) -> None:
+        # Keep `end` and `graduation` in sync so callers that read
+        # either field see a consistent value.
+        if self.end and not self.graduation:
+            object.__setattr__(self, "graduation", self.end)
+        elif self.graduation and not self.end:
+            object.__setattr__(self, "end", self.graduation)
+
+
+class ProfileSkillGroup(BaseModel):
+    """One row in the categorised-skills layout (`Cloud Platforms:
+    AWS, Azure`). `category` is the heading from the resume; `items`
+    is the comma-separated list under it.
+
+    When the resume's skills are flat (ungrouped), the parser emits
+    a single group with `category=None`. The frontend renders the
+    category label only when present, so flat-skill resumes still
+    look like a plain list."""
+
+    category: str | None = None
+    items: list[str] = Field(default_factory=list)
 
 
 class ProfileProject(BaseModel):
     """One personal / professional project entry. Optional fields are
     null when the resume doesn't surface them — the tailor service
-    only renders what's populated."""
+    only renders what's populated.
+
+    `description` is a free-form blurb; `bullets` is the list of
+    achievement bullets under the project header. Both can coexist —
+    older resumes use one paragraph, newer ones use a name + bullet
+    list. The parser fills whichever the source provides."""
 
     name: str
     description: str = ""
+    bullets: list[str] = Field(default_factory=list)
     technologies: list[str] = Field(default_factory=list)
     link: str | None = None
     start_date: str | None = None
@@ -272,7 +312,13 @@ class Profile(BaseModel):
     location: str | None = None
     links: ProfileLinks = Field(default_factory=ProfileLinks)
     summary: str = ""
-    skills: list[str] = Field(default_factory=list)
+    # Skills accept either the legacy flat list (one string per
+    # entry) OR the categorised shape ([{category, items[]}]) the
+    # new parser emits. Pydantic discriminates by element type —
+    # legacy DB rows + the tailor service's flat output both still
+    # validate cleanly. `flat_skills()` flattens for callers that
+    # need a single list (e.g. the candidate fingerprint).
+    skills: list[str] | list[ProfileSkillGroup] = Field(default_factory=list)
     experience: list[ProfileExperience] = Field(default_factory=list)
     education: list[ProfileEducation] = Field(default_factory=list)
     projects: list[ProfileProject] = Field(default_factory=list)
@@ -288,6 +334,19 @@ class Profile(BaseModel):
     # mirror the user's section ordering. Free-form strings so a
     # template that uses non-standard headers still survives.
     section_order: list[str] = Field(default_factory=list)
+
+    def flat_skills(self) -> list[str]:
+        """Flatten the `skills` field to a plain list of strings.
+        Use this in any code path that needs a flat list — the
+        candidate fingerprint, the tailor prompt, etc. — so the
+        union-shaped `skills` field is transparent downstream."""
+        out: list[str] = []
+        for item in self.skills:
+            if isinstance(item, ProfileSkillGroup):
+                out.extend(item.items)
+            else:
+                out.append(item)
+        return out
 
 
 # ─── Typed errors (kept for backwards compatibility) ────────────────────────
@@ -329,14 +388,15 @@ class _LLMEducation(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     gpa: str | None = None
+    coursework: list[str] = Field(default_factory=list)
 
 
 class _LLMSkillGroup(BaseModel):
     """Resumes that group skills by category (e.g. Languages, Cloud,
     Frameworks) get returned in this shape — preserved so the model
-    doesn't have to lose structure. We flatten in post-processing
-    because the downstream Profile model carries skills as a single
-    list."""
+    doesn't have to lose structure. The downstream Profile model
+    accepts the grouped shape natively now (was flattened in an
+    earlier version) so the category labels round-trip end-to-end."""
 
     category: str
     items: list[str] = Field(default_factory=list)
@@ -345,6 +405,7 @@ class _LLMSkillGroup(BaseModel):
 class _LLMProject(BaseModel):
     name: str | None = None
     description: str | None = None
+    bullets: list[str] = Field(default_factory=list)
     technologies: list[str] = Field(default_factory=list)
     link: str | None = None
     start_date: str | None = None
@@ -788,6 +849,85 @@ _SYSTEM_PROMPT = (
     "  · Stripe · 2022 – Present', `title` is 'Senior Software "
     "  Engineer', `company` is 'Stripe'.\n"
     "\n"
+    "── Layout patterns you MUST handle correctly ──\n"
+    "\n"
+    "PATTERN A — MULTIPLE ROLES UNDER ONE COMPANY. A single company "
+    "header is often followed by TWO OR MORE roles at that same "
+    "employer (promotions, internship → full-time, etc.). EVERY ROLE "
+    "GETS ITS OWN `experience` ENTRY, all carrying the same company "
+    "name. NEVER merge them; NEVER drop the second role; NEVER let "
+    "one role's bullets bleed into another. Example layout:\n"
+    "\n"
+    "    SMBC Manu Bank — Scottsdale, AZ\n"
+    "        Senior Data Engineer                  Aug 2023 – Present\n"
+    "          • Designed a Medallion Architecture data lake…\n"
+    "          • Partnered with stakeholders on PII handling…\n"
+    "        Data Engineer Intern                  Jan 2023 – May 2023\n"
+    "          • Built an AWS Glue pipeline processing 50TB…\n"
+    "          • Optimised PySpark integration into Redshift…\n"
+    "\n"
+    "  CORRECT output: TWO experience entries — both with "
+    "  `company='SMBC Manu Bank'`, both with `location='Scottsdale, "
+    "  AZ'`; the first with `title='Senior Data Engineer'` and its "
+    "  two bullets; the second with `title='Data Engineer Intern'` "
+    "  and its two bullets. If the resume lists Capgemini (one "
+    "  role) + Soulpage (two roles) + SMBC (two roles), you emit "
+    "  FIVE experience entries — not three, not four.\n"
+    "\n"
+    "PATTERN B — TAB-SEPARATED LINES. DOCX / structured resumes "
+    "often put two pieces of information on the same logical line, "
+    "separated by a TAB character so they render left- and right-"
+    "aligned. The most common shapes:\n"
+    "    Company\\tLocation\n"
+    "    Title\\tDates\n"
+    "  Recognise the tab and split correctly. `company` is the LEFT "
+    "  side of the first line, `location` is the right; `title` is "
+    "  the LEFT side of the second line, the date range is the "
+    "  right. NEVER swap — the location is not the company, the "
+    "  dates are not the title. If a single line reads "
+    "  'Senior Data Engineer\\tAug 2023 – Present', `title` is "
+    "  'Senior Data Engineer' and the dates feed `start_date` / "
+    "  `end_date`. Do NOT put 'Aug 2023 – Present' into `title`.\n"
+    "\n"
+    "PATTERN C — CATEGORISED SKILLS. When the resume groups skills "
+    "by category, EMIT GROUPS, NOT FRAGMENTS. The shape is "
+    "`{category, items}` — `category` is the label as written; "
+    "`items` is the list of skills under it. Example layout:\n"
+    "\n"
+    "    Cloud Platforms: AWS (S3, Glue, EMR, Redshift), Azure (Data "
+    "    Factory, ADLS, Databricks)\n"
+    "    ETL & Data Engineering: Spark, Kafka, Airflow, DBT\n"
+    "    Languages: Python, SQL\n"
+    "\n"
+    "  CORRECT output: three groups —\n"
+    "    {category: 'Cloud Platforms', items: ['AWS (S3, Glue, EMR, "
+    "    Redshift)', 'Azure (Data Factory, ADLS, Databricks)']}\n"
+    "    {category: 'ETL & Data Engineering', items: ['Spark', "
+    "    'Kafka', 'Airflow', 'DBT']}\n"
+    "    {category: 'Languages', items: ['Python', 'SQL']}\n"
+    "\n"
+    "  Do NOT shred a category — 'Cloud Platforms: AWS, Azure' is "
+    "  ONE group with TWO items, not two top-level entries called "
+    "  'Cloud Platforms: AWS' and 'Azure'. When the resume's skills "
+    "  list is genuinely ungrouped (no category labels at all), "
+    "  return a flat list of strings instead.\n"
+    "\n"
+    "PATTERN D — CONTENT OVER HEADING WHEN CLASSIFYING CERTS vs. "
+    "AWARDS. Resumes sometimes file an AWARD under a 'Certifications' "
+    "heading, or a CERTIFICATION under 'Honours'. Classify by what "
+    "the line ACTUALLY IS, not by the heading it's filed under:\n"
+    "  - 'AWS Certified Data Analytics – Specialty' → certifications "
+    "    (named credential with an issuer), even if listed under "
+    "    'Awards'.\n"
+    "  - '\"Pat on the Back\" Award, issued by VP at Capgemini' → "
+    "    achievements (an award / recognition with no issuer org or "
+    "    credential ID), even if listed under 'Certifications'.\n"
+    "  Rule of thumb: if the line has an `issuer` org (AWS, "
+    "  Microsoft, Oracle, PMI…) and reads like a credential, it's a "
+    "  CERTIFICATION. If it reads like a recognition / award / honour "
+    "  / commendation — even a quirky internal one — it's an "
+    "  ACHIEVEMENT.\n"
+    "\n"
     "Field-by-field guidance:\n"
     "  - name: the candidate's full name, exactly as written at the "
     "    top of the resume. null if the resume doesn't start with a "
@@ -821,7 +961,13 @@ _SYSTEM_PROMPT = (
     "    institution; `degree` is the credential (B.S., M.A., Ph.D., "
     "    etc.); `field_of_study` is the major (separate field — do "
     "    not pack it into `degree`); `gpa` is the GPA when stated "
-    "    (e.g. '3.85/4.0' or '3.85'), null otherwise.\n"
+    "    (e.g. '3.85/4.0' or '3.85'), null otherwise. "
+    "    `start_date` / `end_date` are the attendance window in the "
+    "    same free-form date shape used for experience (e.g. 'Aug "
+    "    2014' → 'May 2018'). `coursework` is the list of courses "
+    "    if the resume includes a 'Relevant Coursework:' block — "
+    "    one course per array entry; leave empty when the resume "
+    "    doesn't list courses.\n"
     "  - skills: PREFER the grouped `{category, items}` shape when "
     "    the resume groups skills by category. Examples: 'Cloud "
     "    Platforms: Azure, AWS, GCP', 'Languages: Python, Go, Java', "
@@ -834,9 +980,13 @@ _SYSTEM_PROMPT = (
     "  - projects: personal or professional projects under a 'Projects' / "
     "    'Personal Projects' / 'Side Projects' / 'Selected Work' header. "
     "    `name` is the project title; `description` is one or two "
-    "    sentences; `technologies` is the stack as a string list (only "
-    "    if the resume explicitly enumerates one); `link` is the URL if "
-    "    one is given. Omit the section entirely if the resume has none.\n"
+    "    sentences when the resume includes a paragraph blurb (leave "
+    "    empty otherwise); `bullets` is the list of achievement / "
+    "    feature bullets under the project — one string per bullet, "
+    "    same rules as experience bullets; `technologies` is the "
+    "    stack as a string list (only if the resume explicitly "
+    "    enumerates one); `link` is the URL if one is given. Omit "
+    "    the section entirely if the resume has none.\n"
     "  - achievements: AWARDS, HONOURS, RECOGNITIONS — things like "
     "    'Dean's List', 'Employee of the Year', '1st place in X "
     "    competition', 'Fulbright Scholar'. Distinct from project "
@@ -1161,7 +1311,7 @@ def _merge(regex_profile: Profile, llm: _LLMStructuralExtract) -> Profile:
     llm_education = [e for e in llm_education if e is not None]
     education = llm_education or regex_profile.education
 
-    llm_skills = _flatten_skills(llm.skills)
+    llm_skills = _to_profile_skills(llm.skills)
     skills = llm_skills or regex_profile.skills
 
     profile_bits = _build_llm_only_sections(llm)
@@ -1213,7 +1363,7 @@ def _llm_to_profile(llm: _LLMStructuralExtract) -> Profile:
 
     experience = [e for e in (_to_profile_experience(x) for x in llm.experience) if e is not None]
     education = [e for e in (_to_profile_education(x) for x in llm.education) if e is not None]
-    skills = _flatten_skills(llm.skills)
+    skills = _to_profile_skills(llm.skills)
     profile_bits = _build_llm_only_sections(llm)
 
     return Profile(
@@ -1413,6 +1563,7 @@ def _to_profile_project(entry: _LLMProject) -> ProfileProject | None:
     return ProfileProject(
         name=name,
         description=(entry.description or "").strip(),
+        bullets=_normalise_bullets(entry.bullets),
         technologies=[t.strip() for t in entry.technologies if t and t.strip()],
         link=(entry.link or "").strip() or None,
         start_date=(entry.start_date or "").strip() or None,
@@ -1511,7 +1662,19 @@ def _to_profile_education(entry: _LLMEducation) -> ProfileEducation | None:
     if not school and not degree and not field:
         return None
     location = (entry.location or "").strip() or None
-    graduation = _extract_graduation_year(entry.end_date or entry.start_date or "")
+    start_raw = (entry.start_date or "").strip()
+    end_raw = (entry.end_date or "").strip()
+    # Keep full dates ("2022-01", "May 2018", "Present"…) when the
+    # model returned them; fall back to just the year for the
+    # legacy `graduation` field so the tailor service still has the
+    # short form it expects.
+    start = _normalise_date(start_raw) if start_raw else ""
+    if end_raw.lower() in {"present", "current", "now"}:
+        end = "Present"
+    else:
+        end = _normalise_date(end_raw) if end_raw else ""
+    graduation = _extract_graduation_year(end_raw or start_raw)
+    coursework = [c.strip() for c in (entry.coursework or []) if c and c.strip()]
     return ProfileEducation(
         school=school,
         # Keep `degree` to just the credential — `field_of_study`
@@ -1521,8 +1684,11 @@ def _to_profile_education(entry: _LLMEducation) -> ProfileEducation | None:
         degree=degree,
         field_of_study=field or None,
         location=location,
+        start=start,
+        end=end,
         graduation=graduation,
         gpa=(entry.gpa or "").strip() or None,
+        coursework=coursework,
     )
 
 
@@ -1537,21 +1703,47 @@ def _extract_graduation_year(s: str) -> str:
     return years[-1]
 
 
-def _flatten_skills(skills: list[str] | list[_LLMSkillGroup]) -> list[str]:
-    """The Profile model carries skills as a flat list. If the LLM
-    returned category groups, flatten them — categories are dropped
-    because there's nowhere to store them downstream. Dedupe
-    case-insensitively, preserving the first-seen order."""
-    flat: list[str] = []
-    for item in skills:
-        if isinstance(item, _LLMSkillGroup):
-            flat.extend(item.items)
-        elif isinstance(item, str):
-            flat.append(item)
+def _to_profile_skills(
+    skills: list[str] | list[_LLMSkillGroup],
+) -> list[str] | list[ProfileSkillGroup]:
+    """Convert the LLM's skills field into the Profile shape.
+
+    Rule: PRESERVE category labels when the LLM returned grouped
+    skills (e.g. `Cloud Platforms: AWS, Azure` should stay one
+    group, not get shredded into two fragments). When the resume
+    has no categories, return a flat list of strings — same shape
+    legacy code paths expected.
+
+    The Profile model accepts either shape natively (`list[str] |
+    list[ProfileSkillGroup]`) so this output round-trips end-to-end.
+    """
+    # Grouped path: build ProfileSkillGroup rows directly, dedupe
+    # within each group case-insensitively while preserving order.
+    grouped_present = any(isinstance(s, _LLMSkillGroup) for s in skills)
+    if grouped_present:
+        groups: list[ProfileSkillGroup] = []
+        for item in skills:
+            if not isinstance(item, _LLMSkillGroup):
+                # Mixed shape (rare): treat stray strings as a
+                # category-less group at the end so nothing drops.
+                if isinstance(item, str) and item.strip():
+                    groups.append(ProfileSkillGroup(category=None, items=[item.strip()]))
+                continue
+            category = (item.category or "").strip() or None
+            cleaned = _dedupe_preserving_order(item.items)
+            if cleaned:
+                groups.append(ProfileSkillGroup(category=category, items=cleaned))
+        return groups
+
+    # Flat path: dedupe + return as plain strings.
+    return _dedupe_preserving_order([s for s in skills if isinstance(s, str)])
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
-    for s in flat:
-        s = s.strip()
+    for raw in values or []:
+        s = (raw or "").strip()
         if not s:
             continue
         key = s.lower()
