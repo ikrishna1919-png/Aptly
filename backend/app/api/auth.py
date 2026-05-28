@@ -196,14 +196,34 @@ class CurrentUserOut(BaseModel):
     id: int
     email: str
     name: str | None = None
+    # True once the user has explicitly saved their profile (any
+    # `PUT /api/profile`). The frontend uses this to gate `/jobs`
+    # — a brand-new user with the auto-seeded demo profile sees
+    # `False` and gets routed to `/profile` first, so the tailor
+    # service never runs against the demo template.
+    profile_saved: bool = False
 
     model_config = {"from_attributes": True}
 
 
 @router.get("/auth/me", response_model=CurrentUserOut)
-def auth_me(user: User = Depends(get_current_user)) -> User:
+def auth_me(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CurrentUserOut:
     """Return the currently signed-in user. 401 when no session."""
-    return user
+    # Local import to dodge the cycle between auth + candidate models.
+    from app.models.candidate import Candidate  # noqa: PLC0415
+
+    row = db.execute(
+        select(Candidate.profile_saved_at).where(Candidate.user_id == user.id)
+    ).scalar_one_or_none()
+    return CurrentUserOut(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        profile_saved=row is not None,
+    )
 
 
 @router.get("/auth/google/login")

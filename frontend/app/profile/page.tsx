@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,7 +39,7 @@ import {
   type ProfileSkillGroup,
   type ProfileVolunteer,
 } from "@/lib/api";
-import { RequireAuth } from "@/lib/auth-context";
+import { RequireAuth, useAuth } from "@/lib/auth-context";
 
 const EMPTY_PROFILE: Profile = {
   name: "",
@@ -147,15 +148,32 @@ const EMPTY_ADDITIONAL_SECTION: ProfileAdditionalSection = {
 export default function ProfilePage() {
   // The page itself is one big controlled form; gate the whole
   // tree behind RequireAuth so the in-flight fetch doesn't 401
-  // before the redirect lands.
+  // before the redirect lands. The `?next=` param survives between
+  // the gate's redirect and the save handler — wrap in `<Suspense>`
+  // because `useSearchParams` opts the page out of static
+  // rendering and Next requires the boundary.
   return (
     <RequireAuth>
-      <ProfileEditor />
+      <Suspense fallback={null}>
+        <ProfileEditor />
+      </Suspense>
     </RequireAuth>
   );
 }
 
 function ProfileEditor() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { refresh: refreshAuth, user } = useAuth();
+  // `?next=…` survives the `RequireProfile` redirect that brought
+  // the user here from a gated page (e.g. /jobs). Default to /jobs
+  // because that's the canonical "done with profile, into the app"
+  // destination for a brand-new signup. `?next=/profile` would
+  // create a loop, so reject it.
+  const rawNext = searchParams?.get("next") || "/jobs";
+  const nextHref = rawNext.startsWith("/profile") ? "/jobs" : rawNext;
+  const showNewcomerHint = !(user?.profile_saved ?? true);
+
   const [profile, setProfile] = useState<Profile>(EMPTY_PROFILE);
   const [pasted, setPasted] = useState("");
   const [showResumeTools, setShowResumeTools] = useState(false);
@@ -332,7 +350,20 @@ function ProfileEditor() {
     try {
       const saved = await saveProfile(cleanForSave(profile));
       setProfile(normaliseProfile(saved));
-      setInfo("Saved. The tailor flow will use this profile from now on.");
+      // Re-fetch /me so `user.profile_saved` flips to true; without
+      // this the gate on /jobs would still bounce the user back
+      // until the next page load.
+      await refreshAuth();
+      setInfo("Saved. Redirecting…");
+      // If a brand-new user just saved for the first time, send them
+      // into the app (the `?next=` from `RequireProfile`'s redirect
+      // points there). Returning users editing in-place stay on the
+      // page — we keep the green "Saved." banner.
+      if (!showNewcomerHint) {
+        setInfo("Saved. The tailor flow will use this profile from now on.");
+      } else {
+        router.push(nextHref);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -608,6 +639,23 @@ function ProfileEditor() {
             instantly.
           </p>
         </header>
+
+        {showNewcomerHint && (
+          <div
+            role="status"
+            className="rounded-lg border border-primary/30 bg-primary/5 p-4 text-sm"
+          >
+            <p className="font-medium text-foreground">
+              One more step before the jobs feed unlocks.
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              Fill in at least your name plus one experience or education
+              entry, then click <strong className="font-medium text-foreground">Save profile</strong>{" "}
+              at the bottom. Aptly won&apos;t tailor any resumes against a
+              demo profile.
+            </p>
+          </div>
+        )}
 
         <form onSubmit={onSave} className="space-y-8">
           {/* ── Three-column header ──

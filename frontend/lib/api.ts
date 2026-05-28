@@ -673,6 +673,14 @@ export type CurrentUser = {
   id: number;
   email: string;
   name: string | null;
+  /** True once the user has explicitly saved their profile (any
+   * `PUT /api/profile`). False on a brand-new account with the
+   * auto-seeded demo profile. The frontend uses this to gate
+   * `/jobs` — newcomers go to `/profile` first so the tailoring
+   * flow never runs against the demo template. Optional on the
+   * type for backwards compatibility with older backends that
+   * don't emit the field. */
+  profile_saved?: boolean;
 };
 
 /** Fetch the current user, or null when not signed in. Never

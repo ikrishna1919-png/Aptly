@@ -201,23 +201,33 @@ def test_all_endpoints_require_signed_in_user(client_anon):
 # ── GET / PUT ───────────────────────────────────────────────────────────────
 
 
-def test_get_profile_seeds_from_demo_candidate_when_row_missing(client_no_key):
+def test_get_profile_seeds_empty_when_row_missing(client_no_key):
+    """Brand-new users get an EMPTY Profile shape — not the demo
+    template. Pre-filling someone else's name into the editor was
+    misleading and risked the user accidentally saving the demo as
+    their own. The row IS created on first GET (so subsequent reads
+    + writes round-trip), it just starts blank."""
     test_client, Session = client_no_key
-    # No Candidate row exists yet.
     with Session() as s:
         assert s.query(Candidate).count() == 0
 
     res = test_client.get("/api/profile", headers=AUTH)
     assert res.status_code == 200
     body = res.json()
-    assert body["name"] == DEMO_CANDIDATE["name"]
-    # And a row was created so subsequent reads/writes round-trip —
-    # one row per user, slug starts with the legacy `demo` prefix.
+    # Empty shape: blank name, no experience / education / skills.
+    assert body["name"] == ""
+    assert body["experience"] == []
+    assert body["education"] == []
+    assert body["skills"] == []
+    # Row was created — one row per user, slug carries the legacy
+    # `demo` prefix, `profile_saved_at` stays NULL until the user
+    # explicitly saves (the frontend gate reads this).
     with Session() as s:
         assert s.query(Candidate).count() == 1
         row = s.query(Candidate).one()
         assert row.slug.startswith(DEMO_SLUG)
         assert row.user_id is not None
+        assert row.profile_saved_at is None
 
 
 def test_put_profile_persists_full_replacement(client_no_key):

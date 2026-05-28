@@ -16,17 +16,24 @@ const nav = [
 
 export function SiteHeader() {
   const { user, loading, signOut } = useAuth();
-  // Logged-in users get sent into the app when they click the brand;
-  // logged-out users get sent to the landing page so they can read
-  // the marketing copy + sign-in CTA. `/` redirects authenticated
-  // visitors server-side, so pointing at `/jobs` directly avoids a
-  // redirect bounce when a signed-in user clicks the brand.
-  const brandHref = user ? "/jobs" : "/";
+  // The brand link ALWAYS points at `/`. The home route's server
+  // component checks `/auth/me` and routes signed-in users to
+  // `/profile` (when their profile isn't saved yet) or `/jobs`
+  // (when it is). Signed-out users see the landing page.
+  //
+  // This used to point at `/jobs` for signed-in users directly,
+  // which felt broken in two ways:
+  //   * Clicking the brand from `/jobs` was a no-op (same URL).
+  //   * It bypassed the profile-saved gate, so a fresh sign-up
+  //     could land on /jobs and trigger the gate-bounce mid-render.
+  // Routing through `/` gives consistent "go home" semantics from
+  // anywhere in the app.
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/60">
       <div className="container flex h-14 items-center gap-6">
         <Link
-          href={brandHref}
+          href="/"
+          aria-label="Aptly home"
           className="flex items-center gap-2 font-semibold tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
         >
           <BrandMark />
