@@ -94,9 +94,9 @@ def test_experience_uses_right_tab_stop_for_dates_and_location():
         for m in re.findall(r"<w:tab\b[^>]*/>", xml)
         if 'w:val="right"' in m and re.search(r'w:pos="\d+"', m)
     ]
-    assert len(right_tab_stops) >= 2, (
-        f"expected ≥1 right-aligned tab stop per experience entry; " f"got {len(right_tab_stops)}"
-    )
+    assert (
+        len(right_tab_stops) >= 2
+    ), f"expected ≥1 right-aligned tab stop per experience entry; got {len(right_tab_stops)}"
 
     # The `\t` between left and right runs becomes a `<w:tab/>` element
     # (no `w:val`/`w:pos`). At least one per experience entry header.

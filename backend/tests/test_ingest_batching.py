@@ -264,9 +264,9 @@ def test_completed_sources_survive_a_mid_run_kill(factories):
     # was scheduled, so a fresh session still sees them on disk.
     with factories() as s:
         committed = s.query(Source).filter(Source.last_run_at.isnot(None)).count()
-    assert committed >= 2, (
-        f"only {committed} sources persisted before the kill; per-batch " "commits are not durable"
-    )
+    assert (
+        committed >= 2
+    ), f"only {committed} sources persisted before the kill; per-batch commits are not durable"
 
 
 # ── end-of-run log summary ────────────────────────────────────────────────

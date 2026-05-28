@@ -548,11 +548,7 @@ def test_parse_resume_handles_only_section_with_dates():
     from app.services.profile_parser import parse_resume
 
     p = parse_resume(
-        "Experience\n"
-        "Engineer — Foo Co\n"
-        "2020 - Present\n"
-        "- Did a thing\n"
-        "- Did another thing\n"
+        "Experience\nEngineer — Foo Co\n2020 - Present\n- Did a thing\n- Did another thing\n"
     )
     assert len(p.experience) == 1
     exp = p.experience[0]
@@ -568,7 +564,7 @@ def test_parse_resume_date_normalisation_variants():
     YYYY-MM consistently."""
     from app.services.profile_parser import parse_resume
 
-    text = "Experience\n" "A — X\nJanuary 2020 - Mar 2022\n" "\n" "B — Y\nMay 2018 to Dec 2019\n"
+    text = "Experience\nA — X\nJanuary 2020 - Mar 2022\n\nB — Y\nMay 2018 to Dec 2019\n"
     p = parse_resume(text)
     starts = [(e.start, e.end) for e in p.experience]
     assert ("2020-01", "2022-03") in starts
@@ -605,7 +601,7 @@ def test_parse_resume_skills_dedupes_case_insensitively():
 def test_parse_resume_skills_bullet_layout():
     from app.services.profile_parser import parse_resume
 
-    p = parse_resume("Skills\n" "• Python\n" "• Go\n" "• Kafka\n")
+    p = parse_resume("Skills\n• Python\n• Go\n• Kafka\n")
     assert "Python" in p.skills
     assert "Go" in p.skills
     assert "Kafka" in p.skills
@@ -736,7 +732,11 @@ def test_parse_calls_anthropic_when_key_present_and_uses_structural_output(
     assert profile["experience"][1]["end"] == "2022-12"
 
     assert profile["education"][0]["school"] == "Carnegie Mellon University"
-    assert "Computer Science" in profile["education"][0]["degree"]
+    # Post-overhaul: `degree` carries only the credential ("B.S."); the
+    # major lives on the separate `field_of_study` slot so the UI can
+    # edit each independently.
+    assert profile["education"][0]["degree"] == "B.S."
+    assert profile["education"][0]["field_of_study"] == "Computer Science"
     assert profile["education"][0]["graduation"] == "2018"
 
     # Skills from the LLM are surfaced.
@@ -795,7 +795,7 @@ def test_parse_does_not_call_anthropic_without_key(client_no_key, monkeypatch):
     monkeypatch.setattr(
         parser_module,
         "_build_client",
-        lambda s, c: (calls.append(1) or RuntimeError("should not be called")),
+        lambda s, c: calls.append(1) or RuntimeError("should not be called"),
     )
     start = test_client.post("/api/profile/parse", json={"text": _FULL_RESUME}, headers=AUTH)
     assert start.status_code == 202
