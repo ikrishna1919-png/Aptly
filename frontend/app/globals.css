@@ -3,84 +3,144 @@
 @tailwind utilities;
 
 /* ─────────────────────────────────────────────────────────────
- * Aptly design tokens
+ * Aptly design system
  *
- * Palette: warm off-white paper, near-black ink, single violet
- * accent used sparingly, amber highlight reserved for "good news"
- * signals (sponsorship, freshness). Borders are hairline-thin.
- * Type: Inter (loaded via next/font) with a tight tracking on
- * headings for an editorial-modern feel.
+ * Direction: light-blue–led palette anchored on one confident
+ * primary (a refined cobalt, AA-contrast on white), warm-tinted
+ * neutrals for paper-feel surfaces, amber reserved for "good
+ * news" signals (sponsorship, freshness). Borders are hairline-
+ * thin; shadows are layered low + soft so cards feel like they
+ * float, not sit on a page.
+ *
+ * Type pairing: Fraunces (display serif) + Plus Jakarta Sans
+ * (humanist sans, sharper character than Manrope without
+ * sliding into Inter/Roboto). Loaded via `next/font/google` in
+ * `app/layout.tsx` with stable CSS-variable bindings.
+ *
+ * Every page + component reads from these tokens — they're the
+ * single source of truth for colour, radius, shadow, and
+ * motion. Restyling the product = touching this file.
  * ───────────────────────────────────────────────────────────── */
 
 @layer base {
   :root {
-    --background: 48 33% 98%;
-    --foreground: 240 12% 10%;
+    /* Surface — cool, slightly-tinted off-white. Reads as paper
+       without going warm-cream; pairs cleanly with the cobalt
+       primary. */
+    --background: 210 36% 98%;
+    --foreground: 217 32% 12%;
 
     --card: 0 0% 100%;
-    --card-foreground: 240 12% 10%;
+    --card-foreground: 217 32% 12%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 240 12% 10%;
+    --popover-foreground: 217 32% 12%;
 
-    --primary: 258 78% 56%;
+    /* Primary — refined cobalt. 4.6:1 contrast on white (AA for
+       large + UI controls; passes WCAG 1.4.11 graphics contrast
+       at 3:1 for icons/borders). Strong enough to anchor the
+       brand, not so saturated it overwhelms a long-form page. */
+    --primary: 217 91% 48%;
     --primary-foreground: 0 0% 100%;
+    --primary-hover: 217 92% 42%;
+    --primary-soft: 217 96% 96%;       /* very-light blue tint for surface backgrounds */
+    --primary-soft-foreground: 217 80% 28%;
 
-    --secondary: 240 8% 95%;
-    --secondary-foreground: 240 12% 14%;
+    /* Secondary — cool gray surface. Slightly blue-cast so the
+       neutrals feel related to the primary, not picked
+       independently. */
+    --secondary: 215 24% 95%;
+    --secondary-foreground: 217 25% 18%;
 
-    --muted: 240 8% 96%;
-    --muted-foreground: 240 5% 42%;
+    /* Muted — slightly lower contrast than secondary, used for
+       tertiary surface fills + the muted text below. */
+    --muted: 215 28% 96%;
+    --muted-foreground: 215 16% 42%;
 
-    --accent: 258 78% 96%;
-    --accent-foreground: 258 78% 30%;
+    /* Accent — a deeper tint of the primary; pairs with
+       `--primary-soft` for chips/badges and pill borders. */
+    --accent: 217 96% 94%;
+    --accent-foreground: 217 80% 24%;
 
-    --highlight: 38 92% 50%;             /* amber for "good news" */
-    --highlight-foreground: 30 60% 20%;
+    /* Highlight — amber for "good news" UI signals
+       (sponsorship-positive, freshness). Reserved deliberately
+       so it never competes with the primary. */
+    --highlight: 38 92% 50%;
+    --highlight-foreground: 30 60% 18%;
     --highlight-soft: 38 92% 94%;
 
-    --destructive: 0 72% 51%;
+    /* Status colours — used by toast, validation, and badges. */
+    --success: 152 60% 36%;
+    --success-foreground: 0 0% 100%;
+    --warning: 32 95% 48%;
+    --warning-foreground: 28 60% 14%;
+    --destructive: 0 76% 50%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 240 8% 90%;
-    --input: 240 8% 90%;
-    --ring: 258 78% 56%;
+    /* Borders — hairline cool gray. Slightly bluer than
+       secondary so a card on a `--secondary` background still
+       has a visible edge. */
+    --border: 215 18% 88%;
+    --input: 215 18% 88%;
+    --ring: 217 91% 52%;
 
+    /* Radius scale — one base, components compose from it.
+       0.625rem (10px) at the base reads as "modern but not
+       round-blob"; cards use 1rem (16px) for a softer feel via
+       Tailwind's `rounded-2xl`. */
     --radius: 0.625rem;
+
+    /* Motion — shared timings + easings consumed by every
+       transition + animation in the system. Centralising
+       these keeps the motion grammar identical across pages,
+       so hover / reveal / state-change all feel like the same
+       language. */
+    --motion-duration-fast: 150ms;
+    --motion-duration-base: 220ms;
+    --motion-duration-slow: 420ms;
+    --motion-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --motion-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
   .dark {
-    --background: 240 10% 5%;
-    --foreground: 0 0% 96%;
+    --background: 217 32% 6%;
+    --foreground: 210 24% 94%;
 
-    --card: 240 10% 7%;
-    --card-foreground: 0 0% 96%;
+    --card: 217 30% 9%;
+    --card-foreground: 210 24% 94%;
 
-    --popover: 240 10% 7%;
-    --popover-foreground: 0 0% 96%;
+    --popover: 217 30% 9%;
+    --popover-foreground: 210 24% 94%;
 
-    --primary: 258 90% 70%;
-    --primary-foreground: 240 12% 10%;
+    --primary: 217 91% 62%;
+    --primary-foreground: 217 32% 8%;
+    --primary-hover: 217 90% 70%;
+    --primary-soft: 217 40% 16%;
+    --primary-soft-foreground: 217 92% 78%;
 
-    --secondary: 240 8% 14%;
-    --secondary-foreground: 0 0% 96%;
+    --secondary: 217 18% 16%;
+    --secondary-foreground: 210 24% 94%;
 
-    --muted: 240 8% 14%;
-    --muted-foreground: 240 5% 64%;
+    --muted: 217 18% 16%;
+    --muted-foreground: 215 16% 64%;
 
-    --accent: 258 50% 20%;
-    --accent-foreground: 258 90% 88%;
+    --accent: 217 50% 22%;
+    --accent-foreground: 217 92% 86%;
 
-    --highlight: 38 92% 60%;
-    --highlight-foreground: 38 80% 12%;
-    --highlight-soft: 38 60% 18%;
+    --highlight: 38 92% 62%;
+    --highlight-foreground: 38 80% 10%;
+    --highlight-soft: 38 50% 16%;
 
-    --destructive: 0 70% 55%;
-    --destructive-foreground: 0 0% 96%;
+    --success: 152 56% 50%;
+    --success-foreground: 217 32% 8%;
+    --warning: 32 95% 60%;
+    --warning-foreground: 28 60% 10%;
+    --destructive: 0 70% 58%;
+    --destructive-foreground: 210 24% 94%;
 
-    --border: 240 8% 16%;
-    --input: 240 8% 16%;
-    --ring: 258 90% 70%;
+    --border: 217 18% 22%;
+    --input: 217 18% 22%;
+    --ring: 217 91% 62%;
   }
 }
 
@@ -96,7 +156,7 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "rlig" 1, "calt" 1, "cv11" 1;
+    font-feature-settings: "ss01" 1, "cv11" 1;
   }
   h1,
   h2,
@@ -105,7 +165,9 @@
     @apply tracking-tight text-foreground;
     text-wrap: balance;
   }
-  /* Default focus ring uses the brand color */
+  /* Default focus ring uses the primary; the `:focus-visible`
+     selector ensures we only show it on keyboard-driven focus,
+     not on mouse clicks. */
   :focus-visible {
     outline: none;
   }
@@ -119,7 +181,7 @@
     background-size: 24px 24px;
   }
 
-  /* Soft inner glow on the hero — pulled to the top of the page */
+  /* Soft inner glow on the in-app hero (jobs page header). */
   .hero-glow {
     background-image:
       radial-gradient(
@@ -129,11 +191,10 @@
       );
   }
 
-  /* Landing-page hero atmosphere. Two soft radial washes — one
-     warm-amber on the right, one violet on the left — give the
-     page a quiet ambient depth without resorting to the
-     "purple gradient on white" cliché. Layered with a faint
-     diagonal grid so it doesn't read as empty. */
+  /* Landing-page hero atmosphere. The motion-driven cursor follow
+     in `landing-page.tsx` overrides the primary wash; this is the
+     no-motion baseline so reduced-motion users still get a
+     layered surface. */
   .landing-hero-bg {
     background-image:
       radial-gradient(
@@ -166,7 +227,7 @@
   .reveal-stagger-item {
     opacity: 0;
     transform: translateY(8px);
-    animation: aptly-rise-in 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: aptly-rise-in 600ms var(--motion-ease-out) both;
   }
   @media (prefers-reduced-motion: reduce) {
     /* Honour the OS setting — no motion, just show the content. */
@@ -174,6 +235,18 @@
       opacity: 1;
       transform: none;
       animation: none;
+    }
+
+    /* Reduced motion: also disable the long transition durations
+       on hover so the system doesn't surprise the user with
+       drawn-out state changes. Affects every component that
+       uses Tailwind's `transition-*` utilities. */
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
     }
   }
 }

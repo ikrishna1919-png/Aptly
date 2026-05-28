@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import {
   ChevronDown,
   LogOut,
@@ -20,18 +21,20 @@ import { useAuth } from "@/lib/auth-context";
 /**
  * Top-right avatar dropdown for logged-in users.
  *
- * Click the trigger to open a small menu with the account-scoped
- * actions: Profile, Subscription, Language, Contact Us, About Us,
- * (Admin if the user's email is in the admin allowlist), Sign Out.
+ * Lives in the SiteHeader, opens to: Profile, Subscription,
+ * Language, Contact us, About us, Admin (only when
+ * `user.is_admin`), Sign out. The Admin entry surfaces here
+ * deliberately — keeps the main nav uncluttered AND keeps it out
+ * of sight entirely for non-admin accounts.
  *
- * Implementation notes:
- *   * Native click-outside + Escape-to-close handled inline so we
- *     don't pull in a Radix dropdown for one menu.
- *   * Each item closes the menu on click via `setOpen(false)`.
- *   * The trigger shows initials (consistent with the profile-page
- *     IdentityCard avatar) so the same identity glyph reads the
- *     same everywhere.
- *   * `aria-expanded` + `aria-haspopup` for screen-readers.
+ * Motion + interaction polish:
+ *   * Open/close uses AnimatePresence with a quick (180ms) ease-
+ *     out spring. The trigger's chevron rotates 180° on open.
+ *   * Active-state highlight: the menu item whose `href` matches
+ *     the current path lights up in primary-soft so the user can
+ *     see "I'm already on Profile" without parsing the page.
+ *   * Click-outside + Escape close. Route change closes too.
+ *   * `aria-haspopup` / `aria-expanded` for screen readers.
  */
 export function SettingsMenu() {
   const { user, signOut } = useAuth();
@@ -40,7 +43,6 @@ export function SettingsMenu() {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // Close on outside click + Escape.
   useEffect(() => {
     if (!open) return;
     function onClickOutside(e: MouseEvent) {
@@ -58,7 +60,6 @@ export function SettingsMenu() {
     };
   }, [open]);
 
-  // Close on route change so the menu doesn't stay open after a click.
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
@@ -74,15 +75,20 @@ export function SettingsMenu() {
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label="Open settings menu"
+        aria-label="Open account menu"
         className={cn(
-          "group flex items-center gap-2 rounded-full border border-border/70 bg-background/80 py-1 pl-1 pr-2.5 transition-colors hover:border-border hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          open && "border-primary/60 bg-secondary",
+          "group flex items-center gap-2 rounded-full border border-border/70 bg-card py-1 pl-1 pr-2.5 transition-all duration-base",
+          "hover:border-primary/30 hover:bg-primary-soft hover:shadow-card",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+          open && "border-primary/40 bg-primary-soft shadow-card",
         )}
       >
         <span
           aria-hidden="true"
-          className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-accent-foreground"
+          className={cn(
+            "flex h-7 w-7 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground shadow-sm transition-transform duration-base",
+            open && "scale-105",
+          )}
         >
           {initials}
         </span>
@@ -91,63 +97,91 @@ export function SettingsMenu() {
         </span>
         <ChevronDown
           className={cn(
-            "h-3.5 w-3.5 text-muted-foreground transition-transform",
-            open && "rotate-180",
+            "h-3.5 w-3.5 text-muted-foreground transition-transform duration-base",
+            open && "rotate-180 text-primary",
           )}
           aria-hidden
         />
       </button>
 
-      {open && (
-        <div
-          role="menu"
-          aria-label="Account"
-          className="absolute right-0 z-50 mt-2 w-60 origin-top-right overflow-hidden rounded-xl border border-border/70 bg-card shadow-lg"
-        >
-          <div className="border-b border-border/60 px-4 py-3">
-            <p className="truncate text-sm font-medium text-foreground">
-              {user.name || user.email.split("@")[0]}
-            </p>
-            <p className="truncate text-xs text-muted-foreground">{user.email}</p>
-          </div>
-          <ul className="py-1">
-            <MenuItem href="/profile" icon={UserIcon} label="Profile" />
-            <MenuItem
-              href="/settings/subscription"
-              icon={CreditCard}
-              label="Subscription"
-            />
-            <MenuItem
-              href="/settings/language"
-              icon={Globe2}
-              label="Language"
-            />
-            <MenuItem href="/settings/contact" icon={Mail} label="Contact us" />
-            <MenuItem href="/about" icon={Info} label="About us" />
-            {user.is_admin && (
-              <MenuItem href="/admin" icon={ShieldCheck} label="Admin" />
-            )}
-          </ul>
-          <div className="border-t border-border/60 py-1">
-            <button
-              type="button"
-              role="menuitem"
-              onClick={async () => {
-                setOpen(false);
-                try {
-                  await signOut();
-                } catch {
-                  router.push("/sign-in");
-                }
-              }}
-              className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm text-foreground hover:bg-secondary focus-visible:bg-secondary focus-visible:outline-none"
-            >
-              <LogOut className="h-4 w-4 text-muted-foreground" aria-hidden />
-              Sign out
-            </button>
-          </div>
-        </div>
-      )}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -8, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -6, scale: 0.97 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            role="menu"
+            aria-label="Account"
+            className="absolute right-0 z-50 mt-2 w-64 origin-top-right overflow-hidden rounded-xl border border-border bg-popover shadow-elevated"
+          >
+            <div className="border-b border-border/60 bg-primary-soft/40 px-4 py-3">
+              <p className="truncate text-sm font-semibold text-foreground">
+                {user.name || user.email.split("@")[0]}
+              </p>
+              <p className="truncate text-xs text-muted-foreground">{user.email}</p>
+            </div>
+            <ul className="py-1.5">
+              <MenuItem
+                href="/profile"
+                icon={UserIcon}
+                label="Profile"
+                active={pathname === "/profile"}
+              />
+              <MenuItem
+                href="/settings/subscription"
+                icon={CreditCard}
+                label="Subscription"
+                active={pathname === "/settings/subscription"}
+              />
+              <MenuItem
+                href="/settings/language"
+                icon={Globe2}
+                label="Language"
+                active={pathname === "/settings/language"}
+              />
+              <MenuItem
+                href="/settings/contact"
+                icon={Mail}
+                label="Contact us"
+                active={pathname === "/settings/contact"}
+              />
+              <MenuItem
+                href="/about"
+                icon={Info}
+                label="About us"
+                active={pathname === "/about"}
+              />
+              {user.is_admin && (
+                <MenuItem
+                  href="/admin"
+                  icon={ShieldCheck}
+                  label="Admin"
+                  active={pathname?.startsWith("/admin") ?? false}
+                />
+              )}
+            </ul>
+            <div className="border-t border-border/60 py-1.5">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={async () => {
+                  setOpen(false);
+                  try {
+                    await signOut();
+                  } catch {
+                    router.push("/sign-in");
+                  }
+                }}
+                className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm font-medium text-foreground transition-colors duration-fast hover:bg-secondary focus-visible:bg-secondary focus-visible:outline-none"
+              >
+                <LogOut className="h-4 w-4 text-muted-foreground" aria-hidden />
+                Sign out
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -156,19 +190,34 @@ function MenuItem({
   href,
   icon: Icon,
   label,
+  active,
 }: {
   href: string;
   icon: typeof UserIcon;
   label: string;
+  active: boolean;
 }) {
   return (
     <li>
       <Link
         href={href}
         role="menuitem"
-        className="flex items-center gap-3 px-4 py-2 text-sm text-foreground hover:bg-secondary focus-visible:bg-secondary focus-visible:outline-none"
+        aria-current={active ? "page" : undefined}
+        className={cn(
+          "flex items-center gap-3 px-4 py-2 text-sm font-medium transition-colors duration-fast",
+          active
+            ? "bg-primary-soft text-primary-soft-foreground"
+            : "text-foreground hover:bg-secondary",
+          "focus-visible:bg-secondary focus-visible:outline-none",
+        )}
       >
-        <Icon className="h-4 w-4 text-muted-foreground" aria-hidden />
+        <Icon
+          className={cn(
+            "h-4 w-4 transition-colors duration-fast",
+            active ? "text-primary" : "text-muted-foreground",
+          )}
+          aria-hidden
+        />
         {label}
       </Link>
     </li>

@@ -38,6 +38,9 @@ const config: Config = {
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
+          hover: "hsl(var(--primary-hover))",
+          soft: "hsl(var(--primary-soft))",
+          "soft-foreground": "hsl(var(--primary-soft-foreground))",
         },
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
@@ -50,6 +53,14 @@ const config: Config = {
         accent: {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
+        },
+        success: {
+          DEFAULT: "hsl(var(--success))",
+          foreground: "hsl(var(--success-foreground))",
+        },
+        warning: {
+          DEFAULT: "hsl(var(--warning))",
+          foreground: "hsl(var(--warning-foreground))",
         },
         destructive: {
           DEFAULT: "hsl(var(--destructive))",
@@ -75,10 +86,30 @@ const config: Config = {
         sm: "calc(var(--radius) - 4px)",
       },
       boxShadow: {
-        // Subtle, layered card shadow — softer than default Tailwind
-        card: "0 1px 2px 0 hsl(240 8% 12% / 0.04), 0 1px 1px 0 hsl(240 8% 12% / 0.03)",
+        // Layered shadow system — picks the cool-blue ink colour so
+        // shadows feel related to the palette rather than picked
+        // independently from `black`. All four tiers compose into
+        // each other (a hover state often goes `card` → `card-hover`,
+        // popovers go `card` → `elevated`).
+        card: "0 1px 2px 0 hsl(217 32% 12% / 0.05), 0 1px 1px 0 hsl(217 32% 12% / 0.03)",
         "card-hover":
-          "0 6px 24px -8px hsl(240 8% 12% / 0.10), 0 2px 6px -2px hsl(240 8% 12% / 0.04)",
+          "0 8px 28px -10px hsl(217 32% 12% / 0.12), 0 2px 6px -2px hsl(217 32% 12% / 0.05)",
+        elevated:
+          "0 16px 48px -16px hsl(217 32% 12% / 0.18), 0 4px 12px -4px hsl(217 32% 12% / 0.08)",
+        "primary-glow":
+          "0 0 0 1px hsl(var(--primary) / 0.15), 0 8px 24px -12px hsl(var(--primary) / 0.35)",
+      },
+      transitionTimingFunction: {
+        // Shared easings, mirrored from the CSS variables in
+        // `globals.css` so motion in JS-driven animations and
+        // CSS-driven transitions reads the same way.
+        "out-expo": "cubic-bezier(0.22, 1, 0.36, 1)",
+        spring: "cubic-bezier(0.34, 1.56, 0.64, 1)",
+      },
+      transitionDuration: {
+        fast: "150ms",
+        base: "220ms",
+        slow: "420ms",
       },
       keyframes: {
         "fade-in": {

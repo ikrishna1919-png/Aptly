@@ -7,7 +7,11 @@ const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElemen
     <div
       ref={ref}
       className={cn(
-        "rounded-lg border border-border/80 bg-card text-card-foreground shadow-card",
+        "rounded-xl border border-border/70 bg-card text-card-foreground shadow-card",
+        // Subtle transition so any `hover:shadow-card-hover` callers
+        // animate cleanly. Doesn't add motion on its own — just sets
+        // up the channel for callers that opt in.
+        "transition-shadow duration-base",
         className,
       )}
       {...props}

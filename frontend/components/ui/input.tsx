@@ -10,7 +10,16 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
       type={type}
       ref={ref}
       className={cn(
-        "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50",
+        // Surface + sizing
+        "flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm",
+        // Motion — colour AND box-shadow tween together so the focus
+        // ring fades in instead of popping.
+        "shadow-sm transition-[color,box-shadow,border-color] duration-base ease-out-expo",
+        // Placeholder + states
+        "placeholder:text-muted-foreground",
+        "hover:border-primary/30",
+        "focus-visible:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        "disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}
       {...props}
