@@ -18,21 +18,24 @@ def create_app() -> FastAPI:
     # SessionMiddleware must wrap the request before any handler that
     # touches `request.session`.
     #
-    # Cookie attrs are environment-dependent:
-    #   * Production: SameSite=None + Secure=True. The Vercel
-    #     frontend and the Render backend are on different origins,
-    #     so the session cookie must be sent on cross-site fetches —
-    #     `Lax` silently drops the cookie on the cross-origin AJAX
-    #     call from the frontend's auth bootstrap, leaving the user
-    #     looking permanently signed out. `None` requires `Secure`,
-    #     which is fine on HTTPS.
-    #   * Local dev: SameSite=Lax + Secure=False so `next dev` over
-    #     plain HTTP at `http://localhost:3000` works. Cookies with
-    #     `Secure` won't ride on http:// hops; cookies with
-    #     `SameSite=none` REQUIRE Secure, so lax is the only option
-    #     that survives the localhost flow.
+    # Cookie attrs are environment-dependent, but the dimension that
+    # USED to matter (cross-origin vs. same-origin) is now gone:
+    # the frontend proxies every browser → backend call through its
+    # own origin via Next.js rewrites (see `frontend/next.config.mjs`).
+    # That makes the session cookie FIRST-PARTY for the user-facing
+    # origin, so `SameSite=Lax` is correct everywhere — and it's the
+    # right choice because:
+    #
+    #   * `Lax` survives Safari's Intelligent Tracking Prevention
+    #     and Chrome / Firefox incognito (which all block third-
+    #     party cookies that `SameSite=None` would require).
+    #   * `None` is no longer needed: the cookie isn't crossing
+    #     origins from the browser's perspective.
+    #
+    # The `Secure` flag still tracks the environment — HTTPS in
+    # production, plain HTTP for local `next dev`.
     is_dev = settings.environment == "development"
-    same_site = "lax" if is_dev else "none"
+    same_site = "lax"
     https_only = not is_dev
     app.add_middleware(
         SessionMiddleware,

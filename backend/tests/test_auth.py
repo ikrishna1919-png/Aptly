@@ -325,23 +325,23 @@ def test_build_frontend_url_rejects_absolute_next_path():
     assert _build_frontend_url(settings, "//evil.com/steal") == "https://aptly-buvg.vercel.app/"
 
 
-# ── Cross-origin session cookie attributes ─────────────────────────────────
+# ── Same-origin session cookie attributes ─────────────────────────────────
 
 
-def test_session_cookie_uses_samesite_none_in_production():
-    """Cross-origin auth between Vercel (frontend) and Render
-    (backend) requires SameSite=None + Secure. `Lax` silently
-    drops the cookie on the cross-site /api/auth/me fetch the
-    frontend bootstraps with, leaving the user looking
-    permanently signed out."""
+def test_session_cookie_uses_samesite_lax_in_production():
+    """The browser → backend call is now SAME-ORIGIN via the
+    frontend's Next.js rewrite proxy (see `frontend/next.config.mjs`).
+    With first-party cookies, `SameSite=Lax` is the right choice:
+    survives Safari ITP and Chrome/Firefox incognito (which both
+    block the third-party cookies that the old `SameSite=None`
+    required). `Secure` is still on in production because the
+    proxied request rides HTTPS."""
     import os
 
     from starlette.middleware.sessions import SessionMiddleware
 
     from app.main import create_app
 
-    # Snapshot + override the environment so the app factory sees
-    # `production`.
     prev_env = os.environ.get("ENVIRONMENT")
     os.environ["ENVIRONMENT"] = "production"
     try:
@@ -354,7 +354,7 @@ def test_session_cookie_uses_samesite_none_in_production():
         # `app.user_middleware`.
         session_mw = next(m for m in app.user_middleware if m.cls is SessionMiddleware)
         kwargs = session_mw.kwargs
-        assert kwargs.get("same_site") == "none"
+        assert kwargs.get("same_site") == "lax"
         assert kwargs.get("https_only") is True
     finally:
         if prev_env is None:
