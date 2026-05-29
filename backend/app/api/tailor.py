@@ -153,6 +153,8 @@ class TailorRunOut(BaseModel):
     run_id: str
     status: str
     demo_mode: bool
+    # True when this result was served from the 7-day cache (no model call).
+    cached: bool = False
     analysis: Analysis | None = None
     # The tailored resume — partial while status == generating, final on done.
     resume: TailoredResume | None = None
@@ -206,10 +208,17 @@ def _run_to_out(run: TailorRun, *, demo_mode: bool) -> TailorRunOut:
             resume = TailoredResume.model_validate(run.result_json)
         except Exception:  # noqa: BLE001
             resume = None
+    # A cache hit is a `done` row with a result but no analysis payload —
+    # `start_tailor_run` copies the prior resume in without ever running the
+    # analyze step that would populate `missing_skills_json`.
+    cached = (
+        run.status == "done" and run.result_json is not None and run.missing_skills_json is None
+    )
     return TailorRunOut(
         run_id=run.run_id,
         status=run.status,
         demo_mode=demo_mode,
+        cached=cached,
         analysis=analysis,
         resume=resume,
         error=run.error_text,

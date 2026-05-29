@@ -37,6 +37,10 @@ class TailorRun(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
     run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    # Result-cache key: SHA-256 over (prompt version + candidate fingerprint +
+    # normalized JD). A repeat request with the same key reuses a recent `done`
+    # run's resume instead of calling Anthropic again. Null on legacy rows.
+    cache_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Job tailored against. Nullable so a future pasted-JD path fits.
     job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Snapshot of the JD text sent to the model (for triage).

@@ -834,6 +834,8 @@ export type TailorRunState = {
   run_id: string;
   status: TailorRunStatus;
   demo_mode: boolean;
+  /** True when this result was served from the 7-day cache (no model call). */
+  cached: boolean;
   /** The gap analysis (questions etc.) — present from `pending_questions` on. */
   analysis: Analysis | null;
   /** The tailored resume — PARTIAL while `generating`, final on `done`. */
