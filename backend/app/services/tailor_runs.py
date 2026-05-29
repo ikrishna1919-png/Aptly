@@ -152,6 +152,7 @@ def start_tailor_run(
     settings = settings or get_settings()
     run_id = uuid.uuid4().hex
     jd_text = strip_html(job.description or "")[:6000] or None
+    t0 = time.perf_counter()
     with SessionLocal() as db:
         db.add(
             TailorRun(
@@ -163,6 +164,11 @@ def start_tailor_run(
             )
         )
         db.commit()
+    log.info(
+        "tailor_run=%s: tailor.db_write (create row) %.0fms — spawning analyze worker",
+        run_id,
+        (time.perf_counter() - t0) * 1000,
+    )
     _launch_worker(_execute_analyze, (run_id, settings))
     return run_id
 
@@ -205,7 +211,8 @@ def _execute_analyze(run_id: str, settings: Settings | None = None) -> None:
     and either pause for answers or auto-skip straight into generation."""
     settings = settings or get_settings()
     tag = f"tailor_run={run_id}"
-    log.info("%s: analyze worker started", tag)
+    t_start = time.perf_counter()
+    log.info("%s: tailor.received step=analyze t=0", tag)
     terminal_or_handed_off = False
     try:
         with SessionLocal() as db:
@@ -221,7 +228,14 @@ def _execute_analyze(run_id: str, settings: Settings | None = None) -> None:
                 _finish(run_id, status=TAILOR_STATUS_ERROR, error_text="Job not found.")
                 terminal_or_handed_off = True
                 return
+            t_an = time.perf_counter()
             analysis = analyze_job(db, job, user_id=user_id, settings=settings)
+            log.info(
+                "%s: tailor.analyze_done %.0fms (worker_elapsed=%.0fms)",
+                tag,
+                (time.perf_counter() - t_an) * 1000,
+                (time.perf_counter() - t_start) * 1000,
+            )
 
         missing = analysis.model_dump(mode="json")
         if analysis.questions:
@@ -270,7 +284,8 @@ def _execute_generate(run_id: str, settings: Settings | None = None) -> None:
     terminal status."""
     settings = settings or get_settings()
     tag = f"tailor_run={run_id}"
-    log.info("%s: generate worker started", tag)
+    t_start = time.perf_counter()
+    log.info("%s: tailor.received step=generate t=0", tag)
     deadline = time.monotonic() + _GENERATE_HARD_TIMEOUT_SECONDS
     terminal_written = False
     try:
@@ -292,6 +307,7 @@ def _execute_generate(run_id: str, settings: Settings | None = None) -> None:
             def _on_partial(gen: GeneratedResume) -> None:
                 _write_partial(run_id, gen)
 
+            t_gen = time.perf_counter()
             resume = generate_resume(
                 db,
                 job,
@@ -301,13 +317,25 @@ def _execute_generate(run_id: str, settings: Settings | None = None) -> None:
                 stream_cb=_on_partial,
                 deadline=deadline,
             )
+            log.info(
+                "%s: tailor.generate_done %.0fms (worker_elapsed=%.0fms)",
+                tag,
+                (time.perf_counter() - t_gen) * 1000,
+                (time.perf_counter() - t_start) * 1000,
+            )
+        t_w = time.perf_counter()
         _finish(
             run_id,
             status=TAILOR_STATUS_DONE,
             result_json=resume.model_dump(mode="json"),
         )
         terminal_written = True
-        log.info("%s: terminal status=done written", tag)
+        log.info(
+            "%s: tailor.db_write_end status=done %.0fms (worker_total=%.0fms)",
+            tag,
+            (time.perf_counter() - t_w) * 1000,
+            (time.perf_counter() - t_start) * 1000,
+        )
     except TimeoutError:
         log.warning("%s: generation exceeded the %.0fs cap", tag, _GENERATE_HARD_TIMEOUT_SECONDS)
         try:

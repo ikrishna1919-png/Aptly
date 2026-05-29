@@ -57,7 +57,12 @@ _MAX_QUESTIONS = 6
 # is the wall-clock ceiling: a generation that blows past it is abandoned and
 # the run is marked error (the partial content is preserved) rather than
 # leaving the user waiting forever.
-_STREAM_SNAPSHOT_INTERVAL_SECONDS = 1.0
+# Snapshot cadence: how often the streaming generator persists a partial
+# resume. Tightened from 1.0s → 0.4s (PR: tailor latency) so the polling UI
+# reveals streamed sections sooner — the dominant lever on *perceived* speed,
+# since the run-based design surfaces progress via DB snapshots + polling
+# rather than a live socket.
+_STREAM_SNAPSHOT_INTERVAL_SECONDS = 0.4
 _GENERATE_HARD_TIMEOUT_SECONDS = 90.0
 
 if TYPE_CHECKING:
@@ -66,6 +71,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
+# The analyze step is keyword extraction + gap classification, not polished
+# prose — a smaller, ~2-3x faster model handles it well at a fraction of the
+# cost and latency. Generation stays on Sonnet (quality of the written resume
+# matters). This trims one of the two sequential LLM legs on the critical path.
+ANALYZE_MODEL = "claude-haiku-4-5-20251001"
 
 
 # ─── Output schemas ──────────────────────────────────────────────────────────
@@ -786,6 +796,26 @@ def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
     return Anthropic(api_key=settings.anthropic_api_key)
 
 
+def _usage_str(response_or_message: Any) -> str:
+    """Format the token usage off a Messages response/final-message for the
+    timing logs. Includes cache read/write when present (the candidate block
+    is cached, so a warm call should show cache_read > 0)."""
+    u = getattr(response_or_message, "usage", None)
+    if u is None:
+        return "usage=unavailable"
+    parts = [
+        f"in={getattr(u, 'input_tokens', '?')}",
+        f"out={getattr(u, 'output_tokens', '?')}",
+    ]
+    cr = getattr(u, "cache_read_input_tokens", None)
+    cw = getattr(u, "cache_creation_input_tokens", None)
+    if cr is not None:
+        parts.append(f"cache_read={cr}")
+    if cw is not None:
+        parts.append(f"cache_write={cw}")
+    return " ".join(parts)
+
+
 def _llm_analyze(
     job: Job,
     candidate: dict[str, Any],
@@ -794,8 +824,9 @@ def _llm_analyze(
     settings: Settings,
 ) -> Analysis:
     api = _build_client(settings, client)
+    t0 = time.perf_counter()
     response = api.messages.create(
-        model=MODEL,
+        model=ANALYZE_MODEL,
         max_tokens=1500,
         system=[
             {"type": "text", "text": _SYSTEM_ANALYZE},
@@ -816,6 +847,12 @@ def _llm_analyze(
         ],
         output_config={"format": {"type": "json_schema", "schema": ANALYSIS_SCHEMA}},
     )
+    log.info(
+        "tailor.anthropic_total step=analyze model=%s %.0fms %s",
+        ANALYZE_MODEL,
+        (time.perf_counter() - t0) * 1000,
+        _usage_str(response),
+    )
     text = _first_text(response)
     return Analysis.model_validate_json(text)
 
@@ -831,6 +868,7 @@ def _llm_generate(
 ) -> GeneratedResume:
     api = _build_client(settings, client)
     user_content = _generate_user_content(job, answers, addendum)
+    t0 = time.perf_counter()
     response = api.messages.create(
         model=MODEL,
         max_tokens=4000,
@@ -849,6 +887,12 @@ def _llm_generate(
                 "schema": GENERATED_RESUME_SCHEMA,
             }
         },
+    )
+    log.info(
+        "tailor.anthropic_total step=generate(sync) model=%s %.0fms %s",
+        MODEL,
+        (time.perf_counter() - t0) * 1000,
+        _usage_str(response),
     )
     text = _first_text(response)
     return GeneratedResume.model_validate_json(text)
@@ -986,8 +1030,13 @@ def _llm_generate_streaming(
 
     chunks: list[str] = []
     last_emit = 0.0
+    t0 = time.perf_counter()
+    ttft: float | None = None
     with api.messages.stream(**kwargs) as stream:
         for delta in stream.text_stream:
+            if ttft is None:
+                ttft = time.perf_counter() - t0
+                log.info("tailor.anthropic_ttft step=generate model=%s %.0fms", MODEL, ttft * 1000)
             chunks.append(delta)
             now = time.monotonic()
             if deadline is not None and now > deadline:
@@ -1000,9 +1049,17 @@ def _llm_generate_streaming(
                         on_partial(GeneratedResume.model_validate(partial))
                     except Exception:  # noqa: BLE001 — a bad snapshot is non-fatal
                         pass
+        final = stream.get_final_message()
         text = "".join(chunks)
         if not text.strip():
-            text = _first_text(stream.get_final_message())
+            text = _first_text(final)
+    log.info(
+        "tailor.anthropic_total step=generate model=%s %.0fms ttft=%.0fms %s",
+        MODEL,
+        (time.perf_counter() - t0) * 1000,
+        (ttft or 0.0) * 1000,
+        _usage_str(final),
+    )
     return GeneratedResume.model_validate_json(text)
 
 

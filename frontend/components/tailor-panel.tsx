@@ -73,12 +73,28 @@ export function TailorPanel({ job }: { job: Job }) {
   const [original, setOriginal] = useState<TailoredResume | null>(null);
 
   const startedAtRef = useRef<number>(0);
+  // ── Latency instrumentation ──────────────────────────────────────────────
+  // Marks are relative to the click (t=0) and logged to the console so the
+  // end-to-end timeline (click → run_id → first byte → first visible char →
+  // complete) can be read off without a profiler. Cheap; ~6 logs per run.
+  const timeOriginRef = useRef<number>(0);
+  const markedRef = useRef<Set<string>>(new Set());
+  const mark = useCallback((label: string) => {
+    if (markedRef.current.has(label)) return;
+    markedRef.current.add(label);
+    const dt = Math.round(performance.now() - timeOriginRef.current);
+    // eslint-disable-next-line no-console
+    console.log(`[tailor-timing] ${label} +${dt}ms`);
+  }, []);
 
   const status: TailorRunStatus | "idle" = run?.status ?? (runId ? "analyzing" : "idle");
   const demoMode = run?.demo_mode ?? false;
 
   const begin = useCallback(
     async (force: boolean) => {
+      timeOriginRef.current = performance.now();
+      markedRef.current = new Set();
+      mark("ui.click");
       setStarting(true);
       setError(null);
       setThin(null);
@@ -87,6 +103,7 @@ export function TailorPanel({ job }: { job: Job }) {
       setOriginal(null);
       try {
         const { run_id } = await startTailor(job.id, force);
+        mark("ui.post_sent (run_id received)");
         startedAtRef.current = Date.now();
         setRunId(run_id);
       } catch (e) {
@@ -96,8 +113,19 @@ export function TailorPanel({ job }: { job: Job }) {
         setStarting(false);
       }
     },
-    [job.id],
+    [job.id, mark],
   );
+
+  // Emit timing marks as the run advances through its lifecycle.
+  useEffect(() => {
+    if (!run) return;
+    mark("ui.first_byte (first poll response)");
+    if (run.status === "pending_questions" && run.analysis) mark("ui.questions_shown");
+    if (run.status === "generating" && run.resume?.summary) {
+      mark("ui.first_render (first streamed section)");
+    }
+    if (run.status === "done") mark("ui.complete (form populated)");
+  }, [run, mark]);
 
   // Poll the run while it's actively working. Re-runs after each poll (state
   // change) until the status is terminal (done/error) or waiting on the user
@@ -162,6 +190,7 @@ export function TailorPanel({ job }: { job: Job }) {
     }
     try {
       await submitTailorAnswers(runId, payload);
+      mark("ui.answers_submitted (generate leg starts)");
       startedAtRef.current = Date.now();
       // Optimistically flip to generating so the poller resumes.
       setRun((prev) => (prev ? { ...prev, status: "generating", resume: null } : prev));
