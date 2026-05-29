@@ -48,6 +48,7 @@ from app.models.tailor_run import (
     TAILOR_STATUS_PENDING_QUESTIONS,
     TailorRun,
 )
+from app.services.demo_candidate import get_candidate
 from app.services.tailor import (
     _GENERATE_HARD_TIMEOUT_SECONDS,
     Analysis,
@@ -55,6 +56,7 @@ from app.services.tailor import (
     ResumeMeta,
     TailoredResume,
     analyze_job,
+    cache_key_for,
     generate_resume,
 )
 from app.sources._text import strip_html
@@ -66,6 +68,11 @@ log = logging.getLogger(__name__)
 # is killed). The startup sweep reaps these. Generation is hard-capped at 90s,
 # so 10 minutes is comfortably past any legitimate in-flight run.
 _ORPHAN_AFTER = timedelta(minutes=10)
+
+# How long a cached tailor result stays fresh. A repeat of the same JD with
+# the same profile inside this window is served from the prior run — no model
+# call — so it returns in well under a second.
+_CACHE_TTL = timedelta(days=7)
 
 
 def _launch_worker(target: Any, args: tuple) -> None:
@@ -153,17 +160,49 @@ def start_tailor_run(
     run_id = uuid.uuid4().hex
     jd_text = strip_html(job.description or "")[:6000] or None
     t0 = time.perf_counter()
+    cached_result: dict[str, Any] | None = None
     with SessionLocal() as db:
+        candidate = get_candidate(db, user_id=user_id)
+        cache_key = cache_key_for(candidate, job)
+        # 7-day per-user result cache: identical profile + JD + prompt version
+        # reuses a prior `done` run's resume with no Anthropic call.
+        cutoff = datetime.now(UTC) - _CACHE_TTL
+        prior = (
+            db.execute(
+                select(TailorRun)
+                .where(
+                    TailorRun.user_id == user_id,
+                    TailorRun.cache_key == cache_key,
+                    TailorRun.status == TAILOR_STATUS_DONE,
+                    TailorRun.result_json.isnot(None),
+                    TailorRun.started_at >= cutoff,
+                )
+                .order_by(TailorRun.started_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+        cached_result = prior.result_json if prior is not None else None
         db.add(
             TailorRun(
                 run_id=run_id,
                 user_id=user_id,
                 job_id=job.id,
                 jd_text=jd_text,
-                status=TAILOR_STATUS_ANALYZING,
+                cache_key=cache_key,
+                status=TAILOR_STATUS_DONE if cached_result is not None else TAILOR_STATUS_ANALYZING,
+                result_json=cached_result,
+                finished_at=datetime.now(UTC) if cached_result is not None else None,
             )
         )
         db.commit()
+    if cached_result is not None:
+        log.info(
+            "tailor_run=%s: tailor.cache_hit %.0fms — returning prior result, no model call",
+            run_id,
+            (time.perf_counter() - t0) * 1000,
+        )
+        return run_id
     log.info(
         "tailor_run=%s: tailor.db_write (create row) %.0fms — spawning analyze worker",
         run_id,

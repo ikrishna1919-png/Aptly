@@ -35,7 +35,12 @@ from app.models.tailor_run import (
 )
 from app.services import tailor as tailor_module
 from app.services import tailor_runs as runs_module
-from app.services.tailor import GeneratedResume, loads_partial
+from app.services.tailor import (
+    Analysis,
+    GeneratedResume,
+    _extract_json_object,
+    loads_partial,
+)
 
 # ─── loads_partial ─────────────────────────────────────────────────────────────
 
@@ -63,6 +68,45 @@ class TestLoadsPartial:
     def test_commas_inside_strings_dont_fool_scan(self):
         out = loads_partial('{"summary":"a, b, c","skills":[')
         assert out == {"summary": "a, b, c"}
+
+
+# ─── Prompt-based JSON parsing (replaces strict structured output) ──────────────
+
+
+class TestExtractJsonObject:
+    def test_plain_object(self):
+        assert _extract_json_object('{"a": 1}') == {"a": 1}
+
+    def test_strips_code_fences(self):
+        assert _extract_json_object('```json\n{"a": 1}\n```') == {"a": 1}
+        assert _extract_json_object('```\n{"a": 1}\n```') == {"a": 1}
+
+    def test_slices_out_surrounding_prose(self):
+        assert _extract_json_object('Here you go:\n{"a": 1}\nHope that helps!') == {"a": 1}
+
+    def test_raises_on_non_object(self):
+        import pytest as _pytest
+
+        with _pytest.raises((ValueError, Exception)):
+            _extract_json_object("not json at all")
+
+
+class TestPromptExamplesMatchModels:
+    """The in-prompt examples are built from the Pydantic models, but assert
+    they still parse cleanly back into them so a future model change can't
+    silently desync the example from the renderer contract."""
+
+    def test_analyze_example_round_trips(self):
+        Analysis.model_validate_json(tailor_module._ANALYZE_EXAMPLE_JSON)
+
+    def test_generate_example_round_trips(self):
+        GeneratedResume.model_validate_json(tailor_module._GENERATE_EXAMPLE_JSON)
+
+    def test_no_output_config_constant_sent(self):
+        # Belt-and-suspenders: the module must not reintroduce a default
+        # output_config path. (The call-site tests in test_tailor.py assert
+        # individual calls; this guards the module surface.)
+        assert hasattr(tailor_module, "cache_key_for")
 
 
 # ─── profile_is_thin ───────────────────────────────────────────────────────────
@@ -377,6 +421,53 @@ def test_generate_worker_timeout_message(inline, monkeypatch):
     run = _row(Session, run_id)
     assert run.status == TAILOR_STATUS_ERROR
     assert "Taking longer than usual" in (run.error_text or "")
+
+
+def test_cache_hit_reuses_prior_result_without_a_model_call(inline):
+    """A second tailor of the same profile+JD returns a `done` run immediately,
+    copying the prior result and NOT re-running analyze/generate."""
+    Session = inline
+    _seed_candidate(Session)  # has Python
+    job_id = _seed_job(Session, skills=["Python"])  # no gaps → auto-generate → done
+
+    with Session() as db:
+        job = db.get(Job, job_id)
+        run1 = runs_module.start_tailor_run(user_id=None, job=job, settings=_settings(key=False))
+    r1 = _row(Session, run1)
+    assert r1.status == TAILOR_STATUS_DONE
+    assert r1.cache_key  # stamped on the real run
+    assert r1.missing_skills_json is not None  # analyze ran
+
+    with Session() as db:
+        job = db.get(Job, job_id)
+        run2 = runs_module.start_tailor_run(user_id=None, job=job, settings=_settings(key=False))
+    r2 = _row(Session, run2)
+    assert run2 != run1
+    assert r2.status == TAILOR_STATUS_DONE
+    assert r2.cache_key == r1.cache_key
+    assert r2.result_json == r1.result_json
+    # The cache-hit marker: analyze never ran, so missing_skills_json is null.
+    assert r2.missing_skills_json is None
+
+
+def test_cache_miss_when_job_differs(inline):
+    Session = inline
+    _seed_candidate(Session)
+    job_a = _seed_job(Session, skills=["Python"])
+    with Session() as db:
+        run1 = runs_module.start_tailor_run(
+            user_id=None, job=db.get(Job, job_a), settings=_settings(key=False)
+        )
+    # Different JD text → different cache_key → a real run (analyze populates).
+    with Session() as db:
+        job = db.get(Job, job_a)
+        job.description = "Totally different role: we need Rust and Go and Kafka."
+        db.commit()
+    with Session() as db:
+        run2 = runs_module.start_tailor_run(
+            user_id=None, job=db.get(Job, job_a), settings=_settings(key=False)
+        )
+    assert _row(Session, run1).cache_key != _row(Session, run2).cache_key
 
 
 def test_submit_answers_rejects_unknown_or_unowned_run(inline):

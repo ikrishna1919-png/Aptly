@@ -89,6 +89,13 @@ export function TailorPanel({ job }: { job: Job }) {
 
   const status: TailorRunStatus | "idle" = run?.status ?? (runId ? "analyzing" : "idle");
   const demoMode = run?.demo_mode ?? false;
+  // Once any section has streamed in, the content itself is the progress
+  // indicator — we drop the spinner (honest UI: don't fake "Generating…"
+  // over visible output).
+  const hasStreamedContent = !!(
+    run?.resume &&
+    (run.resume.summary || run.resume.skills?.length || run.resume.experience?.length)
+  );
 
   const begin = useCallback(
     async (force: boolean) => {
@@ -300,22 +307,31 @@ export function TailorPanel({ job }: { job: Job }) {
             </motion.div>
           )}
 
-          {/* Generating — progressive reveal */}
+          {/* Generating — the streamed content IS the progress indicator. The
+              spinner/hint shows ONLY until the first section lands; after that
+              we just render the resume as it fills in. */}
           {status === "generating" && (
             <motion.div key="generating" {...slide}>
-              <WorkingState
-                title="Tailoring your resume…"
-                subtitle="Writing each section from your confirmed experience. This can take up to a minute."
-              />
-              <div className="mt-4">
+              {hasStreamedContent ? (
                 <ProgressReveal resume={run?.resume ?? null} />
-              </div>
+              ) : (
+                <WorkingState
+                  title="Tailoring your resume…"
+                  subtitle="Writing each section from your confirmed experience."
+                />
+              )}
             </motion.div>
           )}
 
           {/* Ready — editable preview */}
           {status === "done" && draft && (
             <motion.div key="ready" {...slide} className="space-y-4">
+              {run?.cached && (
+                <p className="rounded-md border border-primary/15 bg-primary-soft/40 px-3 py-2 text-xs text-muted-foreground">
+                  Loaded your recent version for this job instantly. Edit it below and
+                  download — your changes are kept.
+                </p>
+              )}
               {run?.resume && <MatchedKeywords matched={run.resume.ats.matched_keywords} />}
               <EditableResume value={draft} onChange={setDraft} />
               <Separator />

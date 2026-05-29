@@ -330,15 +330,13 @@ def test_analyze_uses_anthropic_when_key_present(factories, settings_with_key, m
         isinstance(b, dict) and b.get("cache_control", {}).get("type") == "ephemeral"
         for b in call["system"]
     )
-    # The schema sent to Anthropic must be Anthropic-accepted: every object
-    # strict AND no unsupported numeric/string/array range constraints.
-    schema = call["output_config"]["format"]["schema"]
-    _assert_schema_accepted_by_anthropic(schema)
-    # The schema sent to Anthropic must have additionalProperties:false on
-    # every object — otherwise the API 400s with
-    # "For 'object' type, 'additionalProperties' must be explicitly set to false".
-    schema = call["output_config"]["format"]["schema"]
-    assert _every_object_has_additional_properties_false(schema)
+    # Prompt-based JSON, NOT grammar-constrained structured output — sending a
+    # json_schema via output_config is what 400'd with "Grammar compilation
+    # timed out". So: no output_config, and the JSON contract lives in the
+    # system prompt instead.
+    assert "output_config" not in call
+    static = call["system"][0]["text"]
+    assert "OUTPUT FORMAT" in static and "ONLY" in static
 
 
 def test_analyze_cache_hits_avoid_second_llm_call(factories, settings_with_key, monkeypatch):
@@ -422,10 +420,11 @@ def test_generate_uses_anthropic_when_key_present(factories, settings_with_key, 
     # The single generation call (the small payload renders to 1 page, so no
     # tighten-retry fires).
     assert len(mock.calls) == 1
-    # Generate must send a strict schema — TailoredResume nests several
-    # object types, so this exercises the recursive walk into $defs / items.
-    schema = mock.calls[0]["output_config"]["format"]["schema"]
-    _assert_schema_accepted_by_anthropic(schema)
+    # Prompt-based JSON: no grammar-constrained structured output (that 400'd
+    # on this nested schema). The JSON contract is in the system prompt.
+    assert "output_config" not in mock.calls[0]
+    static = mock.calls[0]["system"][0]["text"]
+    assert "OUTPUT FORMAT" in static
 
 
 # ── JSON-schema strictness regression tests ─────────────────────────────────

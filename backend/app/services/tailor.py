@@ -245,6 +245,162 @@ GENERATED_RESUME_SCHEMA: dict[str, Any] = prepare_schema(GeneratedResume)
 TAILORED_RESUME_SCHEMA: dict[str, Any] = GENERATED_RESUME_SCHEMA
 
 
+# ─── Prompt-based JSON (NOT grammar-constrained structured output) ──────────────
+#
+# We deliberately do NOT use Anthropic's `output_config` / json_schema
+# structured output here. On a schema as nested as `GeneratedResume` it makes
+# the API compile a decoding grammar, which on the complex resume schema was
+# timing out with HTTP 400 "Grammar compilation timed out" — failing the
+# flagship feature outright AND adding latency even when it succeeded.
+#
+# Instead we ask the model for JSON in the prompt (with a concrete example +
+# strict "JSON only" rules), then parse it ourselves and retry once on a
+# syntax error. Sonnet/Haiku emit clean JSON reliably under these
+# instructions, and `loads_partial` already tolerates the in-flight stream.
+# The JSON SHAPE is unchanged — same keys the PR #58 renderers expect.
+
+# Bump when the prompts/examples change so the result cache (keyed partly on
+# this) invalidates and stale resumes aren't served after a prompt rewrite.
+PROMPT_VERSION = "2026-05-tailor-promptjson-v1"
+
+# Concrete worked examples, BUILT FROM THE PYDANTIC MODELS so they can never
+# drift from the shape the renderers consume (a unit test re-parses them).
+_ANALYZE_EXAMPLE_JSON = json.dumps(
+    Analysis(
+        match_score=78,
+        top_skills=["Python", "Kafka", "AWS", "PostgreSQL"],
+        matched=["Python", "AWS"],
+        gaps=["Kafka"],
+        questions=["Have you used Kafka in a production system?"],
+        genuine_lacks=["10+ years of management experience"],
+    ).model_dump(),
+    indent=2,
+)
+
+_GENERATE_EXAMPLE_JSON = json.dumps(
+    GeneratedResume(
+        contact=Contact(
+            name="Jane Doe",
+            headline="Senior Backend Engineer",
+            location="Austin, TX",
+            email="jane@example.com",
+            phone="555-0100",
+            links=[ContactLink(label="LinkedIn", url="https://linkedin.com/in/janedoe")],
+        ),
+        summary="Backend engineer with 6 years building event-driven services on AWS.",
+        skills=[SkillGroup(category="Languages", items=["Python", "Go"])],
+        experience=[
+            ExperienceEntry(
+                title="Senior Software Engineer",
+                company="Acme Corp",
+                location="Austin, TX",
+                start_date="Jan 2022",
+                end_date="Present",
+                bullets=["Built event-driven Kafka pipelines processing 2M events/day."],
+            )
+        ],
+        education=[
+            EducationEntry(
+                degree="B.S.",
+                field="Computer Science",
+                institution="UT Austin",
+                location="Austin, TX",
+                graduation_date="May 2016",
+            )
+        ],
+        projects=[
+            ProjectEntry(
+                name="OpenLedger",
+                description="Open-source double-entry accounting library.",
+                bullets=["Adopted by 30+ projects."],
+            )
+        ],
+        certifications=[
+            CertificationEntry(name="AWS Solutions Architect", issuer="AWS", date="Mar 2021")
+        ],
+        ats=AtsBlock(
+            matched_keywords=["Python", "AWS"], missing_keywords=["Kafka"], score_estimate=78
+        ),
+    ).model_dump(),
+    indent=2,
+)
+
+_JSON_RULES_HEAD = (
+    "\n\n════════ OUTPUT FORMAT (STRICT) ════════\n"
+    "Return ONLY a single valid JSON object matching the exact structure below. "
+    "Do NOT wrap it in markdown code fences. Do NOT write any commentary, "
+    "explanation, or prose before or after it. The first character of your "
+    "reply MUST be '{' and the last MUST be '}'.\n\n"
+    "The example values below are ILLUSTRATIVE — replace them with the "
+    "candidate's real, tailored content. The keys and nesting must match "
+    "exactly; return an empty array for any section with no content.\n\n"
+    "Example shape:\n"
+)
+
+# Correction turn appended on the single retry when the first reply wouldn't
+# parse as JSON.
+_JSON_FIX = (
+    "Your previous reply was not valid JSON ({error}). Reply again with ONLY the "
+    "corrected JSON object — identical content, fixed syntax, no markdown fences, "
+    "no prose."
+)
+
+
+def _strip_code_fences(s: str) -> str:
+    """Remove a leading ```/```json fence and trailing ``` if the model wrapped
+    its JSON despite the instruction not to."""
+    s = s.strip()
+    if s.startswith("```"):
+        nl = s.find("\n")
+        if nl != -1:
+            s = s[nl + 1 :]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+    return s.strip()
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Parse a JSON object out of a model reply. Tolerates code fences and
+    incidental prose by falling back to the outermost {...} slice. Raises
+    json.JSONDecodeError / ValueError when nothing parseable is found (the
+    caller turns that into a one-shot correction retry)."""
+    s = _strip_code_fences(text)
+    try:
+        obj = json.loads(s)
+    except json.JSONDecodeError:
+        i, j = s.find("{"), s.rfind("}")
+        if i == -1 or j == -1 or j <= i:
+            raise
+        obj = json.loads(s[i : j + 1])
+    if not isinstance(obj, dict):
+        raise ValueError("model returned JSON that is not an object")
+    return obj
+
+
+def cache_key_for(candidate: dict[str, Any], job: Job) -> str:
+    """Stable key for the result cache: prompt version + candidate fingerprint
+    + normalized JD. Same profile + same JD + same prompt → same key, so a
+    repeat tailor can be served from a prior `done` run with no model call.
+    Bumping `PROMPT_VERSION` invalidates every cached result."""
+    basis = "\n".join([PROMPT_VERSION, candidate_fingerprint(candidate), _clean_jd(job)])
+    return hashlib.sha256(basis.encode()).hexdigest()
+
+
+def _compact(value: Any) -> Any:
+    """Recursively drop null / empty fields so we don't waste tokens sending
+    `"phone": null` or empty arrays to the model (FIX: trim prompt size)."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            cv = _compact(v)
+            if cv not in (None, "", [], {}):
+                out[k] = cv
+        return out
+    if isinstance(value, list):
+        return [cv for v in value if (cv := _compact(v)) not in (None, "", [], {})]
+    return value
+
+
 # ─── Defensive sanitization ───────────────────────────────────────────────────
 #
 # The prompt forbids en/em dashes, decorative bullets, and smart quotes, but
@@ -703,13 +859,21 @@ _TIGHTEN_ADDENDUM = (
     "Tighten it to fit 2 pages: shorten wordy bullets, keep 3-4 bullets on "
     "recent roles and 2-3 on older ones, and trim the oldest, least-relevant "
     "roles' detail first. Do NOT remove the most recent role and do NOT "
-    "invent anything. Same JSON schema."
+    "invent anything. Same JSON shape."
 )
+
+# Full system texts = the rules above + the strict JSON-output contract + a
+# concrete example. These are STATIC, so they sit in a cache_control block and
+# Anthropic reuses the prefix across calls within the cache window.
+_SYSTEM_ANALYZE_JSON = _SYSTEM_ANALYZE + _JSON_RULES_HEAD + _ANALYZE_EXAMPLE_JSON
+_SYSTEM_GENERATE_JSON = _SYSTEM_GENERATE + _JSON_RULES_HEAD + _GENERATE_EXAMPLE_JSON
 
 
 def _candidate_block(candidate: dict[str, Any]) -> str:
+    # Compact away null / empty fields so the model isn't paying for
+    # `"phone": ""` or empty section arrays (FIX: trim prompt size).
     return "CANDIDATE PROFILE (do not modify these facts):\n" + json.dumps(
-        candidate, indent=2, sort_keys=True
+        _compact(candidate), indent=2, sort_keys=True
     )
 
 
@@ -744,6 +908,10 @@ def _clean_jd(job: Job) -> str:
     """
     raw = job.description or ""
     cleaned = strip_html(raw)
+    # Collapse runs of spaces/tabs and 3+ newlines (JDs are full of layout
+    # whitespace) — fewer tokens, no signal lost (FIX: trim prompt size).
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if not cleaned:
         return "(no description provided)"
     if len(cleaned) > _MAX_JD_CHARS:
@@ -782,8 +950,9 @@ def _generate_user_content(job: Job, answers: dict[str, str], addendum: str = ""
             "has them:\n- " + "\n- ".join(excluded)
         )
     parts.append(
-        "\n\nReturn the tailored resume as JSON matching the provided schema. "
-        "Never invent facts not present in the candidate profile." + addendum
+        "\n\nReturn ONLY the tailored resume as a single JSON object in the "
+        "structure given in the system prompt. Never invent facts not present "
+        "in the candidate profile." + addendum
     )
     return "".join(parts)
 
@@ -816,6 +985,60 @@ def _usage_str(response_or_message: Any) -> str:
     return " ".join(parts)
 
 
+def _system_blocks(static_text: str, candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """System list with two cache breakpoints: the STATIC rules+example+schema
+    text (reused across all users) and the per-user candidate block (reused
+    across that user's calls). Both ephemeral-cached so a repeat call within
+    the window skips re-processing the whole prefix."""
+    return [
+        {"type": "text", "text": static_text, "cache_control": {"type": "ephemeral"}},
+        {
+            "type": "text",
+            "text": _candidate_block(candidate),
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
+def _create_json(
+    api: Anthropic,
+    *,
+    model: str,
+    max_tokens: int,
+    system: list[dict[str, Any]],
+    user_content: str,
+    label: str,
+) -> dict[str, Any]:
+    """One prompt-based-JSON `create()` call → parsed object.
+
+    Deliberately NO `output_config` / structured output: the grammar
+    compilation it triggers was 400-ing on the resume schema. We ask for JSON
+    in the prompt and parse it here, retrying exactly once with a correction
+    turn on a syntax error. A second failure propagates so the caller records a
+    clean error and the user retries."""
+    messages: list[dict[str, Any]] = [{"role": "user", "content": user_content}]
+    t0 = time.perf_counter()
+    resp = api.messages.create(model=model, max_tokens=max_tokens, system=system, messages=messages)
+    text = _first_text(resp)
+    log.info(
+        "tailor.anthropic_total step=%s model=%s %.0fms %s",
+        label,
+        model,
+        (time.perf_counter() - t0) * 1000,
+        _usage_str(resp),
+    )
+    try:
+        return _extract_json_object(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning("tailor.json_retry step=%s reason=%s", label, e)
+        messages.append({"role": "assistant", "content": text})
+        messages.append({"role": "user", "content": _JSON_FIX.format(error=e)})
+        resp2 = api.messages.create(
+            model=model, max_tokens=max_tokens, system=system, messages=messages
+        )
+        return _extract_json_object(_first_text(resp2))
+
+
 def _llm_analyze(
     job: Job,
     candidate: dict[str, Any],
@@ -824,37 +1047,15 @@ def _llm_analyze(
     settings: Settings,
 ) -> Analysis:
     api = _build_client(settings, client)
-    t0 = time.perf_counter()
-    response = api.messages.create(
+    obj = _create_json(
+        api,
         model=ANALYZE_MODEL,
         max_tokens=1500,
-        system=[
-            {"type": "text", "text": _SYSTEM_ANALYZE},
-            {
-                "type": "text",
-                "text": _candidate_block(candidate),
-                "cache_control": {"type": "ephemeral"},
-            },
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    _job_block(job)
-                    + "\n\nReturn the analysis as JSON matching the provided schema."
-                ),
-            }
-        ],
-        output_config={"format": {"type": "json_schema", "schema": ANALYSIS_SCHEMA}},
+        system=_system_blocks(_SYSTEM_ANALYZE_JSON, candidate),
+        user_content=_job_block(job) + "\n\nReturn ONLY the analysis as a single JSON object.",
+        label="analyze",
     )
-    log.info(
-        "tailor.anthropic_total step=analyze model=%s %.0fms %s",
-        ANALYZE_MODEL,
-        (time.perf_counter() - t0) * 1000,
-        _usage_str(response),
-    )
-    text = _first_text(response)
-    return Analysis.model_validate_json(text)
+    return Analysis.model_validate(obj)
 
 
 def _llm_generate(
@@ -867,35 +1068,15 @@ def _llm_generate(
     addendum: str = "",
 ) -> GeneratedResume:
     api = _build_client(settings, client)
-    user_content = _generate_user_content(job, answers, addendum)
-    t0 = time.perf_counter()
-    response = api.messages.create(
+    obj = _create_json(
+        api,
         model=MODEL,
         max_tokens=4000,
-        system=[
-            {"type": "text", "text": _SYSTEM_GENERATE},
-            {
-                "type": "text",
-                "text": _candidate_block(candidate),
-                "cache_control": {"type": "ephemeral"},
-            },
-        ],
-        messages=[{"role": "user", "content": user_content}],
-        output_config={
-            "format": {
-                "type": "json_schema",
-                "schema": GENERATED_RESUME_SCHEMA,
-            }
-        },
+        system=_system_blocks(_SYSTEM_GENERATE_JSON, candidate),
+        user_content=_generate_user_content(job, answers, addendum),
+        label="generate(sync)",
     )
-    log.info(
-        "tailor.anthropic_total step=generate(sync) model=%s %.0fms %s",
-        MODEL,
-        (time.perf_counter() - t0) * 1000,
-        _usage_str(response),
-    )
-    text = _first_text(response)
-    return GeneratedResume.model_validate_json(text)
+    return GeneratedResume.model_validate(obj)
 
 
 def _first_text(response: Any) -> str:
@@ -999,33 +1180,25 @@ def _llm_generate_streaming(
 ) -> GeneratedResume:
     """Streaming twin of `_llm_generate`.
 
-    Identical prompt + schema; the only difference is transport. We accumulate
-    the streamed JSON text and, at most once per `_STREAM_SNAPSHOT_INTERVAL_
-    SECONDS`, hand a best-effort partial `GeneratedResume` to `on_partial` so
-    the worker can persist a progress snapshot. If the model exceeds
-    `deadline` (monotonic seconds), we raise `TimeoutError` so the worker can
-    record a clean terminal error instead of hanging.
+    Same prompt-based-JSON contract (NO grammar/structured-output — that 400s);
+    the only difference is transport. We accumulate the streamed JSON text and,
+    at most once per `_STREAM_SNAPSHOT_INTERVAL_SECONDS`, hand a best-effort
+    partial `GeneratedResume` to `on_partial` so the worker can persist a
+    progress snapshot. If the model exceeds `deadline` (monotonic seconds), we
+    raise `TimeoutError` so the worker records a clean terminal error.
 
-    Falls back to the final message text when the streamed text deltas are
-    empty (defensive — keeps correctness even if structured output doesn't
-    surface through `text_stream` on some SDK/path), at the cost of progressive
-    reveal in that edge case only.
+    Falls back to the final message text when the streamed deltas are empty
+    (defensive), and on a final JSON syntax error does ONE non-streamed
+    correction retry before giving up.
     """
     api = _build_client(settings, client)
     user_content = _generate_user_content(job, answers, addendum)
+    system = _system_blocks(_SYSTEM_GENERATE_JSON, candidate)
     kwargs: dict[str, Any] = {
         "model": MODEL,
         "max_tokens": 4000,
-        "system": [
-            {"type": "text", "text": _SYSTEM_GENERATE},
-            {
-                "type": "text",
-                "text": _candidate_block(candidate),
-                "cache_control": {"type": "ephemeral"},
-            },
-        ],
+        "system": system,
         "messages": [{"role": "user", "content": user_content}],
-        "output_config": {"format": {"type": "json_schema", "schema": GENERATED_RESUME_SCHEMA}},
     }
 
     chunks: list[str] = []
@@ -1060,7 +1233,22 @@ def _llm_generate_streaming(
         (ttft or 0.0) * 1000,
         _usage_str(final),
     )
-    return GeneratedResume.model_validate_json(text)
+    try:
+        obj = _extract_json_object(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning("tailor.json_retry step=generate(stream) reason=%s", e)
+        retry = api.messages.create(
+            model=MODEL,
+            max_tokens=4000,
+            system=system,
+            messages=[
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": _JSON_FIX.format(error=e)},
+            ],
+        )
+        obj = _extract_json_object(_first_text(retry))
+    return GeneratedResume.model_validate(obj)
 
 
 # ─── Demo-mode (no API key) ──────────────────────────────────────────────────
