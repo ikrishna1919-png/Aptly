@@ -23,6 +23,8 @@ import hashlib
 import json
 import logging
 import re
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
@@ -47,6 +49,16 @@ _TRUNCATION_NOTE = "\n[truncated]"
 # verbose response can't slip past — six questions is the most we'll
 # show regardless of what comes back.
 _MAX_QUESTIONS = 6
+
+# Streaming generation (the run-based flow). The worker streams the model's
+# JSON and writes throttled partial snapshots so the UI can reveal sections
+# as they arrive. `_STREAM_SNAPSHOT_INTERVAL_SECONDS` bounds how often we
+# attempt a (cheap) partial parse + DB write. `_GENERATE_HARD_TIMEOUT_SECONDS`
+# is the wall-clock ceiling: a generation that blows past it is abandoned and
+# the run is marked error (the partial content is preserved) rather than
+# leaving the user waiting forever.
+_STREAM_SNAPSHOT_INTERVAL_SECONDS = 1.0
+_GENERATE_HARD_TIMEOUT_SECONDS = 90.0
 
 if TYPE_CHECKING:
     from anthropic import Anthropic
@@ -477,6 +489,8 @@ def generate_resume(
     user_id: int | None = None,
     settings: Settings | None = None,
     client: Anthropic | None = None,
+    stream_cb: Callable[[GeneratedResume], None] | None = None,
+    deadline: float | None = None,
 ) -> TailoredResume:
     """Produce an ATS-standard resume for `(user, job)`, incorporating the
     user's answers to the tailoring questions. Not cached — answers vary
@@ -486,14 +500,32 @@ def generate_resume(
     reconcile contact from the authoritative profile → enforce the 2-page
     hard cap (one model retry with a tighten addendum, then deterministic
     trimming) → stamp measured `meta.pages_estimate`.
+
+    When `stream_cb` is provided and a real key is configured, the FIRST
+    production streams and hands each best-effort partial `GeneratedResume`
+    to `stream_cb` (the run worker persists these as progress snapshots).
+    The tighten retry is never streamed — it would rewind the UI. `deadline`
+    (monotonic seconds) caps the streamed generation. Callers that omit
+    `stream_cb` get the original synchronous behavior unchanged.
     """
     settings = settings or get_settings()
     candidate = get_candidate(db, user_id=user_id)
     has_key = settings.has_anthropic_key
 
-    def _produce(addendum: str = "") -> TailoredResume:
+    def _produce(addendum: str = "", *, stream: bool = False) -> TailoredResume:
         if not has_key:
             gen = _demo_resume(job, answers, candidate=candidate)
+        elif stream and stream_cb is not None:
+            gen = _llm_generate_streaming(
+                job,
+                answers,
+                candidate,
+                client=client,
+                settings=settings,
+                addendum=addendum,
+                on_partial=stream_cb,
+                deadline=deadline,
+            )
         else:
             gen = _llm_generate(
                 job, answers, candidate, client=client, settings=settings, addendum=addendum
@@ -502,7 +534,7 @@ def generate_resume(
         gen = _reconcile_contact(gen, candidate)
         return TailoredResume(**gen.model_dump(), meta=ResumeMeta(mode="visual"))
 
-    resume = _produce()
+    resume = _produce(stream=stream_cb is not None)
     pages = _measure_pages(resume)
 
     # Over budget: ask the model to tighten ONCE (only when we have a key —
@@ -720,6 +752,32 @@ def _job_block(job: Job) -> str:
     )
 
 
+def _generate_user_content(job: Job, answers: dict[str, str], addendum: str = "") -> str:
+    """Build the GENERATE user message. Beyond the JD + raw answers it appends
+    an explicit EXCLUSION list — the gap questions the user did NOT confirm —
+    so the model is told, in so many words, never to add those skills. The
+    system prompt already treats blank/"no" as unconfirmed; this is
+    belt-and-suspenders for the central no-fabrication rule (and is unit-tested
+    to ensure a declined skill never appears)."""
+    excluded = [q for q, a in answers.items() if not _is_affirmative(a)]
+    parts = [
+        _job_block(job),
+        "\n\nUser answers to tailoring questions (may be partial):\n",
+        json.dumps(answers, indent=2),
+    ]
+    if excluded:
+        parts.append(
+            "\n\nThe user did NOT confirm the skills referenced by these questions. "
+            "NEVER add these skills to the resume and never imply the candidate "
+            "has them:\n- " + "\n- ".join(excluded)
+        )
+    parts.append(
+        "\n\nReturn the tailored resume as JSON matching the provided schema. "
+        "Never invent facts not present in the candidate profile." + addendum
+    )
+    return "".join(parts)
+
+
 def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
     if client is not None:
         return client
@@ -772,13 +830,7 @@ def _llm_generate(
     addendum: str = "",
 ) -> GeneratedResume:
     api = _build_client(settings, client)
-    user_content = (
-        _job_block(job)
-        + "\n\nUser answers to tailoring questions (may be partial):\n"
-        + json.dumps(answers, indent=2)
-        + "\n\nReturn the tailored resume as JSON matching the provided schema. "
-        "Never invent facts not present in the candidate profile." + addendum
-    )
+    user_content = _generate_user_content(job, answers, addendum)
     response = api.messages.create(
         model=MODEL,
         max_tokens=4000,
@@ -808,6 +860,150 @@ def _first_text(response: Any) -> str:
         if getattr(block, "type", None) == "text":
             return block.text
     raise RuntimeError("Anthropic response contained no text block")
+
+
+def loads_partial(text: str) -> dict[str, Any] | None:
+    """Best-effort parse of a partially-streamed JSON object.
+
+    The generate step streams a single JSON object whose top-level keys
+    arrive roughly in schema order (contact, summary, skills, experience,
+    …). To reveal sections as they land we parse the LARGEST prefix of
+    *complete* top-level members and drop the one still in flight — so a
+    section never flickers in half-formed. Strings, nesting, and escapes
+    are tracked so commas/braces inside values don't fool the scan.
+
+    Returns a dict (possibly `{}` when the object has opened but no member
+    is complete yet) or None when nothing usable can be recovered. Never
+    raises — a snapshot we can't parse is simply skipped.
+    """
+    s = text.strip()
+    if not s:
+        return None
+    # Fast path: the buffer is already a complete object.
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:  # noqa: BLE001 — fall through to the lenient path
+        pass
+
+    start = s.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_str = False
+    escape = False
+    top_commas: list[int] = []  # indices of commas between top-level members
+    closed_at: int | None = None
+    for i in range(start, len(s)):
+        ch = s[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_str:
+                escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                closed_at = i
+                break
+        elif ch == "," and depth == 1:
+            top_commas.append(i)
+
+    if closed_at is not None:
+        try:
+            obj = json.loads(s[start : closed_at + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:  # noqa: BLE001
+            pass
+
+    if not top_commas:
+        # Object opened but not a single complete member yet.
+        return {}
+
+    # Close after the last complete member (everything before the final
+    # top-level comma is fully formed). Fall back to fewer members if a
+    # member somehow still won't parse.
+    for comma in reversed(top_commas):
+        try:
+            obj = json.loads(s[start:comma] + "}")
+            return obj if isinstance(obj, dict) else None
+        except Exception:  # noqa: BLE001
+            continue
+    return {}
+
+
+def _llm_generate_streaming(
+    job: Job,
+    answers: dict[str, str],
+    candidate: dict[str, Any],
+    *,
+    client: Anthropic | None,
+    settings: Settings,
+    addendum: str = "",
+    on_partial: Callable[[GeneratedResume], None] | None = None,
+    deadline: float | None = None,
+) -> GeneratedResume:
+    """Streaming twin of `_llm_generate`.
+
+    Identical prompt + schema; the only difference is transport. We accumulate
+    the streamed JSON text and, at most once per `_STREAM_SNAPSHOT_INTERVAL_
+    SECONDS`, hand a best-effort partial `GeneratedResume` to `on_partial` so
+    the worker can persist a progress snapshot. If the model exceeds
+    `deadline` (monotonic seconds), we raise `TimeoutError` so the worker can
+    record a clean terminal error instead of hanging.
+
+    Falls back to the final message text when the streamed text deltas are
+    empty (defensive — keeps correctness even if structured output doesn't
+    surface through `text_stream` on some SDK/path), at the cost of progressive
+    reveal in that edge case only.
+    """
+    api = _build_client(settings, client)
+    user_content = _generate_user_content(job, answers, addendum)
+    kwargs: dict[str, Any] = {
+        "model": MODEL,
+        "max_tokens": 4000,
+        "system": [
+            {"type": "text", "text": _SYSTEM_GENERATE},
+            {
+                "type": "text",
+                "text": _candidate_block(candidate),
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        "messages": [{"role": "user", "content": user_content}],
+        "output_config": {"format": {"type": "json_schema", "schema": GENERATED_RESUME_SCHEMA}},
+    }
+
+    chunks: list[str] = []
+    last_emit = 0.0
+    with api.messages.stream(**kwargs) as stream:
+        for delta in stream.text_stream:
+            chunks.append(delta)
+            now = time.monotonic()
+            if deadline is not None and now > deadline:
+                raise TimeoutError("resume generation exceeded the time budget")
+            if on_partial is not None and (now - last_emit) >= _STREAM_SNAPSHOT_INTERVAL_SECONDS:
+                last_emit = now
+                partial = loads_partial("".join(chunks))
+                if partial:
+                    try:
+                        on_partial(GeneratedResume.model_validate(partial))
+                    except Exception:  # noqa: BLE001 — a bad snapshot is non-fatal
+                        pass
+        text = "".join(chunks)
+        if not text.strip():
+            text = _first_text(stream.get_final_message())
+    return GeneratedResume.model_validate_json(text)
 
 
 # ─── Demo-mode (no API key) ──────────────────────────────────────────────────

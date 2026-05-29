@@ -815,6 +815,103 @@ export async function downloadResume(
   return await res.blob();
 }
 
+// ── Run-based tailoring (background + streaming + polling) ──────────────────
+//
+// The flagship flow. `startTailor` kicks off analysis and returns a run_id in
+// <1s; the caller polls `fetchTailorRun` through the lifecycle
+// (analyzing → pending_questions → generating → done | error). Answers are
+// posted with `submitTailorAnswers`. Downloads reuse `downloadResume` above —
+// it already sends the (possibly user-edited) resume JSON in the body.
+
+export type TailorRunStatus =
+  | "analyzing"
+  | "pending_questions"
+  | "generating"
+  | "done"
+  | "error";
+
+export type TailorRunState = {
+  run_id: string;
+  status: TailorRunStatus;
+  demo_mode: boolean;
+  /** The gap analysis (questions etc.) — present from `pending_questions` on. */
+  analysis: Analysis | null;
+  /** The tailored resume — PARTIAL while `generating`, final on `done`. */
+  resume: TailoredResume | null;
+  error: string | null;
+};
+
+/** Poll cadence + ceiling for a tailor run. Generation is hard-capped at 90s
+ * server-side; 120s of polling gives the worker headroom to write its
+ * terminal row before the client gives up. */
+export const TAILOR_POLL_INTERVAL_MS = 1_500;
+export const TAILOR_MAX_WAIT_MS = 120_000;
+
+/** Thrown by `startTailor` when the profile is too empty to tailor from
+ * (HTTP 409, code="profile_thin"). The UI offers "Go to Profile" vs
+ * "Generate anyway" (which re-calls with force=true). */
+export class ProfileThinError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProfileThinError";
+  }
+}
+
+/** Kick off a tailor run. Returns the run_id to poll. Throws
+ * `ProfileThinError` on the thin-profile gate unless `force` is set. */
+export async function startTailor(
+  jobId: number,
+  force = false,
+): Promise<{ run_id: string }> {
+  const res = await fetch(`${API_URL}/api/tailor/start`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId, force }),
+  });
+  if (res.status === 409) {
+    let message =
+      "Your profile is mostly empty — tailoring works best once you've filled in your experience.";
+    try {
+      const body = await res.json();
+      if (body?.detail?.message) message = body.detail.message as string;
+    } catch {
+      // keep the default message
+    }
+    throw new ProfileThinError(message);
+  }
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as { run_id: string };
+}
+
+/** Fetch the current state of a tailor run. Cheap; safe to poll. */
+export async function fetchTailorRun(runId: string): Promise<TailorRunState> {
+  const res = await fetch(
+    `${API_URL}/api/tailor/runs/${encodeURIComponent(runId)}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return (await res.json()) as TailorRunState;
+}
+
+/** Submit answers to the gap questions and kick off generation. Re-postable
+ * to retry a run that landed in `error`. */
+export async function submitTailorAnswers(
+  runId: string,
+  answers: Record<string, string>,
+): Promise<void> {
+  const res = await fetch(
+    `${API_URL}/api/tailor/runs/${encodeURIComponent(runId)}/answers`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers }),
+    },
+  );
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+}
+
 
 // ── Auth (Google sign-in) ────────────────────────────────────────────────
 

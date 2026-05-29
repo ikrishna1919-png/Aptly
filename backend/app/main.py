@@ -14,16 +14,18 @@ from app.api.profile import router as profile_router
 from app.api.tailor import router as tailor_router
 from app.config import get_settings
 from app.services.profile_parser import sweep_orphaned_parse_runs
+from app.services.tailor_runs import sweep_orphaned_tailor_runs
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    # Reap any ParseRun rows left at `running` by a process that died
-    # mid-parse — the worker's `finally` can't write a terminal status
-    # if the process itself is killed. Running this once per boot means
-    # a stuck row can't outlive the restart that orphaned it, so the
-    # polling client never waits out its full ceiling on a dead parse.
+    # Reap rows left at a non-terminal status by a process that died
+    # mid-job — the worker's `finally` can't write a terminal status if
+    # the process itself is killed. Running this once per boot means a
+    # stuck row can't outlive the restart that orphaned it, so the
+    # polling client never waits out its full ceiling on a dead job.
     sweep_orphaned_parse_runs()
+    sweep_orphaned_tailor_runs()
     yield
 
 
