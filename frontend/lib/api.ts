@@ -703,6 +703,10 @@ export type Analysis = {
 /** Render style for the tailored resume export. */
 export type ResumeMode = "visual" | "plain";
 
+/** Header (name + contact) alignment for the export. Orthogonal to mode;
+ * body text always stays left-aligned. */
+export type HeaderAlignment = "left" | "center" | "right";
+
 export type ContactLink = { label: string; url: string };
 
 export type ResumeContact = {
@@ -804,12 +808,13 @@ export async function downloadResume(
   filename: string,
   format: "docx" | "pdf",
   mode: ResumeMode = "visual",
+  headerAlignment: HeaderAlignment = "center",
 ): Promise<Blob> {
   const res = await fetch(`${API_URL}/api/tailor/${format}`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ resume, filename, mode }),
+    body: JSON.stringify({ resume, filename, mode, header_alignment: headerAlignment }),
   });
   if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   return await res.blob();

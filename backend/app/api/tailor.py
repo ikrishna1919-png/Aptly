@@ -51,6 +51,9 @@ router = APIRouter()
 # "visual" (default, richer styling) or "plain" (max ATS parser
 # compatibility — no rules, dates inline).
 RenderMode = Literal["visual", "plain"]
+# Header (name + contact block) alignment. Orthogonal to mode; default center.
+# Body text always stays left regardless.
+HeaderAlignment = Literal["left", "center", "right"]
 
 
 def _load_job(db: Session, job_id: int) -> Job:
@@ -273,6 +276,10 @@ class RenderRequest(BaseModel):
         default="visual",
         description='Render style: "visual" (default) or "plain" (max ATS compatibility).',
     )
+    header_alignment: HeaderAlignment = Field(
+        default="center",
+        description='Header (name + contact) alignment: "left" | "center" | "right".',
+    )
     filename: str | None = Field(
         default=None, max_length=128, description="Override the suggested filename"
     )
@@ -294,7 +301,7 @@ def tailor_docx(
     Contact details live on the resume itself (reconciled server-side from
     the profile at generate time), so the download reflects the saved
     profile without re-running the LLM."""
-    raw = render_docx(payload.resume, mode=payload.mode)
+    raw = render_docx(payload.resume, mode=payload.mode, header_alignment=payload.header_alignment)
     name = _filename(payload.filename, "docx")
     return StreamingResponse(
         io.BytesIO(raw),
@@ -310,7 +317,7 @@ def tailor_pdf(
 ) -> StreamingResponse:
     """Stream the tailored resume as a PDF in the requested `mode`. Same
     text content as the DOCX — only the styling differs."""
-    raw = render_pdf(payload.resume, mode=payload.mode)
+    raw = render_pdf(payload.resume, mode=payload.mode, header_alignment=payload.header_alignment)
     name = _filename(payload.filename, "pdf")
     return StreamingResponse(
         io.BytesIO(raw),
