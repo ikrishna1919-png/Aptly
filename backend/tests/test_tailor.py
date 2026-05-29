@@ -320,10 +320,11 @@ def test_analyze_uses_anthropic_when_key_present(factories, settings_with_key, m
 
     assert result.match_score == 84
     assert result.questions[2] == "Why Acme?"
-    # One call to messages.create, on Sonnet 4.6, with cache_control set.
+    # One call to messages.create, on the (faster/cheaper) analyze model, with
+    # cache_control set. Analyze runs on Haiku 4.5; generation stays on Sonnet.
     assert len(mock.calls) == 1
     call = mock.calls[0]
-    assert call["model"] == "claude-sonnet-4-6"
+    assert call["model"] == tailor_module.ANALYZE_MODEL
     # System list with cache_control on the candidate block.
     assert any(
         isinstance(b, dict) and b.get("cache_control", {}).get("type") == "ephemeral"

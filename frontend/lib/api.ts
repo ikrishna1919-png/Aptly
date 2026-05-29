@@ -843,8 +843,11 @@ export type TailorRunState = {
 
 /** Poll cadence + ceiling for a tailor run. Generation is hard-capped at 90s
  * server-side; 120s of polling gives the worker headroom to write its
- * terminal row before the client gives up. */
-export const TAILOR_POLL_INTERVAL_MS = 1_500;
+ * terminal row before the client gives up. Cadence tightened 1500ms → 700ms
+ * (PR: tailor latency) so streamed sections surface ~2x sooner — the poll
+ * interval is the floor on how fast the run-based UI can feel. These are
+ * cheap GETs, so the extra request volume is negligible. */
+export const TAILOR_POLL_INTERVAL_MS = 700;
 export const TAILOR_MAX_WAIT_MS = 120_000;
 
 /** Thrown by `startTailor` when the profile is too empty to tailor from
