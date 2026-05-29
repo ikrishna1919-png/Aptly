@@ -10,11 +10,15 @@ the whole product functional in local dev and on a Render free plan
 without a key. Mocks are clearly labeled so they can't be mistaken for
 real model output.
 
-The prompts are structured so Claude's prompt cache reuses the stable
-prefix (system rules + candidate fingerprint) across requests:
-    [system, candidate]  ← cached
-    [job description, user answers]  ← volatile
-The `cache_control` breakpoint sits on the last cached block.
+Prompt caching: the `cache_control` breakpoint sits on the STATIC system
+prompt (the ATS-standards rules / schema constraints), which is byte-for-
+byte identical on every call, so it's a shared cache prefix across all
+users and JDs — warm calls bill it at the cache-read rate. Everything
+that varies (the candidate profile block, the job description, user
+answers) follows the breakpoint UNcached:
+    [static system prompt]            ← cached (shared across users)
+    [candidate profile] (system)      ← volatile, uncached
+    [job description, user answers]   ← volatile, uncached (user message)
 """
 
 from __future__ import annotations
@@ -798,8 +802,10 @@ def _build_client(settings: Settings, client: Anthropic | None) -> Anthropic:
 
 def _usage_str(response_or_message: Any) -> str:
     """Format the token usage off a Messages response/final-message for the
-    timing logs. Includes cache read/write when present (the candidate block
-    is cached, so a warm call should show cache_read > 0)."""
+    timing logs. Includes cache read/write when present: the static system
+    prompt is cached, so the first call shows cache_write > 0 and subsequent
+    warm calls show cache_read > 0 (~the size of the static prompt). Hit rate
+    is cache_read / (cache_read + uncached input_tokens)."""
     u = getattr(response_or_message, "usage", None)
     if u is None:
         return "usage=unavailable"
@@ -829,12 +835,14 @@ def _llm_analyze(
         model=ANALYZE_MODEL,
         max_tokens=1500,
         system=[
-            {"type": "text", "text": _SYSTEM_ANALYZE},
-            {
-                "type": "text",
-                "text": _candidate_block(candidate),
-                "cache_control": {"type": "ephemeral"},
-            },
+            # Cache the STATIC instruction prompt (shared across every
+            # user/JD). The candidate block follows uncached — it's
+            # per-user dynamic content. NOTE: ANALYZE_MODEL is Haiku, whose
+            # cache minimum is 2048 tokens; this static prompt is smaller,
+            # so caching is a no-op here today — kept for consistency and to
+            # activate automatically if the analyze prompt grows.
+            {"type": "text", "text": _SYSTEM_ANALYZE, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": _candidate_block(candidate)},
         ],
         messages=[
             {
@@ -873,12 +881,13 @@ def _llm_generate(
         model=MODEL,
         max_tokens=4000,
         system=[
-            {"type": "text", "text": _SYSTEM_GENERATE},
-            {
-                "type": "text",
-                "text": _candidate_block(candidate),
-                "cache_control": {"type": "ephemeral"},
-            },
+            # Cache the STATIC ATS-standards prompt (~1.1k tokens, identical
+            # on every call) so it's a shared cache prefix across all users
+            # and JDs — a warm call bills it at the cache-read rate. The
+            # candidate block follows UNcached: it's per-user dynamic content
+            # and caching it would key the prefix per-user and never share.
+            {"type": "text", "text": _SYSTEM_GENERATE, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": _candidate_block(candidate)},
         ],
         messages=[{"role": "user", "content": user_content}],
         output_config={
@@ -1017,12 +1026,10 @@ def _llm_generate_streaming(
         "model": MODEL,
         "max_tokens": 4000,
         "system": [
-            {"type": "text", "text": _SYSTEM_GENERATE},
-            {
-                "type": "text",
-                "text": _candidate_block(candidate),
-                "cache_control": {"type": "ephemeral"},
-            },
+            # Same cache layout as the sync path: cache the static prompt
+            # (shared prefix), leave the per-user candidate block uncached.
+            {"type": "text", "text": _SYSTEM_GENERATE, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": _candidate_block(candidate)},
         ],
         "messages": [{"role": "user", "content": user_content}],
         "output_config": {"format": {"type": "json_schema", "schema": GENERATED_RESUME_SCHEMA}},

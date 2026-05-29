@@ -325,11 +325,10 @@ def test_analyze_uses_anthropic_when_key_present(factories, settings_with_key, m
     assert len(mock.calls) == 1
     call = mock.calls[0]
     assert call["model"] == tailor_module.ANALYZE_MODEL
-    # System list with cache_control on the candidate block.
-    assert any(
-        isinstance(b, dict) and b.get("cache_control", {}).get("type") == "ephemeral"
-        for b in call["system"]
-    )
+    # System list carries a cache_control breakpoint — on the STATIC prompt
+    # block (the first block), so the cached prefix is shared across users.
+    assert call["system"][0].get("cache_control", {}).get("type") == "ephemeral"
+    assert "cache_control" not in call["system"][1]  # candidate block is uncached
     # The schema sent to Anthropic must be Anthropic-accepted: every object
     # strict AND no unsupported numeric/string/array range constraints.
     schema = call["output_config"]["format"]["schema"]
@@ -426,6 +425,12 @@ def test_generate_uses_anthropic_when_key_present(factories, settings_with_key, 
     # object types, so this exercises the recursive walk into $defs / items.
     schema = mock.calls[0]["output_config"]["format"]["schema"]
     _assert_schema_accepted_by_anthropic(schema)
+    # Prompt caching: the breakpoint is on the STATIC system prompt (shared
+    # across users), NOT the per-user candidate block.
+    system = mock.calls[0]["system"]
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+    assert system[0]["text"] == tailor_module._SYSTEM_GENERATE
+    assert "cache_control" not in system[1]
 
 
 # ── JSON-schema strictness regression tests ─────────────────────────────────
