@@ -49,6 +49,42 @@ GREENHOUSE_TOKENS: list[str] = [
     "cleerlyhealth",
     "orioninnovation",
     "vectorusa",
+    # ── Batch added 2026-05 — well-known public Greenhouse boards.
+    #    Slugs follow the standard boards.greenhouse.io/{slug} convention.
+    #    These are convention-based candidates: the ingest run probes each
+    #    token and the per-source auto-disable threshold parks any that
+    #    don't resolve, so a wrong slug is self-healing, not harmful
+    #    (same contract as the TSV-expanded candidate seeding). ──
+    "figma",
+    "databricks",
+    "discord",
+    "gusto",
+    "samsara",
+    "affirm",
+    "benchling",
+    "cloudflare",
+    "hashicorp",
+    "elastic",
+    "flexport",
+    "faire",
+    "rippling",
+    "grammarly",
+    "webflow",
+    "sofi",
+    "opendoor",
+    "nerdwallet",
+    "squarespace",
+    "etsy",
+    "pinterest",
+    "wayfair",
+    "cockroachlabs",
+    "anduril",
+    "betterment",
+    "verkada",
+    "checkr",
+    "airtable",
+    "udemy",
+    "thumbtack",
 ]
 
 # ── Lever board tokens ─────────────────────────────────────────────────────
@@ -91,6 +127,15 @@ ASHBY_KNOWN_TOKENS: list[tuple[str, str]] = [
     ("together", "Together AI"),
     ("mercury", "Mercury"),
     ("coda", "Coda"),
+    # ── Batch added 2026-05 — well-known public Ashby boards. Same
+    #    self-healing contract: ingest probes the token, auto-disable
+    #    parks any that don't resolve. ──
+    ("openai", "OpenAI"),
+    ("ironclad", "Ironclad"),
+    ("watershed", "Watershed"),
+    ("baseten", "Baseten"),
+    ("perplexity", "Perplexity"),
+    ("substack", "Substack"),
 ]
 
 
