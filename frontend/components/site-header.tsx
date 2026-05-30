@@ -13,6 +13,7 @@ import {
   Search,
   Mailbox,
   LifeBuoy,
+  Building2,
   type LucideIcon,
 } from "lucide-react";
 
@@ -72,12 +73,6 @@ export function SiteHeader() {
   // `useAuthGate`. (Profile/Subscription are still page-gated by middleware,
   // which redirects a logged-out direct hit to the login modal.)
 
-  // The landing route (`/`) is a self-contained, full-viewport two-panel
-  // experience with its own minimal Sign-in + footer chrome, so the global
-  // header/footer step aside there. Only `/` is affected; every other route
-  // keeps the standard chrome.
-  if (pathname === "/") return null;
-
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur-md supports-[backdrop-filter]:bg-background/65">
       <div className="container flex h-14 items-center gap-4 sm:h-16">
@@ -126,6 +121,15 @@ export function SiteHeader() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
+          {/* Secondary, muted link — distinct from the candidate-facing nav.
+              Lives in the mobile sheet on small screens. */}
+          <Link
+            href="/employers"
+            className="hidden rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors duration-base hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:inline-flex"
+          >
+            For Employers
+          </Link>
+
           <button
             type="button"
             aria-label={mobileOpen ? "Close menu" : "Open menu"}
@@ -178,6 +182,14 @@ export function SiteHeader() {
                   {item.label}
                 </Link>
               ))}
+              <Link
+                href="/employers"
+                onClick={() => setMobileOpen(false)}
+                className="flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors duration-fast hover:bg-secondary hover:text-foreground"
+              >
+                <Building2 className="h-4 w-4 text-muted-foreground" aria-hidden />
+                For Employers
+              </Link>
             </nav>
           </motion.div>
         )}
