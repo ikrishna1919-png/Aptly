@@ -2,13 +2,19 @@
   "manifest_version": 3,
   "name": "Aptly — application assistant",
   "version": "1.0.0",
-  "description": "Helps you fill Greenhouse job application forms with your Aptly profile and tailored resumes. You review every field and submit yourself.",
+  "description": "Helps you fill Greenhouse, Lever, Ashby, and SmartRecruiters job application forms with your Aptly profile and tailored resumes. You review every field and submit yourself.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
     "https://api.aptly.fyi/*",
     "https://boards.greenhouse.io/*",
     "https://*.greenhouse.io/*",
-    "https://job-boards.greenhouse.io/*"
+    "https://job-boards.greenhouse.io/*",
+    "https://jobs.lever.co/*",
+    "https://jobs.ashbyhq.com/*",
+    "https://*.ashbyhq.com/*",
+    "https://jobs.smartrecruiters.com/*",
+    "https://careers.smartrecruiters.com/*",
+    "https://*.myworkdayjobs.com/*"
   ],
   "action": {
     "default_popup": "src/popup/popup.html",
@@ -34,9 +40,20 @@
       "matches": [
         "https://boards.greenhouse.io/*",
         "https://*.greenhouse.io/*",
-        "https://job-boards.greenhouse.io/*"
+        "https://job-boards.greenhouse.io/*",
+        "https://jobs.lever.co/*",
+        "https://jobs.ashbyhq.com/*",
+        "https://*.ashbyhq.com/*",
+        "https://jobs.smartrecruiters.com/*",
+        "https://careers.smartrecruiters.com/*"
       ],
       "js": ["content/greenhouse.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://*.myworkdayjobs.com/*"],
+      "js": ["content/workday.js"],
       "run_at": "document_idle",
       "all_frames": true
     }

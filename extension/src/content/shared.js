@@ -1,7 +1,9 @@
-// Shared field-detection + filling helpers. v1.0 only wires these up for
-// Greenhouse, but the field model is platform-agnostic so adapters can reuse
-// it later. NOTHING here mutates the host page except value-filling triggered
-// by an explicit user action in the popup.
+// Shared field-detection + filling helpers. The field model is platform-
+// agnostic, so multiple adapters reuse it: the standard-DOM ATSes (Greenhouse,
+// Lever, Ashby, SmartRecruiters) via content/greenhouse.js, and the
+// experimental Workday adapter via content/workday.js. NOTHING here mutates the
+// host page except value-filling triggered by an explicit user action in the
+// popup.
 
 import { SENSITIVE_PATTERNS, SALARY_PATTERNS } from "../lib/config.js";
 
@@ -129,6 +131,34 @@ export function contactKeyFor(question) {
   return null;
 }
 
+// Map a contact key (from contactKeyFor) to the matching profile value. Shared
+// by every adapter so they fill name/email/links identically. Pure.
+export function contactValue(key, p) {
+  if (!p) return "";
+  switch (key) {
+    case "name":
+      return p.name;
+    case "first_name":
+      return (p.name || "").split(" ")[0];
+    case "last_name":
+      return (p.name || "").split(" ").slice(1).join(" ");
+    case "email":
+      return p.email;
+    case "phone":
+      return p.phone;
+    case "linkedin":
+      return p.linkedin;
+    case "github":
+      return p.github;
+    case "portfolio":
+      return p.portfolio;
+    case "location":
+      return p.location;
+    default:
+      return "";
+  }
+}
+
 // React-friendly value setters: set via the native descriptor then dispatch
 // input/change so controlled components pick up the new value.
 export function setInputValue(el, value) {
@@ -151,6 +181,29 @@ export function setSelectValue(el, value) {
     return true;
   }
   return false;
+}
+
+// Match a desired value against a list of option-like nodes by their visible
+// text. Used by the Workday adapter for custom (non-<select>) dropdowns, where
+// the trigger opens a [role="listbox"] of [role="option"] nodes. Pure and
+// DOM-light (only reads `.textContent`) so it's unit-testable with a stub DOM.
+// Returns the matching node or null — never guesses past a guarded contains().
+export function matchOptionByText(options, value) {
+  const v = norm(value);
+  if (!v) return null;
+  const texts = options.map((o) => norm(o && o.textContent));
+  // 1) Exact (normalized) match — the safe, common case. Wins over any loose
+  //    match regardless of option order (e.g. "No" beats "Not sure").
+  let i = texts.findIndex((t) => t === v);
+  if (i >= 0) return options[i];
+  // 2) Loose containment either direction, length-guarded to avoid 1-char
+  //    noise. Handles a Workday label carrying a longer/shorter form than the
+  //    saved value (e.g. "United States of America" vs "United States").
+  if (v.length >= 2) {
+    i = texts.findIndex((t) => t.length >= 2 && (t.includes(v) || v.includes(t)));
+    if (i >= 0) return options[i];
+  }
+  return null;
 }
 
 export function clickRadioOrCheckbox(groupEls, value) {
