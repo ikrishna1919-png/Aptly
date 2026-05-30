@@ -21,6 +21,7 @@ import {
   type AtsRun,
   downloadAtsDocx,
   fetchAtsRun,
+  getDefaultFormat,
   keywordCoverage,
   parseAtsUpload,
   startAtsGenerate,
@@ -63,6 +64,11 @@ export function AtsHub() {
   const [pdfNotice, setPdfNotice] = useState(false);
   const [answers, setAnswers] = useState<AtsQuestions>(DEFAULT_ANSWERS);
   const [format, setFormat] = useState<AtsFormat>("modern");
+  // FIX 6: the user's saved default format label (for display) + a per-
+  // generation override picked on the questions step. `null` override = use
+  // the saved default.
+  const [defaultFmtLabel, setDefaultFmtLabel] = useState<string>("Modern");
+  const [overrideFmt, setOverrideFmt] = useState<AtsFormat | null>(null);
   const [custom, setCustom] = useState<AtsCustomOptions>({
     base: "modern",
     accent_color: "blue",
@@ -98,6 +104,24 @@ export function AtsHub() {
       cancelled = true;
     };
   }, [params]);
+
+  // FIX 6: load the user's saved default resume format on mount, so the
+  // format-selection step can be skipped. Falls back to Modern (the backend
+  // returns "modern" when unset). Maps the stored value onto the AtsFormat
+  // union; anything outside it (e.g. "match_upload") falls back to Modern for
+  // the generated-resume path.
+  useEffect(() => {
+    const KNOWN: AtsFormat[] = ["modern", "classic", "minimal", "plain", "custom"];
+    getDefaultFormat("resume")
+      .then((d) => {
+        const f = d.format as AtsFormat;
+        setFormat(KNOWN.includes(f) ? f : "modern");
+        setDefaultFmtLabel(d.format.charAt(0).toUpperCase() + d.format.slice(1));
+      })
+      .catch(() => {
+        /* keep Modern fallback */
+      });
+  }, []);
 
   // Load profile skills/roles for the chip pickers (best-effort).
   useEffect(() => {
@@ -183,13 +207,15 @@ export function AtsHub() {
     if (!gate("tailor")) return;
     setBusy(true);
     setError(null);
+    // Override (this generation only) wins over the saved default.
+    const effectiveFmt: AtsFormat = overrideFmt ?? format;
     try {
       const { run_id } = await startAtsGenerate({
         option_type: optionType,
         jd_text: jdText,
         questions: answers,
-        format: isDocxPath ? "plain" : format,
-        custom_options: format === "custom" ? custom : null,
+        format: isDocxPath ? "plain" : effectiveFmt,
+        custom_options: effectiveFmt === "custom" ? custom : null,
         upload_id: uploadId,
       });
       startedAt.current = Date.now();
@@ -268,8 +294,16 @@ export function AtsHub() {
               onChange={setAnswers}
               skills={profileSkills}
               roles={profileRoles}
-              onBack={() => setStep(option === "jd" ? "entry" : "entry")}
-              onContinue={() => setStep("format")}
+              onBack={() => setStep("entry")}
+              // FIX 6: format selection is skipped — the saved default applies.
+              // For the keyword-inject (DOCX-upload) path the format is the
+              // uploaded doc, so go straight to generate either way.
+              onContinue={() => void onGenerate()}
+              busy={busy}
+              defaultFormat={defaultFmtLabel}
+              overrideFormat={overrideFmt}
+              onOverrideFormat={setOverrideFmt}
+              showDocxNote={isDocxPath}
             />
           )}
 
@@ -529,6 +563,11 @@ function Questions({
   roles,
   onBack,
   onContinue,
+  busy,
+  defaultFormat,
+  overrideFormat,
+  onOverrideFormat,
+  showDocxNote,
 }: {
   answers: AtsQuestions;
   onChange: (a: AtsQuestions) => void;
@@ -536,7 +575,14 @@ function Questions({
   roles: string[];
   onBack: () => void;
   onContinue: () => void;
+  busy: boolean;
+  defaultFormat: string;
+  overrideFormat: AtsFormat | null;
+  onOverrideFormat: (f: AtsFormat | null) => void;
+  showDocxNote: boolean;
 }) {
+  const [showOverride, setShowOverride] = useState(false);
+  const FORMATS: AtsFormat[] = ["modern", "classic", "minimal", "plain", "custom"];
   const set = <K extends keyof AtsQuestions>(k: K, v: AtsQuestions[K]) =>
     onChange({ ...answers, [k]: v });
   const toggle = (k: "skills" | "roles", v: string) => {
@@ -579,8 +625,65 @@ function Questions({
           />
         </QRow>
       </div>
-      <div className="mt-6 flex justify-end">
-        <Button onClick={onContinue}>Continue →</Button>
+
+      {/* FIX 6: default format applied automatically; override for this run. */}
+      {showDocxNote ? (
+        <p className="mt-6 rounded-lg border border-primary/15 bg-primary-soft/40 px-3 py-2 text-sm text-muted-foreground">
+          Using your uploaded resume&apos;s original format (keywords injected in place).
+        </p>
+      ) : (
+        <div className="mt-6 rounded-lg border border-border px-3 py-2 text-sm">
+          <span className="text-muted-foreground">
+            Using your default format:{" "}
+            <span className="font-medium text-foreground">
+              {overrideFormat
+                ? overrideFormat.charAt(0).toUpperCase() + overrideFormat.slice(1)
+                : defaultFormat}
+            </span>
+            .
+          </span>{" "}
+          <button
+            type="button"
+            onClick={() => setShowOverride((v) => !v)}
+            className="font-medium text-primary underline-offset-4 hover:underline"
+          >
+            Use a different format this time ▾
+          </button>
+          {showOverride && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {FORMATS.map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => onOverrideFormat(f)}
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-xs font-medium",
+                    overrideFormat === f
+                      ? "border-primary bg-primary-soft text-primary-soft-foreground"
+                      : "border-border text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {f.charAt(0).toUpperCase() + f.slice(1)}
+                </button>
+              ))}
+              {overrideFormat && (
+                <button
+                  type="button"
+                  onClick={() => onOverrideFormat(null)}
+                  className="rounded-full px-3 py-1 text-xs text-muted-foreground underline-offset-4 hover:underline"
+                >
+                  Reset to default
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="mt-4 flex justify-end">
+        <Button disabled={busy} onClick={onContinue}>
+          {busy ? "Generating…" : "Generate resume →"}
+        </Button>
       </div>
     </StepShell>
   );

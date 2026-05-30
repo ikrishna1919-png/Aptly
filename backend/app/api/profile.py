@@ -346,3 +346,99 @@ def get_parse_run(
         started_at=run.started_at,
         finished_at=run.finished_at,
     )
+
+
+# ─── Active resume (one saved resume per user) ───────────────────────────────
+
+_AR_MAX = 5 * 1024 * 1024  # 5 MB
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_PDF_MIME = "application/pdf"
+
+
+@router.get("/profile/active-resume")
+def get_active_resume(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Metadata only (never the blob) so the UI can render its state."""
+    row = db.execute(
+        select(Candidate).where(Candidate.user_id == user.id)
+    ).scalar_one_or_none()
+    if row is None or row.active_resume_blob is None:
+        return {"present": False}
+    return {
+        "present": True,
+        "filename": row.active_resume_filename,
+        "content_type": row.active_resume_content_type,
+        "uploaded_at": (
+            row.active_resume_uploaded_at.isoformat() if row.active_resume_uploaded_at else None
+        ),
+    }
+
+
+@router.post("/profile/active-resume")
+async def upload_active_resume(
+    file: UploadFile = File(..., description="DOCX or PDF resume."),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Store (replacing any existing) the user's one active resume."""
+    raw = await file.read(_AR_MAX + 1)
+    if len(raw) > _AR_MAX:
+        raise HTTPException(status_code=413, detail="File too large (max 5 MB).")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    name = (file.filename or "").lower()
+    if name.endswith(".docx") or file.content_type == _DOCX_MIME:
+        content_type = _DOCX_MIME
+    elif name.endswith(".pdf") or file.content_type == _PDF_MIME:
+        content_type = _PDF_MIME
+    else:
+        raise HTTPException(status_code=415, detail="Upload a .docx or .pdf.")
+
+    row = _candidate_for(db, user)
+    row.active_resume_filename = file.filename or ("resume.docx" if content_type == _DOCX_MIME else "resume.pdf")
+    row.active_resume_content_type = content_type
+    row.active_resume_blob = raw
+    row.active_resume_uploaded_at = datetime.now(UTC)
+    db.commit()
+    return {
+        "present": True,
+        "filename": row.active_resume_filename,
+        "content_type": content_type,
+        "uploaded_at": row.active_resume_uploaded_at.isoformat(),
+    }
+
+
+@router.delete("/profile/active-resume", status_code=status.HTTP_204_NO_CONTENT)
+def delete_active_resume(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    row = db.execute(
+        select(Candidate).where(Candidate.user_id == user.id)
+    ).scalar_one_or_none()
+    if row is not None:
+        row.active_resume_filename = None
+        row.active_resume_content_type = None
+        row.active_resume_blob = None
+        row.active_resume_uploaded_at = None
+        db.commit()
+
+
+@router.get("/profile/active-resume/download")
+def download_active_resume(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    row = db.execute(
+        select(Candidate).where(Candidate.user_id == user.id)
+    ).scalar_one_or_none()
+    if row is None or row.active_resume_blob is None:
+        raise HTTPException(status_code=404, detail="No saved resume.")
+    fname = row.active_resume_filename or "resume"
+    return StreamingResponse(
+        io.BytesIO(row.active_resume_blob),
+        media_type=row.active_resume_content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )

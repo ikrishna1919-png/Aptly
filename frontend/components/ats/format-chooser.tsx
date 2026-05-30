@@ -1,16 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Sparkles, Upload, LayoutGrid } from "lucide-react";
+import Link from "next/link";
+import { Sparkles, Upload, LayoutGrid, Check } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import {
-  aiChooseFormat,
-  getDefaultFormat,
-  parseAtsUpload,
-  setDefaultFormat,
-} from "@/lib/ats";
+import { getActiveResume } from "@/lib/api";
+import { aiChooseFormat, getDefaultFormat, setDefaultFormat } from "@/lib/ats";
 
 /**
  * Shared "choose default format" UI for Feature #1 (resume) and #5 (cover).
@@ -29,6 +26,9 @@ export function FormatChooser({
   const [current, setCurrent] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // "Match uploaded" is only valid when a DOCX resume is saved on the profile
+  // (formatting can only be preserved for DOCX). null = still loading.
+  const [hasDocxResume, setHasDocxResume] = useState<boolean | null>(null);
 
   useEffect(() => {
     getDefaultFormat(kind)
@@ -36,13 +36,36 @@ export function FormatChooser({
       .catch(() => setCurrent(null));
   }, [kind]);
 
+  useEffect(() => {
+    if (kind !== "resume") {
+      setHasDocxResume(false);
+      return;
+    }
+    getActiveResume()
+      .then((r) =>
+        setHasDocxResume(
+          r.present &&
+            r.content_type ===
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+      )
+      .catch(() => setHasDocxResume(false));
+  }, [kind]);
+
+  // Auto-fade the "Saved as default" toast.
+  useEffect(() => {
+    if (!note) return;
+    const t = setTimeout(() => setNote(null), 2500);
+    return () => clearTimeout(t);
+  }, [note]);
+
   async function pick(format: string) {
     setBusy(true);
     setNote(null);
     try {
       await setDefaultFormat(kind, format);
       setCurrent(format);
-      setNote(`Saved — ${format} is now your default.`);
+      setNote("Saved as default.");
     } finally {
       setBusy(false);
     }
@@ -55,27 +78,6 @@ export function FormatChooser({
       const d = await aiChooseFormat(kind);
       setCurrent(d.format);
       setNote(`AI picked ${d.format}${d.reason ? ` — ${d.reason}` : ""}. Saved as default.`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onUpload(file: File) {
-    setBusy(true);
-    setNote(null);
-    try {
-      const res = await parseAtsUpload(file);
-      if (res.kind === "docx") {
-        setNote(
-          "We'll preserve your uploaded DOCX formatting for future generations (in-place keyword injection).",
-        );
-      } else {
-        setNote(
-          "PDF can't be preserved exactly — we'll pick the closest matching pre-built format when you generate.",
-        );
-      }
-    } catch (e) {
-      setNote(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setBusy(false);
     }
@@ -101,22 +103,34 @@ export function FormatChooser({
         </Button>
       </Section>
 
-      {/* 1b match upload */}
-      <Section icon={Upload} title="Match an uploaded resume">
-        <p className="text-sm text-muted-foreground">
-          Upload a DOCX to preserve its exact formatting, or a PDF and we&apos;ll find the closest
-          match. (DOCX preserves formatting reliably; PDF can&apos;t.)
-        </p>
-        <label className="mt-3 inline-flex cursor-pointer items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-medium hover:border-primary/40">
-          <Upload className="h-4 w-4" aria-hidden /> Upload DOCX or PDF
-          <input
-            type="file"
-            accept=".docx,.pdf"
-            className="hidden"
-            onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])}
-          />
-        </label>
-      </Section>
+      {/* 1b match uploaded resume — enabled only with a saved DOCX resume */}
+      {kind === "resume" && (
+        <Section icon={Upload} title="Match your uploaded resume">
+          <p className="text-sm text-muted-foreground">
+            Reuse the exact formatting of the DOCX resume saved on your profile.
+          </p>
+          {hasDocxResume ? (
+            <Button
+              className="mt-3"
+              variant="outline"
+              disabled={busy}
+              onClick={() => void pick("match_upload")}
+            >
+              Use my uploaded resume&apos;s format
+            </Button>
+          ) : (
+            <Link
+              href="/profile"
+              title="Upload a DOCX resume to your profile first."
+              className="mt-3 inline-flex cursor-not-allowed items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-medium text-muted-foreground/70"
+              aria-disabled="true"
+            >
+              <Upload className="h-4 w-4" aria-hidden />
+              Upload a DOCX resume to your profile first
+            </Link>
+          )}
+        </Section>
+      )}
 
       {/* 1c pick a pre-built */}
       <Section icon={LayoutGrid} title="Pick a format">
@@ -127,10 +141,17 @@ export function FormatChooser({
               disabled={busy}
               onClick={() => void pick(f.id)}
               className={cn(
-                "rounded-xl border p-3 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                current === f.id ? "border-primary ring-1 ring-primary" : "border-border hover:border-primary/40",
+                "relative rounded-xl border p-3 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                current === f.id
+                  ? "border-2 border-primary bg-primary-soft/40"
+                  : "border-border hover:border-primary/40",
               )}
             >
+              {current === f.id && (
+                <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground">
+                  <Check className="h-3 w-3" aria-hidden /> Current default
+                </span>
+              )}
               <div className="flex h-16 flex-col gap-1 rounded-md border border-border bg-background p-2" aria-hidden>
                 <div className={cn("h-2 w-2/3 rounded", f.id === "modern" ? "bg-primary" : "bg-foreground/70")} />
                 <div className="h-1 w-1/3 rounded bg-muted-foreground/40" />

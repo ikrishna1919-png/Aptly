@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Menu,
@@ -14,6 +14,7 @@ import {
   Mailbox,
   LifeBuoy,
   Building2,
+  ChevronDown,
   type LucideIcon,
 } from "lucide-react";
 
@@ -43,19 +44,144 @@ import { cn } from "@/lib/utils";
  *   * Mobile sheet animates open/closed via AnimatePresence.
  */
 
-type NavItem = { href: string; label: string; icon: LucideIcon };
+type NavItem = { href: string; label: string; icon: LucideIcon; children?: SubItem[] };
+type SubItem = { href: string; label: string };
+
+// The ATS Toolkit sub-features (shown in the hover dropdown on desktop +
+// nested in the mobile sheet). Slugs match the /ats hub routes.
+const ATS_SUBITEMS: SubItem[] = [
+  { href: "/ats/format", label: "Choose Default Resume Format" },
+  { href: "/ats/builder", label: "Resume Builder" },
+  { href: "/ats/generate", label: "ATS Resume Generator" },
+  { href: "/ats/cover-letter", label: "ATS Cover Letter Generator" },
+  { href: "/ats/cover-letter-format", label: "Choose Default Cover Letter Format" },
+];
 
 // All destinations are publicly viewable; the nav just navigates. ATS sits
 // second (right after Jobs) — it's the resume/cover-letter hub and a primary
 // action surface, so it leads the tools.
 const APP_NAV: NavItem[] = [
   { href: "/jobs", label: "Jobs", icon: Briefcase },
-  { href: "/ats", label: "ATS", icon: Search },
+  { href: "/ats", label: "ATS Toolkit", icon: Search, children: ATS_SUBITEMS },
   { href: "/applications", label: "Application Tracker", icon: ClipboardList },
   { href: "/interview-prep", label: "Interview Prep", icon: GraduationCap },
   { href: "/email-finder", label: "Email Finder", icon: Mailbox },
   { href: "/support", label: "Support", icon: LifeBuoy },
 ];
+
+/**
+ * A nav item with a hover/focus-reveal dropdown (Netflix-style). The parent
+ * label still navigates (to /ats); hovering — or keyboard-focusing — reveals
+ * the sub-features. A short close delay gives the cursor a grace period to
+ * travel from the parent onto the panel without it vanishing.
+ */
+function NavDropdown({
+  item,
+  isActive,
+}: {
+  item: NavItem;
+  isActive: (href: string) => boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  const cancelClose = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+  };
+  const scheduleClose = () => {
+    cancelClose();
+    closeTimer.current = setTimeout(() => setOpen(false), 200);
+  };
+  useEffect(() => () => cancelClose(), []);
+
+  const parentActive = isActive(item.href);
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative"
+      onMouseEnter={() => {
+        cancelClose();
+        setOpen(true);
+      }}
+      onMouseLeave={scheduleClose}
+      onFocus={() => {
+        cancelClose();
+        setOpen(true);
+      }}
+      onBlur={(e) => {
+        // Close when focus leaves the whole wrapper (parent + panel).
+        if (!wrapRef.current?.contains(e.relatedTarget as Node)) scheduleClose();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") setOpen(false);
+      }}
+    >
+      <Link
+        href={item.href}
+        aria-current={parentActive ? "page" : undefined}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={cn(
+          "relative inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          parentActive
+            ? "text-foreground"
+            : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+        )}
+      >
+        {item.label}
+        <ChevronDown
+          className={cn("h-3.5 w-3.5 transition-transform duration-base", open && "rotate-180")}
+          aria-hidden
+        />
+        {parentActive && (
+          <motion.span
+            layoutId="nav-active-rule"
+            aria-hidden="true"
+            transition={{ type: "spring", stiffness: 400, damping: 32 }}
+            className="absolute inset-x-2 -bottom-[7px] h-[2px] rounded-full bg-primary sm:-bottom-[9px]"
+          />
+        )}
+      </Link>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            role="menu"
+            aria-label={item.label}
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute left-0 top-full z-50 mt-1.5 w-64 overflow-hidden rounded-lg border border-border bg-popover p-1 shadow-md"
+          >
+            {item.children!.map((sub) => {
+              const active = isActive(sub.href);
+              return (
+                <Link
+                  key={sub.href}
+                  href={sub.href}
+                  role="menuitem"
+                  aria-current={active ? "page" : undefined}
+                  onClick={() => setOpen(false)}
+                  className={cn(
+                    "block rounded-md px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    active
+                      ? "bg-primary-soft font-medium text-primary-soft-foreground"
+                      : "text-foreground hover:bg-secondary",
+                  )}
+                >
+                  {sub.label}
+                </Link>
+              );
+            })}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
 
 export function SiteHeader() {
   const pathname = usePathname() || "/";
@@ -97,29 +223,33 @@ export function SiteHeader() {
           aria-label="Primary"
           className="ml-2 hidden flex-1 items-center gap-0.5 lg:flex"
         >
-          {APP_NAV.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              aria-current={isActive(item.href) ? "page" : undefined}
-              className={cn(
-                "relative rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                isActive(item.href)
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:bg-secondary hover:text-foreground",
-              )}
-            >
-              {item.label}
-              {isActive(item.href) && (
-                <motion.span
-                  layoutId="nav-active-rule"
-                  aria-hidden="true"
-                  transition={{ type: "spring", stiffness: 400, damping: 32 }}
-                  className="absolute inset-x-2 -bottom-[7px] h-[2px] rounded-full bg-primary sm:-bottom-[9px]"
-                />
-              )}
-            </Link>
-          ))}
+          {APP_NAV.map((item) =>
+            item.children ? (
+              <NavDropdown key={item.href} item={item} isActive={isActive} />
+            ) : (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={isActive(item.href) ? "page" : undefined}
+                className={cn(
+                  "relative rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  isActive(item.href)
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+                )}
+              >
+                {item.label}
+                {isActive(item.href) && (
+                  <motion.span
+                    layoutId="nav-active-rule"
+                    aria-hidden="true"
+                    transition={{ type: "spring", stiffness: 400, damping: 32 }}
+                    className="absolute inset-x-2 -bottom-[7px] h-[2px] rounded-full bg-primary sm:-bottom-[9px]"
+                  />
+                )}
+              </Link>
+            ),
+          )}
         </nav>
 
         <div className="ml-auto flex items-center gap-2">

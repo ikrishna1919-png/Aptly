@@ -202,7 +202,14 @@ def _execute_docx_inject(run_id: str, settings: Settings | None = None) -> None:
                 return
             blob, jd = run.uploaded_docx_blob, run.jd_text or ""
             resume_text = ats.extract_docx_text(blob)
-        edits = ats.compute_keyword_edits(resume_text, jd, settings=settings)
+        try:
+            edits = ats.compute_keyword_edits(resume_text, jd, settings=settings)
+        except ats.KeywordInjectionError as e:
+            # Clean, user-facing message (the LLM returned unparseable JSON
+            # twice) — never a raw traceback.
+            _finish(run_id, status=TAILOR_STATUS_ERROR, error_text=str(e))
+            written = True
+            return
         # Validate which edits actually land in a single run (the rest are
         # reported as skipped so the diff is honest).
         _, applied, skipped = ats.apply_docx_edits(blob, edits)
