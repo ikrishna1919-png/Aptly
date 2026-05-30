@@ -9,6 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.api.admin import router as admin_router
 from app.api.ats import router as ats_router
 from app.api.auth import router as auth_router
+from app.api.extension import router as extension_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.profile import router as profile_router
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_router, prefix="/api")
     app.include_router(tailor_router, prefix="/api")
     app.include_router(ats_router, prefix="/api")
+    app.include_router(extension_router, prefix="/api")
     app.include_router(profile_router, prefix="/api")
     return app
 
