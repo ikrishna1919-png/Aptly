@@ -43,6 +43,7 @@ import {
   type ProfileVolunteer,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { ExtensionSettings } from "@/components/profile/extension-settings";
 
 const EMPTY_PROFILE: Profile = {
   name: "",
@@ -1503,6 +1504,13 @@ function ProfileEditor() {
             </Button>
           </div>
         </form>
+
+        {/* Browser-extension settings: connected devices + the answers the
+            extension has learned. Self-contained + best-effort (won't break
+            the profile page if the API is unreachable). */}
+        <div className="mt-12 border-t border-border pt-10">
+          <ExtensionSettings />
+        </div>
       </div>
     </div>
   );

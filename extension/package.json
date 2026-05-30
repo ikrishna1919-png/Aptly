@@ -1,0 +1,11 @@
+{
+  "name": "aptly-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Aptly application assistant — Manifest V3 Chrome extension (Greenhouse v1.0).",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "validate": "node scripts/build.mjs --check"
+  }
+}
