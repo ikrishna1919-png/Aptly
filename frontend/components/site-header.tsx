@@ -72,6 +72,12 @@ export function SiteHeader() {
   // `useAuthGate`. (Profile/Subscription are still page-gated by middleware,
   // which redirects a logged-out direct hit to the login modal.)
 
+  // The landing route (`/`) is a self-contained, full-viewport two-panel
+  // experience with its own minimal Sign-in + footer chrome, so the global
+  // header/footer step aside there. Only `/` is affected; every other route
+  // keeps the standard chrome.
+  if (pathname === "/") return null;
+
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/85 backdrop-blur-md supports-[backdrop-filter]:bg-background/65">
       <div className="container flex h-14 items-center gap-4 sm:h-16">
