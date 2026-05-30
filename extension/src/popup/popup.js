@@ -24,7 +24,8 @@ const ATS_HOST_PATTERNS = [
   /https:\/\/([a-z0-9-]+\.)?(job-boards\.)?greenhouse\.io\//i, // Greenhouse
   /https:\/\/jobs\.lever\.co\//i, // Lever
   /https:\/\/([a-z0-9-]+\.)?ashbyhq\.com\//i, // Ashby
-  /https:\/\/(jobs|careers)\.smartrecruiters\.com\//i, // SmartRecruiters
+  /https:\/\/(jobs|careers)\.smartrecruiters\.com\//i, // SmartRecruiters posting
+  /https:\/\/([a-z0-9-]+\.)?smartrecruiterscareers\.com\//i, // SmartRecruiters apply workflow
 ];
 
 // Workday is handled by the separate, experimental content/workday.js and is

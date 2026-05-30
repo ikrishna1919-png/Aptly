@@ -14,6 +14,8 @@
     "https://*.ashbyhq.com/*",
     "https://jobs.smartrecruiters.com/*",
     "https://careers.smartrecruiters.com/*",
+    "https://*.smartrecruiterscareers.com/*",
+    "https://smartrecruiterscareers.com/*",
     "https://*.myworkdayjobs.com/*"
   ],
   "action": {
@@ -45,7 +47,9 @@
         "https://jobs.ashbyhq.com/*",
         "https://*.ashbyhq.com/*",
         "https://jobs.smartrecruiters.com/*",
-        "https://careers.smartrecruiters.com/*"
+        "https://careers.smartrecruiters.com/*",
+        "https://*.smartrecruiterscareers.com/*",
+        "https://smartrecruiterscareers.com/*"
       ],
       "js": ["content/greenhouse.js"],
       "run_at": "document_idle",
