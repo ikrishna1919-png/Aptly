@@ -26,7 +26,8 @@ from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.tailor_run import TailorRun
 from app.models.user import User
-from app.services import ats, ats_runs
+from app.services import ats, ats_runs, default_formats, keyword_coverage, linkedin_import
+from app.services.demo_candidate import get_candidate
 
 router = APIRouter()
 
@@ -122,6 +123,37 @@ def ats_generate(
     return RunIdResponse(run_id=run_id)
 
 
+# ─── JD keyword coverage ─────────────────────────────────────────────────────
+#
+# Deterministic keyword-overlap %, NOT an invented "ATS score". Computed before
+# generation (profile vs JD) and after (tailored resume vs JD) so the user sees
+# the real before→after lift.
+
+
+class CoverageRequest(BaseModel):
+    jd_text: str = Field(min_length=1, max_length=20000)
+
+
+class CoverageOut(BaseModel):
+    percent: int
+    matched: list[str]
+    missing: list[str]
+
+
+@router.post("/ats/keyword-coverage", response_model=CoverageOut)
+def ats_keyword_coverage(
+    payload: CoverageRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CoverageOut:
+    """Pre-generation coverage: how many of the JD's keywords the user's CURRENT
+    profile already covers."""
+    candidate = get_candidate(db, user_id=user.id)
+    text = keyword_coverage.candidate_text_from_profile(candidate)
+    cov = keyword_coverage.score(payload.jd_text, text)
+    return CoverageOut(**cov.to_dict())
+
+
 # ─── Status ────────────────────────────────────────────────────────────────
 
 
@@ -133,6 +165,9 @@ class AtsRunOut(BaseModel):
     format: str | None = None
     resume: dict[str, Any] | None = None  # TailoredResume JSON (generate paths)
     diff: dict[str, Any] | None = None  # {applied, skipped} (docx-inject path)
+    # Post-generation JD keyword coverage of the tailored resume (generate
+    # paths, when the run carries jd_text). Null otherwise.
+    coverage: CoverageOut | None = None
     error: str | None = None
 
 
@@ -149,11 +184,16 @@ def ats_run_status(
     if run is None:
         raise HTTPException(status_code=404, detail="ats run not found")
     resume = diff = None
+    coverage: CoverageOut | None = None
     rj = run.result_json
     if isinstance(rj, dict) and rj.get("kind") == "docx_keyword_inject":
         diff = {"applied": rj.get("applied", []), "skipped": rj.get("skipped", [])}
     elif rj is not None:
         resume = rj
+        # Post-generation coverage of the tailored resume against this run's JD.
+        if run.jd_text and isinstance(rj, dict):
+            text = keyword_coverage.candidate_text_from_resume(rj)
+            coverage = CoverageOut(**keyword_coverage.score(run.jd_text, text).to_dict())
     return AtsRunOut(
         run_id=run.run_id,
         status=run.status,
@@ -162,6 +202,7 @@ def ats_run_status(
         format=run.format_selection,
         resume=resume,
         diff=diff,
+        coverage=coverage,
         error=run.error_text,
     )
 
@@ -197,3 +238,88 @@ def ats_download_docx(
         media_type=_DOCX_MIME,
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+# ─── Default formats (Feature #1 / #5) ───────────────────────────────────────
+
+
+class DefaultFormatOut(BaseModel):
+    kind: str  # "resume" | "cover"
+    format: str
+    custom: dict[str, Any] | None = None
+    reason: str | None = None
+
+
+class SaveDefaultRequest(BaseModel):
+    kind: Literal["resume", "cover"]
+    format: str
+    custom: dict[str, Any] | None = None
+
+
+@router.get("/ats/default-format/{kind}", response_model=DefaultFormatOut)
+def get_default_format(
+    kind: Literal["resume", "cover"] = Path(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DefaultFormatOut:
+    value = default_formats.resolve_default(db, user.id, kind)
+    return DefaultFormatOut(
+        kind=kind, format=value.get("format", "modern"), custom=value.get("custom")
+    )
+
+
+@router.post("/ats/default-format", response_model=DefaultFormatOut)
+def set_default_format(
+    payload: SaveDefaultRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DefaultFormatOut:
+    value = default_formats.save_default(
+        db, user.id, payload.kind, {"format": payload.format, "custom": payload.custom}
+    )
+    return DefaultFormatOut(kind=payload.kind, format=value["format"], custom=value.get("custom"))
+
+
+@router.post("/ats/default-format/ai-choose/{kind}", response_model=DefaultFormatOut)
+def ai_choose_default_format(
+    kind: Literal["resume", "cover"] = Path(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DefaultFormatOut:
+    """Deterministic heuristic pick (NOT an LLM call), then saved as default."""
+    candidate = get_candidate(db, user_id=user.id)
+    pick = (
+        default_formats.ai_choose_cover_format(candidate)
+        if kind == "cover"
+        else default_formats.ai_choose_resume_format(candidate)
+    )
+    default_formats.save_default(db, user.id, kind, {"format": pick["format"], "custom": None})
+    return DefaultFormatOut(
+        kind=kind, format=pick["format"], custom=None, reason=pick.get("reason")
+    )
+
+
+# ─── LinkedIn data-export import (Feature #2b) ───────────────────────────────
+
+
+@router.post("/ats/linkedin-import")
+async def linkedin_import_endpoint(
+    file: UploadFile = File(..., description="LinkedIn data-export ZIP."),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Parse a user-uploaded LinkedIn export ZIP into the profile shape and
+    return a new-vs-conflict diff against the existing profile for review.
+    User-initiated upload — no scraping."""
+    raw = await file.read(_MAX_UPLOAD + 1)
+    if len(raw) > _MAX_UPLOAD:
+        raise HTTPException(status_code=413, detail="File too large (max 5 MB).")
+    try:
+        imported = linkedin_import.parse_linkedin_zip(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    existing = get_candidate(db, user_id=user.id)
+    return {
+        "imported": imported,
+        "diff": linkedin_import.diff_against_existing(existing, imported),
+    }

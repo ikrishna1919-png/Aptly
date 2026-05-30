@@ -48,6 +48,10 @@ class Candidate(Base):
     profile_saved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # /ats hub default formats: {"format": "modern", "custom": {...}|null}.
+    # Null until the user picks one; app code falls back to "modern".
+    default_resume_format: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    default_cover_letter_format: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 DEMO_SLUG = "demo"
