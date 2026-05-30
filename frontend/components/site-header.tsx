@@ -45,12 +45,14 @@ import { cn } from "@/lib/utils";
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
 
-// All destinations are publicly viewable; the nav just navigates.
+// All destinations are publicly viewable; the nav just navigates. ATS sits
+// second (right after Jobs) — it's the resume/cover-letter hub and a primary
+// action surface, so it leads the tools.
 const APP_NAV: NavItem[] = [
   { href: "/jobs", label: "Jobs", icon: Briefcase },
+  { href: "/ats", label: "ATS", icon: Search },
   { href: "/applications", label: "Application Tracker", icon: ClipboardList },
   { href: "/interview-prep", label: "Interview Prep", icon: GraduationCap },
-  { href: "/ats", label: "ATS", icon: Search },
   { href: "/email-finder", label: "Email Finder", icon: Mailbox },
   { href: "/support", label: "Support", icon: LifeBuoy },
 ];

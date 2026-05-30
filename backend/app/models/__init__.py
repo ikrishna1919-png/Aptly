@@ -1,4 +1,5 @@
 from app.models.candidate import Candidate
+from app.models.cover_letter import CoverLetter
 from app.models.employer_sponsorship import EmployerSponsorship
 from app.models.extension_session import ExtensionSession
 from app.models.ingest_run import IngestRun
@@ -12,6 +13,7 @@ from app.models.user import User
 
 __all__ = [
     "Candidate",
+    "CoverLetter",
     "EmployerSponsorship",
     "ExtensionSession",
     "IngestRun",

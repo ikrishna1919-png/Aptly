@@ -36,6 +36,8 @@ export type AtsRun = {
   format: string | null;
   resume: TailoredResume | null;
   diff: { applied: DocxEdit[]; skipped: DocxEdit[] } | null;
+  // Post-generation JD keyword coverage of the tailored resume (generate paths).
+  coverage: { percent: number; matched: string[]; missing: string[] } | null;
   error: string | null;
 };
 
@@ -106,4 +108,110 @@ export async function downloadAtsDocx(runId: string, accepted?: number[]): Promi
   });
   if (!res.ok) throw new Error(await detail(res));
   return res.blob();
+}
+
+// ── Hub additions: coverage, default formats, cover letters, LinkedIn ───────
+
+export type Coverage = { percent: number; matched: string[]; missing: string[] };
+
+export async function keywordCoverage(jdText: string): Promise<Coverage> {
+  const res = await fetch(`${API_URL}/api/ats/keyword-coverage`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jd_text: jdText }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export type DefaultFormat = { kind: string; format: string; custom: unknown; reason?: string };
+
+export async function getDefaultFormat(kind: "resume" | "cover"): Promise<DefaultFormat> {
+  const res = await fetch(`${API_URL}/api/ats/default-format/${kind}`, { credentials: "include" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function setDefaultFormat(
+  kind: "resume" | "cover",
+  format: string,
+  custom?: unknown,
+): Promise<DefaultFormat> {
+  const res = await fetch(`${API_URL}/api/ats/default-format`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, format, custom: custom ?? null }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function aiChooseFormat(kind: "resume" | "cover"): Promise<DefaultFormat> {
+  const res = await fetch(`${API_URL}/api/ats/default-format/ai-choose/${kind}`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export type CoverLetter = {
+  id: string;
+  status: string;
+  demo_mode: boolean;
+  format: string | null;
+  content: {
+    date: string;
+    recipient: string;
+    greeting: string;
+    paragraphs: string[];
+    closing: string;
+    signature: string;
+  } | null;
+  error: string | null;
+};
+
+export async function generateCoverLetter(payload: {
+  jd_text: string;
+  company_name?: string;
+  hook?: string;
+  questions: { tone: string; length: string; opening: string; additional: string };
+}): Promise<CoverLetter> {
+  const res = await fetch(`${API_URL}/api/cover-letter/generate`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function updateCoverLetter(id: string, content: unknown): Promise<CoverLetter> {
+  const res = await fetch(`${API_URL}/api/cover-letter/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export function coverLetterDownloadUrl(id: string, fmt: "docx" | "pdf"): string {
+  return `${API_URL}/api/cover-letter/${encodeURIComponent(id)}/download?fmt=${fmt}`;
+}
+
+export async function linkedinImport(file: File): Promise<{ imported: Record<string, unknown>; diff: unknown }> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/api/ats/linkedin-import`, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
 }

@@ -21,6 +21,7 @@ import {
   type AtsRun,
   downloadAtsDocx,
   fetchAtsRun,
+  keywordCoverage,
   parseAtsUpload,
   startAtsGenerate,
 } from "@/lib/ats";
@@ -363,21 +364,69 @@ function JdEntry({
   onBack: () => void;
   onContinue: () => void;
 }) {
+  const [cov, setCov] = useState<{ percent: number; matched: string[] } | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function check() {
+    setChecking(true);
+    try {
+      const c = await keywordCoverage(value);
+      setCov({ percent: c.percent, matched: c.matched });
+    } catch {
+      /* non-fatal */
+    } finally {
+      setChecking(false);
+    }
+  }
+
   return (
     <StepShell title="Paste the job description" onBack={onBack}>
       <Textarea
         value={value}
-        onChange={(e) => onChange(e.target.value)}
-        rows={12}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setCov(null);
+        }}
+        rows={10}
         placeholder="Paste the full job description here…"
         className="text-sm"
       />
       <div className="mt-2 flex items-center justify-between">
         <span className="text-xs text-muted-foreground">{value.trim().length} characters</span>
-        <Button disabled={value.trim().length < 200} onClick={onContinue}>
-          Continue →
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            disabled={checking || value.trim().length < 200}
+            onClick={() => void check()}
+          >
+            {checking ? "Checking…" : "Check coverage"}
+          </Button>
+          <Button disabled={value.trim().length < 200} onClick={onContinue}>
+            Continue →
+          </Button>
+        </div>
       </div>
+      {cov && (
+        <div className="mt-4 rounded-lg border border-border bg-card p-4">
+          <p className="text-sm font-medium">
+            JD keyword coverage (your current profile):{" "}
+            <span className="text-primary">{cov.percent}%</span>
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            This is a real keyword-overlap measure, not an invented score. Tailoring should raise
+            it.
+          </p>
+          {cov.matched.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {cov.matched.map((k) => (
+                <Badge key={k} variant="secondary">
+                  {k}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </StepShell>
   );
 }
@@ -703,6 +752,15 @@ function Preview({
         <Badge variant="muted" className="mb-3">
           demo mode — set ANTHROPIC_API_KEY for live generation
         </Badge>
+      )}
+      {run.coverage && (
+        <div className="mb-3 rounded-lg border border-primary/20 bg-primary-soft/40 p-3 text-sm">
+          JD keyword coverage after tailoring:{" "}
+          <span className="font-semibold text-primary">{run.coverage.percent}%</span>
+          {run.coverage.matched.length > 0 && (
+            <span className="text-muted-foreground"> · {run.coverage.matched.length} keywords matched</span>
+          )}
+        </div>
       )}
       {run.resume && <ResumeView resume={run.resume} />}
       {run.resume && (
