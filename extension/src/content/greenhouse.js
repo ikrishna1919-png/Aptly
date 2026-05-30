@@ -23,6 +23,12 @@ import {
   setInputValue,
   setSelectValue,
   clickRadioOrCheckbox,
+  queryAllDeep,
+  findFileInputs,
+  base64ToFile,
+  attachFileToInput,
+  dropFileOnZone,
+  dropZoneFor,
 } from "./shared.js";
 
 const STATE = {
@@ -56,9 +62,10 @@ function collectFields() {
     ? Array.from(form.querySelectorAll("input, select, textarea")).filter(isApplicationInput)
     : [];
   if (els.length < MIN_FIELDS) {
-    els = Array.from(document.querySelectorAll("input, select, textarea")).filter(
-      isApplicationInput,
-    );
+    // Deep scan pierces OPEN shadow roots (SmartRecruiters et al. mount fields
+    // there, so a plain document scan returns 0). Also rescues a hijacked form
+    // root (first <form> was a header search/login form).
+    els = queryAllDeep(document, "input, select, textarea").filter(isApplicationInput);
   }
   // Group radios/checkboxes by name so a group counts as one question.
   const seenGroups = new Set();
@@ -133,8 +140,8 @@ function init() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-async function fillFields({ profile, resume, prefs }) {
-  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0 };
+async function fillFields({ profile, runId, prefs }) {
+  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0, fileAttached: 0, attachedName: "" };
   for (const f of STATE.fields) {
     const question = questionFor(f.el);
     if (!question) continue;
@@ -146,13 +153,10 @@ async function fillFields({ profile, resume, prefs }) {
       continue;
     }
 
-    // File upload: MV3 can't attach files programmatically. Flag for the
-    // download-then-drop flow instead of failing silently.
-    if (f.type === "file") {
-      setDot(f.el, COLORS.yellow);
-      summary.file++;
-      continue;
-    }
+    // File inputs are handled by the dedicated resume-attach pass after this
+    // loop (it also covers HIDDEN inputs behind drop-zones, which detection
+    // skips because they aren't visible).
+    if (f.type === "file") continue;
 
     // Contact info → profile (high confidence).
     const key = contactKeyFor(question);
@@ -189,6 +193,7 @@ async function fillFields({ profile, resume, prefs }) {
       summary.red++;
     }
   }
+  await attachResume(runId, document, summary);
   STATE.filledOnce = true;
   return summary;
 }
@@ -198,6 +203,50 @@ function applyValue(f, value) {
   if (f.type === "radio" || f.type === "checkbox")
     return clickRadioOrCheckbox(f.group || [f.el], value);
   return setInputValue(f.el, value);
+}
+
+// Resume auto-attach: the service worker fetches the tailored DOCX (it holds the
+// bearer token) and returns it base64-encoded; we decode it here and attach it
+// to every resume file input — including hidden ones behind a styled drop-zone.
+// User-initiated (part of Start filling); NEVER submits. Attached inputs go
+// green (summary.fileAttached); on any failure we leave the field yellow and the
+// popup shows the manual-download fallback (summary.file).
+async function attachResume(runId, root, summary) {
+  const inputs = findFileInputs(root);
+  if (!inputs.length) return;
+  if (!runId) {
+    for (const el of inputs) {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+    return;
+  }
+  let data = null;
+  try {
+    data = await chrome.runtime.sendMessage({ type: "RESUME_FILE", runId });
+  } catch (_) {
+    data = null;
+  }
+  if (!data || !data.base64) {
+    for (const el of inputs) {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+    return;
+  }
+  const file = base64ToFile(data.base64, data.filename, data.mime);
+  for (const el of inputs) {
+    let ok = attachFileToInput(el, file);
+    if (!ok) ok = dropFileOnZone(dropZoneFor(el), file);
+    if (ok) {
+      setDot(el, COLORS.green);
+      summary.fileAttached++;
+      summary.attachedName = data.filename;
+    } else {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+  }
 }
 
 // Messages from the popup / background.

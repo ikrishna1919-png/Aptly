@@ -217,3 +217,103 @@ export function clickRadioOrCheckbox(groupEls, value) {
   }
   return false;
 }
+
+// ── Deep (shadow-DOM-piercing) query ────────────────────────────────────────
+// querySelectorAll on `root` PLUS a recursive descent into every element's OPEN
+// .shadowRoot, concatenated. Modern ATSes (SmartRecruiters among them) can mount
+// form fields inside open shadow roots, which a plain document.querySelectorAll
+// cannot see — that's how detection can find 0 fields on a page that clearly has
+// inputs. NOTE: CLOSED shadow roots expose no .shadowRoot and are unreachable to
+// ANY extension; nothing we can do about those.
+export function queryAllDeep(root, selector) {
+  const out = [];
+  const visit = (node) => {
+    if (!node || typeof node.querySelectorAll !== "function") return;
+    for (const el of node.querySelectorAll(selector)) out.push(el);
+    // Descend into the open shadow root of every element in this subtree.
+    for (const el of node.querySelectorAll("*")) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+// ── Resume file attach (user-initiated, part of "Start filling") ────────────
+// Decode the base64 DOCX (fetched with the bearer token by the service worker —
+// the binary crosses the messaging boundary as base64 because Chrome messaging
+// is JSON-serialized) back into a File. atob is available in content scripts.
+export function base64ToFile(b64, name, mime) {
+  const binary = atob(b64 || "");
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new File([bytes], name || "Aptly_Resume.docx", { type: mime || DOCX_MIME });
+}
+
+// Attach a File to an <input type=file> the way the browser would — via a
+// DataTransfer — then fire input+change so React/controlled widgets notice.
+// Returns true only if the input actually holds the file afterwards.
+export function attachFileToInput(input, file) {
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return !!(input.files && input.files.length > 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Fallback for styled drop-zones: synthesise a drag-and-drop carrying the file.
+// Best-effort — we can't confirm the site accepted it — so callers prefer
+// attachFileToInput when a real input exists and only fall here if that fails.
+export function dropFileOnZone(zone, file) {
+  if (!zone) return false;
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    for (const type of ["dragenter", "dragover", "drop"]) {
+      zone.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// The visible drop target wrapping a (often hidden) file input.
+export function dropZoneFor(input) {
+  return (
+    (input.closest &&
+      input.closest("label, [class*='upload'], [class*='drop'], [class*='attach'], [class*='file']")) ||
+    input.parentElement ||
+    null
+  );
+}
+
+// True if `el` is a file input we'd attach a RESUME to — an <input type=file>
+// that is NOT an obvious photo/avatar/image picker. Deliberately does NOT check
+// visibility: resume inputs are routinely display:none behind a drop-zone, so
+// detection skips them but attach must still find them. Pure → unit-testable.
+export function isResumeFileInput(el) {
+  const tag = (el.tagName || "").toLowerCase();
+  const type = (el.getAttribute("type") || "").toLowerCase();
+  if (tag !== "input" || type !== "file") return false;
+  const hay = `${el.getAttribute("name") || ""} ${el.getAttribute("id") || ""}`.toLowerCase();
+  if (/photo|avatar|image|picture|headshot|logo|profile.?pic/.test(hay)) return false;
+  // Reject image-only pickers, but keep ones that also allow docs/pdf.
+  const accept = (el.getAttribute("accept") || "").toLowerCase();
+  if (accept && /image\//.test(accept) && !/(pdf|word|document|officedocument|\.docx?|\.pdf)/.test(accept)) {
+    return false;
+  }
+  return true;
+}
+
+// All resume-eligible file inputs under `root`, piercing open shadow roots.
+export function findFileInputs(root) {
+  return queryAllDeep(root, "input[type='file']").filter(isResumeFileInput);
+}

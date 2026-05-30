@@ -3,7 +3,7 @@
 // reproduces just the DOM surface the predicates touch (tagName, getAttribute,
 // offsetParent, closest, disabled). Run: `node test/detection.test.mjs`.
 import assert from "node:assert";
-import { isApplicationInput } from "../src/content/shared.js";
+import { isApplicationInput, isResumeFileInput } from "../src/content/shared.js";
 
 let passed = 0;
 function check(name, cond) {
@@ -18,12 +18,14 @@ function el({
   name = "",
   placeholder = "",
   role = "",
+  id = "",
+  accept = "",
   ariaHidden = false,
   disabled = false,
   visible = true,
   ancestors = [],
 } = {}) {
-  const attrs = { type, name, placeholder, role, "aria-hidden": ariaHidden ? "true" : null };
+  const attrs = { type, name, placeholder, role, id, accept, "aria-hidden": ariaHidden ? "true" : null };
   return {
     tagName: tag.toUpperCase(),
     disabled,
@@ -95,5 +97,23 @@ const oldFormPage = [
   el({ type: "file", name: "job_application[resume]" }),
 ];
 check("old form page still detected", countApp(oldFormPage) >= MIN_FIELDS);
+
+// ── Resume file-input filter (isResumeFileInput) ────────────────────────────
+// Used by the auto-attach finder; deliberately INCLUDES hidden inputs (resume
+// inputs sit display:none behind a drop-zone) and excludes photo/avatar pickers.
+check("resume file input accepted", isResumeFileInput(el({ type: "file", name: "resume", accept: ".pdf,.docx" })));
+check("CV file input accepted", isResumeFileInput(el({ type: "file", id: "cv-upload" })));
+check(
+  "hidden file input still accepted (drop-zone)",
+  isResumeFileInput(el({ type: "file", name: "resume", visible: false })),
+);
+check("avatar file input rejected", !isResumeFileInput(el({ type: "file", name: "avatar_photo" })));
+check("headshot id rejected", !isResumeFileInput(el({ type: "file", id: "profile-headshot" })));
+check("image-only accept rejected", !isResumeFileInput(el({ type: "file", accept: "image/*" })));
+check(
+  "image+pdf accept still accepted",
+  isResumeFileInput(el({ type: "file", name: "doc", accept: "image/*,application/pdf" })),
+);
+check("non-file input rejected", !isResumeFileInput(el({ type: "text", name: "resume" })));
 
 console.log(`detection.test: ${passed} assertions passed`);

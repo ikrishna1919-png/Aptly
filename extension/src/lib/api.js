@@ -40,6 +40,11 @@ export const api = {
   profile: () => call("/api/extension/profile"),
   tailorRuns: () => call("/api/extension/tailor-runs?limit=5"),
   resume: (runId) => call(`/api/extension/tailor-runs/${encodeURIComponent(runId)}/resume`),
+  // Raw DOCX download (binary). Returns the Response so the caller (the service
+  // worker) can read BOTH the body and the Content-Disposition filename. Used
+  // for resume auto-attach.
+  resumeFile: (runId) =>
+    call(`/api/extension/tailor-runs/${encodeURIComponent(runId)}/download`, { raw: true }),
   downloadUrl: (runId) =>
     `${API_BASE}/api/extension/tailor-runs/${encodeURIComponent(runId)}/download`,
   qaLookup: (question_text, field_type, options) =>
