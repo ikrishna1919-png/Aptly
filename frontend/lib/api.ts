@@ -986,3 +986,85 @@ export async function signOut(): Promise<void> {
     throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   }
 }
+
+// ── Browser extension (Connected devices + Saved answers) ───────────────────
+
+export type ExtensionSession = {
+  id: string;
+  device_name: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked: boolean;
+};
+
+export type SavedQA = {
+  id: string;
+  question_canonical: string;
+  answer: string;
+  field_type: string;
+  times_used: number;
+  source_ats: string | null;
+  updated_at: string;
+};
+
+/** Mint an extension bearer token (cookie-authed). Called by the
+ * /extension/connect page. */
+export async function createExtensionSession(deviceName?: string): Promise<{
+  token: string;
+  session_id: string;
+}> {
+  const res = await fetch(`${API_URL}/api/extension/sessions/create`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ device_name: deviceName ?? null }),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return res.json();
+}
+
+export async function listExtensionSessions(): Promise<ExtensionSession[]> {
+  const res = await fetch(`${API_URL}/api/extension/sessions`, { credentials: "include" });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return res.json();
+}
+
+export async function revokeExtensionSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/extension/sessions/revoke`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+}
+
+export async function listSavedQA(): Promise<SavedQA[]> {
+  const res = await fetch(`${API_URL}/api/extension/qa/list`, { credentials: "include" });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return res.json();
+}
+
+export async function updateSavedQA(
+  id: string,
+  patch: { answer?: string; question_canonical?: string },
+): Promise<SavedQA> {
+  const res = await fetch(`${API_URL}/api/extension/qa/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return res.json();
+}
+
+export async function deleteSavedQA(id: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/extension/qa/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  }
+}

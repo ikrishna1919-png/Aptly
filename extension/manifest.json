@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Aptly — application assistant",
+  "version": "1.0.0",
+  "description": "Helps you fill Greenhouse job application forms with your Aptly profile and tailored resumes. You review every field and submit yourself.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://api.aptly.fyi/*",
+    "https://boards.greenhouse.io/*",
+    "https://*.greenhouse.io/*",
+    "https://job-boards.greenhouse.io/*"
+  ],
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "public/icons/icon-16.png",
+      "32": "public/icons/icon-32.png",
+      "48": "public/icons/icon-48.png",
+      "128": "public/icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "public/icons/icon-16.png",
+    "32": "public/icons/icon-32.png",
+    "48": "public/icons/icon-48.png",
+    "128": "public/icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://boards.greenhouse.io/*",
+        "https://*.greenhouse.io/*",
+        "https://job-boards.greenhouse.io/*"
+      ],
+      "js": ["src/content/greenhouse.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "externally_connectable": {
+    "matches": ["https://aptly.fyi/*"]
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["src/popup/connected.html"],
+      "matches": ["https://aptly.fyi/*"]
+    }
+  ]
+}

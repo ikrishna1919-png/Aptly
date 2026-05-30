@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Aptly connected</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        display: grid;
+        place-items: center;
+        height: 100vh;
+        margin: 0;
+        color: #1b2330;
+      }
+      .box { text-align: center; max-width: 360px; padding: 24px; }
+      h1 { font-size: 20px; }
+      p { color: #5b6677; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h1 id="title">Connecting…</h1>
+      <p id="msg">Finishing sign-in.</p>
+    </div>
+    <script type="module">
+      // Fallback connect target. The primary path posts the token to the
+      // service worker from the aptly.fyi connect page via
+      // chrome.runtime.sendMessage (externally_connectable). This page handles
+      // the alternate flow where the token arrives in the URL fragment
+      // (#token=...) — fragments never reach the server.
+      import { setToken } from "../lib/storage.js";
+      const frag = new URLSearchParams(location.hash.slice(1));
+      const token = frag.get("token");
+      const title = document.getElementById("title");
+      const msg = document.getElementById("msg");
+      if (token) {
+        setToken(token).then(() => {
+          title.textContent = "You're connected";
+          msg.textContent = "You can close this tab and use Aptly from the toolbar.";
+          history.replaceState(null, "", location.pathname);
+        });
+      } else {
+        title.textContent = "Couldn't connect";
+        msg.textContent = "No token received. Please try signing in again from the extension.";
+      }
+    </script>
+  </body>
+</html>
