@@ -205,10 +205,13 @@ async function renderAts(me, tab, info, experimental) {
     btn.disabled = true;
     btn.textContent = "Filling…";
     try {
-      const [profile, resume] = await Promise.all([api.profile(), runId ? api.resume(runId) : null]);
+      const profile = await api.profile();
+      // runId (not the resume body) goes to the content script; it asks the
+      // service worker to fetch + attach the DOCX so the token stays out of the
+      // page world.
       const res = await chrome.tabs.sendMessage(tab.id, {
         type: "GH_FILL",
-        payload: { profile, resume, prefs: {} },
+        payload: { profile, runId, prefs: {} },
       });
       renderSummary(res?.summary, runId);
     } catch (e) {
@@ -223,11 +226,17 @@ async function renderAts(me, tab, info, experimental) {
 function renderSummary(summary, runId) {
   if (!summary) return;
   const el = document.getElementById("result");
+  const attachedNote =
+    summary.fileAttached > 0
+      ? `<div class="hint" style="background:#dcfce7;border-color:#bbf7d0">Resume attached${
+          summary.attachedName ? `: <b>${summary.attachedName}</b>` : ""
+        }. Confirm it on the page before submitting.</div>`
+      : "";
   const fileNote =
     summary.file > 0
-      ? `<div class="hint">Resume upload can't be auto-attached (a browser security rule).
-         <a href="${api.downloadUrl(runId)}" target="_blank">Download your DOCX</a> and drop it
-         into the resume field.</div>`
+      ? `<div class="hint">Couldn't auto-attach the resume to ${summary.file} field(s)
+         (a browser security rule can block it). <a href="${api.downloadUrl(runId)}" target="_blank">Download
+         your DOCX</a> and drop it into the resume field.</div>`
       : "";
   el.innerHTML = `
     <div class="card summary">
@@ -236,6 +245,7 @@ function renderSummary(summary, runId) {
       ${summary.sensitive > 0 ? `<p class="muted" style="margin:0">${summary.sensitive} demographic field(s) left blank (voluntary).</p>` : ""}
       <p class="muted" style="margin:8px 0 0">Review each field on the page, then submit it yourself.</p>
     </div>
+    ${attachedNote}
     ${fileNote}
   `;
 }

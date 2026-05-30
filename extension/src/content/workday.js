@@ -30,6 +30,12 @@ import {
   setSelectValue,
   clickRadioOrCheckbox,
   matchOptionByText,
+  queryAllDeep,
+  findFileInputs,
+  base64ToFile,
+  attachFileToInput,
+  dropFileOnZone,
+  dropZoneFor,
 } from "./shared.js";
 
 const STATE = {
@@ -101,9 +107,9 @@ function workdayQuestionFor(el) {
 function collectWorkdayFields() {
   const root =
     document.querySelector("[data-automation-id='applyFlowPage'], form") || document;
-  const nodes = Array.from(
-    root.querySelectorAll(`input, select, textarea, ${CUSTOM_DROPDOWN_SELECTOR}`),
-  );
+  // Deep scan so shadow-DOM-mounted widgets are found too (open shadow roots
+  // only — closed ones are unreachable to any extension).
+  const nodes = queryAllDeep(root, `input, select, textarea, ${CUSTOM_DROPDOWN_SELECTOR}`);
   const seenGroups = new Set();
   const fields = [];
   for (const el of nodes) {
@@ -247,8 +253,8 @@ async function applyWorkdayValue(f, value) {
   return true;
 }
 
-async function fillFields({ profile, prefs }) {
-  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0 };
+async function fillFields({ profile, runId, prefs }) {
+  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0, fileAttached: 0, attachedName: "" };
   for (const f of STATE.fields) {
     const question = workdayQuestionFor(f.el);
     if (!question) continue;
@@ -260,12 +266,9 @@ async function fillFields({ profile, prefs }) {
       continue;
     }
 
-    // File upload: MV3 can't attach files programmatically — flag for review.
-    if (f.kind === "file") {
-      setDot(f.el, COLORS.yellow);
-      summary.file++;
-      continue;
-    }
+    // File inputs handled by the dedicated resume-attach pass below (covers
+    // hidden inputs behind drop-zones too).
+    if (f.kind === "file") continue;
 
     // Dates / spinbuttons: never guess — leave for the user to review.
     if (f.kind === "review-date") {
@@ -308,8 +311,52 @@ async function fillFields({ profile, prefs }) {
       summary.red++;
     }
   }
+  await attachResume(runId, document, summary);
   STATE.filledOnce = true;
   return summary;
+}
+
+// Resume auto-attach (identical contract to greenhouse.js). The service worker
+// fetches the DOCX with the bearer token and returns it base64; we decode +
+// attach to every resume file input, including hidden ones behind a drop-zone.
+// User-initiated; NEVER submits. Green on success (summary.fileAttached), yellow
+// + manual-download fallback on failure (summary.file).
+async function attachResume(runId, root, summary) {
+  const inputs = findFileInputs(root);
+  if (!inputs.length) return;
+  if (!runId) {
+    for (const el of inputs) {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+    return;
+  }
+  let data = null;
+  try {
+    data = await chrome.runtime.sendMessage({ type: "RESUME_FILE", runId });
+  } catch (_) {
+    data = null;
+  }
+  if (!data || !data.base64) {
+    for (const el of inputs) {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+    return;
+  }
+  const file = base64ToFile(data.base64, data.filename, data.mime);
+  for (const el of inputs) {
+    let ok = attachFileToInput(el, file);
+    if (!ok) ok = dropFileOnZone(dropZoneFor(el), file);
+    if (ok) {
+      setDot(el, COLORS.green);
+      summary.fileAttached++;
+      summary.attachedName = data.filename;
+    } else {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+  }
 }
 
 // Messages from the popup / background — same GH_* protocol as greenhouse.js.

@@ -244,6 +244,106 @@ function clickRadioOrCheckbox(groupEls, value) {
   return false;
 }
 
+// ── Deep (shadow-DOM-piercing) query ────────────────────────────────────────
+// querySelectorAll on `root` PLUS a recursive descent into every element's OPEN
+// .shadowRoot, concatenated. Modern ATSes (SmartRecruiters among them) can mount
+// form fields inside open shadow roots, which a plain document.querySelectorAll
+// cannot see — that's how detection can find 0 fields on a page that clearly has
+// inputs. NOTE: CLOSED shadow roots expose no .shadowRoot and are unreachable to
+// ANY extension; nothing we can do about those.
+function queryAllDeep(root, selector) {
+  const out = [];
+  const visit = (node) => {
+    if (!node || typeof node.querySelectorAll !== "function") return;
+    for (const el of node.querySelectorAll(selector)) out.push(el);
+    // Descend into the open shadow root of every element in this subtree.
+    for (const el of node.querySelectorAll("*")) {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+// ── Resume file attach (user-initiated, part of "Start filling") ────────────
+// Decode the base64 DOCX (fetched with the bearer token by the service worker —
+// the binary crosses the messaging boundary as base64 because Chrome messaging
+// is JSON-serialized) back into a File. atob is available in content scripts.
+function base64ToFile(b64, name, mime) {
+  const binary = atob(b64 || "");
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new File([bytes], name || "Aptly_Resume.docx", { type: mime || DOCX_MIME });
+}
+
+// Attach a File to an <input type=file> the way the browser would — via a
+// DataTransfer — then fire input+change so React/controlled widgets notice.
+// Returns true only if the input actually holds the file afterwards.
+function attachFileToInput(input, file) {
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return !!(input.files && input.files.length > 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Fallback for styled drop-zones: synthesise a drag-and-drop carrying the file.
+// Best-effort — we can't confirm the site accepted it — so callers prefer
+// attachFileToInput when a real input exists and only fall here if that fails.
+function dropFileOnZone(zone, file) {
+  if (!zone) return false;
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    for (const type of ["dragenter", "dragover", "drop"]) {
+      zone.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// The visible drop target wrapping a (often hidden) file input.
+function dropZoneFor(input) {
+  return (
+    (input.closest &&
+      input.closest("label, [class*='upload'], [class*='drop'], [class*='attach'], [class*='file']")) ||
+    input.parentElement ||
+    null
+  );
+}
+
+// True if `el` is a file input we'd attach a RESUME to — an <input type=file>
+// that is NOT an obvious photo/avatar/image picker. Deliberately does NOT check
+// visibility: resume inputs are routinely display:none behind a drop-zone, so
+// detection skips them but attach must still find them. Pure → unit-testable.
+function isResumeFileInput(el) {
+  const tag = (el.tagName || "").toLowerCase();
+  const type = (el.getAttribute("type") || "").toLowerCase();
+  if (tag !== "input" || type !== "file") return false;
+  const hay = `${el.getAttribute("name") || ""} ${el.getAttribute("id") || ""}`.toLowerCase();
+  if (/photo|avatar|image|picture|headshot|logo|profile.?pic/.test(hay)) return false;
+  // Reject image-only pickers, but keep ones that also allow docs/pdf.
+  const accept = (el.getAttribute("accept") || "").toLowerCase();
+  if (accept && /image\//.test(accept) && !/(pdf|word|document|officedocument|\.docx?|\.pdf)/.test(accept)) {
+    return false;
+  }
+  return true;
+}
+
+// All resume-eligible file inputs under `root`, piercing open shadow roots.
+function findFileInputs(root) {
+  return queryAllDeep(root, "input[type='file']").filter(isResumeFileInput);
+}
+
   // ── src/content/greenhouse.js ──
 // Standard-DOM ATS content script. Despite the filename (kept as-is this
 // release to avoid a churny rename), this now serves every ATS that exposes a
@@ -293,9 +393,10 @@ function collectFields() {
     ? Array.from(form.querySelectorAll("input, select, textarea")).filter(isApplicationInput)
     : [];
   if (els.length < MIN_FIELDS) {
-    els = Array.from(document.querySelectorAll("input, select, textarea")).filter(
-      isApplicationInput,
-    );
+    // Deep scan pierces OPEN shadow roots (SmartRecruiters et al. mount fields
+    // there, so a plain document scan returns 0). Also rescues a hijacked form
+    // root (first <form> was a header search/login form).
+    els = queryAllDeep(document, "input, select, textarea").filter(isApplicationInput);
   }
   // Group radios/checkboxes by name so a group counts as one question.
   const seenGroups = new Set();
@@ -370,8 +471,8 @@ function init() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-async function fillFields({ profile, resume, prefs }) {
-  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0 };
+async function fillFields({ profile, runId, prefs }) {
+  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0, fileAttached: 0, attachedName: "" };
   for (const f of STATE.fields) {
     const question = questionFor(f.el);
     if (!question) continue;
@@ -383,13 +484,10 @@ async function fillFields({ profile, resume, prefs }) {
       continue;
     }
 
-    // File upload: MV3 can't attach files programmatically. Flag for the
-    // download-then-drop flow instead of failing silently.
-    if (f.type === "file") {
-      setDot(f.el, COLORS.yellow);
-      summary.file++;
-      continue;
-    }
+    // File inputs are handled by the dedicated resume-attach pass after this
+    // loop (it also covers HIDDEN inputs behind drop-zones, which detection
+    // skips because they aren't visible).
+    if (f.type === "file") continue;
 
     // Contact info → profile (high confidence).
     const key = contactKeyFor(question);
@@ -426,6 +524,7 @@ async function fillFields({ profile, resume, prefs }) {
       summary.red++;
     }
   }
+  await attachResume(runId, document, summary);
   STATE.filledOnce = true;
   return summary;
 }
@@ -435,6 +534,50 @@ function applyValue(f, value) {
   if (f.type === "radio" || f.type === "checkbox")
     return clickRadioOrCheckbox(f.group || [f.el], value);
   return setInputValue(f.el, value);
+}
+
+// Resume auto-attach: the service worker fetches the tailored DOCX (it holds the
+// bearer token) and returns it base64-encoded; we decode it here and attach it
+// to every resume file input — including hidden ones behind a styled drop-zone.
+// User-initiated (part of Start filling); NEVER submits. Attached inputs go
+// green (summary.fileAttached); on any failure we leave the field yellow and the
+// popup shows the manual-download fallback (summary.file).
+async function attachResume(runId, root, summary) {
+  const inputs = findFileInputs(root);
+  if (!inputs.length) return;
+  if (!runId) {
+    for (const el of inputs) {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+    return;
+  }
+  let data = null;
+  try {
+    data = await chrome.runtime.sendMessage({ type: "RESUME_FILE", runId });
+  } catch (_) {
+    data = null;
+  }
+  if (!data || !data.base64) {
+    for (const el of inputs) {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+    return;
+  }
+  const file = base64ToFile(data.base64, data.filename, data.mime);
+  for (const el of inputs) {
+    let ok = attachFileToInput(el, file);
+    if (!ok) ok = dropFileOnZone(dropZoneFor(el), file);
+    if (ok) {
+      setDot(el, COLORS.green);
+      summary.fileAttached++;
+      summary.attachedName = data.filename;
+    } else {
+      setDot(el, COLORS.yellow);
+      summary.file++;
+    }
+  }
 }
 
 // Messages from the popup / background.
