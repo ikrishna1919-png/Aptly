@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { Badge } from "@/components/ui/badge";
@@ -961,13 +962,26 @@ function ResumeFooter({
 
 function DownloadMenu({ resume, job }: { resume: TailoredResume; job: Job }) {
   const [open, setOpen] = useState(false);
-  const [format, setFormat] = useState<"docx" | "pdf">("docx");
   const [mode, setMode] = useState<ResumeMode>("visual");
   // Header alignment defaults to center (most common resume style) and is
   // remembered for the rest of the session via this state.
   const [headerAlignment, setHeaderAlignment] = useState<HeaderAlignment>("center");
-  const [downloading, setDownloading] = useState(false);
+  const [downloading, setDownloading] = useState<"docx" | "pdf" | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // The menu is portaled to <body> (so it escapes the result card's
+  // `overflow-hidden` and the Framer-Motion `transform` ancestor that were
+  // clipping/anchoring it off-screen) and positioned with fixed coords that
+  // flip above the trigger when there isn't room below. `pos` is null until
+  // measured; the menu stays hidden until then so it never flashes at 0,0.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+    maxHeight: number;
+  } | null>(null);
 
   const filename = useMemo(
     () =>
@@ -979,15 +993,75 @@ function DownloadMenu({ resume, job }: { resume: TailoredResume; job: Job }) {
     [job.company, job.title],
   );
 
-  async function download() {
-    setDownloading(true);
+  const place = useCallback(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const GAP = 6;
+    const PAD = 12;
+    const WIDTH = 288; // w-72
+    const spaceBelow = window.innerHeight - r.bottom;
+    const spaceAbove = r.top;
+    // Open below if there's a comfortable amount of room, otherwise wherever
+    // there's more space. Never hardcoded — adapts to viewport + scroll.
+    const below = spaceBelow >= 260 || spaceBelow >= spaceAbove;
+    let left = r.right - WIDTH; // align the menu's right edge to the trigger
+    left = Math.max(PAD, Math.min(left, window.innerWidth - WIDTH - PAD));
+    if (below) {
+      setPos({ left, top: r.bottom + GAP, maxHeight: Math.max(160, spaceBelow - GAP - PAD) });
+    } else {
+      setPos({
+        left,
+        bottom: window.innerHeight - r.top + GAP,
+        maxHeight: Math.max(160, spaceAbove - GAP - PAD),
+      });
+    }
+  }, []);
+
+  // Position on open + keep it pinned to the trigger on scroll/resize.
+  useEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    place();
+    const onMove = () => place();
+    window.addEventListener("resize", onMove);
+    window.addEventListener("scroll", onMove, true);
+    return () => {
+      window.removeEventListener("resize", onMove);
+      window.removeEventListener("scroll", onMove, true);
+    };
+  }, [open, place]);
+
+  // Esc + outside-click close.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (menuRef.current?.contains(t) || triggerRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [open]);
+
+  async function download(fmt: "docx" | "pdf") {
+    setDownloading(fmt);
     setErr(null);
     try {
-      const blob = await downloadResume(resume, filename, format, mode, headerAlignment);
+      const blob = await downloadResume(resume, filename, fmt, mode, headerAlignment);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${filename}.${format}`;
+      a.download = `${filename}.${fmt}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -996,54 +1070,82 @@ function DownloadMenu({ resume, job }: { resume: TailoredResume; job: Job }) {
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Download failed");
     } finally {
-      setDownloading(false);
+      setDownloading(null);
     }
   }
 
-  return (
-    <div className="relative">
-      <Button onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-haspopup="true">
-        Download
-      </Button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute z-20 mt-2 w-72 space-y-3 rounded-lg border border-border bg-card p-3 shadow-md"
-        >
-          <Choice
-            label="Format"
-            options={[
-              { value: "docx", label: "DOCX" },
-              { value: "pdf", label: "PDF" },
-            ]}
-            value={format}
-            onChange={(v) => setFormat(v as "docx" | "pdf")}
-          />
-          <Choice
-            label="Style"
-            options={[
-              { value: "visual", label: "Visual" },
-              { value: "plain", label: "Plain — max ATS" },
-            ]}
-            value={mode}
-            onChange={(v) => setMode(v as ResumeMode)}
-          />
-          <Choice
-            label="Header alignment"
-            options={[
-              { value: "left", label: "Left" },
-              { value: "center", label: "Center" },
-              { value: "right", label: "Right" },
-            ]}
-            value={headerAlignment}
-            onChange={(v) => setHeaderAlignment(v as HeaderAlignment)}
-          />
-          {err && <p className="text-xs text-destructive">{err}</p>}
-          <Button className="w-full" disabled={downloading} onClick={() => void download()}>
-            {downloading ? "Preparing…" : `Download .${format}`}
+  const menu =
+    open &&
+    createPortal(
+      <div
+        ref={menuRef}
+        role="menu"
+        aria-label="Download options"
+        style={{
+          position: "fixed",
+          left: pos?.left ?? 0,
+          top: pos?.top,
+          bottom: pos?.bottom,
+          maxHeight: pos?.maxHeight,
+          visibility: pos ? "visible" : "hidden",
+        }}
+        className="z-[60] flex w-72 flex-col gap-3 overflow-y-auto rounded-lg border border-border bg-card p-3 shadow-lg"
+      >
+        {/* Primary actions: the two formats, single-click. */}
+        <div className="flex flex-col gap-2">
+          <Button
+            className="w-full justify-center"
+            disabled={downloading !== null}
+            onClick={() => void download("docx")}
+          >
+            {downloading === "docx" ? "Preparing…" : "Download as DOCX"}
+          </Button>
+          <Button
+            variant="outline"
+            className="w-full justify-center"
+            disabled={downloading !== null}
+            onClick={() => void download("pdf")}
+          >
+            {downloading === "pdf" ? "Preparing…" : "Download as PDF"}
           </Button>
         </div>
-      )}
+        {err && <p className="text-xs text-destructive">{err}</p>}
+        <Separator />
+        {/* Secondary controls (carried over from the prior PR). */}
+        <Choice
+          label="Style"
+          options={[
+            { value: "visual", label: "Visual" },
+            { value: "plain", label: "Plain — max ATS" },
+          ]}
+          value={mode}
+          onChange={(v) => setMode(v as ResumeMode)}
+        />
+        <Choice
+          label="Header alignment"
+          options={[
+            { value: "left", label: "Left" },
+            { value: "center", label: "Center" },
+            { value: "right", label: "Right" },
+          ]}
+          value={headerAlignment}
+          onChange={(v) => setHeaderAlignment(v as HeaderAlignment)}
+        />
+      </div>,
+      document.body,
+    );
+
+  return (
+    <div className="relative">
+      <Button
+        ref={triggerRef}
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        Download
+      </Button>
+      {menu}
     </div>
   );
 }
