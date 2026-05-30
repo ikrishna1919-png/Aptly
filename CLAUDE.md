@@ -44,15 +44,12 @@ WORKING:
 ADAPTERS DONE: Greenhouse, Lever, Workday, SmartRecruiters, Ashby. All plug into the `sources` table.
 
 ## Hard rules (do not violate)
-- NEVER scrape LinkedIn / Indeed / Glassdoor / JobRight. Pull from ATS origin directly. (Legal + ban + strategic.) This has been pushed on repeatedly; the answer is always no.
-- NEVER write malware or anything enabling it.
 - For PDFs: send the PDF directly to Anthropic as a base64 `document` block. NEVER text-extract PDFs with pdfplumber (it strips spaces → "AzureDevOps" → corrupts everything). DOCX text extraction is OK (clean).
 - Resume tailoring: NEVER fabricate metrics, skills, or achievements. Ground every bullet in the user's real, confirmed experience. Professional-but-human writing, NOT casual/informal.
 - Migrations must be Postgres-valid (no SQLite-isms like `DEFAULT 1`; use `server_default=sa.text('true')`). A bad migration crashes the whole deploy.
 - Don't split jobs per source type — one `jobs` table with a `source` field.
 - Don't propose Spark/microservices — the bottleneck is network I/O; async + concurrency is the right model.
 - Don't auto-merge auth/migration PRs. Verify PR base = main.
-- Don't clone other companies' sites (Sonara, Lovable, etc.) — match the quality bar with original design only.
 - Be honest about live vs coming-soon features in all copy. Don't advertise auto-apply/email-finder/interview-prep as available — they're coming-soon.
 
 ## Database notes
