@@ -38,6 +38,7 @@ from reportlab.platypus import (
     Spacer,
 )
 
+from app.services.resume_formats import FormatSpec, resolve_format
 from app.services.resume_layout import (
     SEP,
     Bullet,
@@ -69,11 +70,20 @@ _RULE = Color(0.6, 0.6, 0.6)
 _PDF_HEADER_ALIGN = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
 
 
-def _styles(header_alignment: str = "center") -> dict[str, ParagraphStyle]:
+def _styles(
+    header_alignment: str = "center", spec: FormatSpec | None = None
+) -> dict[str, ParagraphStyle]:
     header_align = _PDF_HEADER_ALIGN.get(header_alignment, TA_CENTER)
+    # Format-driven knobs (default = current Helvetica + ink behaviour).
+    if spec is not None and spec.serif:
+        font, font_bold = "Times-Roman", "Times-Bold"
+    else:
+        font, font_bold = _FONT, _FONT_BOLD
+    heading_color = Color(*(c / 255 for c in spec.accent)) if spec is not None else _INK
+    heading_gap = spec.section_gap if spec is not None else 1.0
     base = ParagraphStyle(
         "body",
-        fontName=_FONT,
+        fontName=font,
         fontSize=_BODY_PT,
         leading=_BODY_PT * 1.25,
         alignment=TA_LEFT,
@@ -85,7 +95,7 @@ def _styles(header_alignment: str = "center") -> dict[str, ParagraphStyle]:
         "name": ParagraphStyle(
             "name",
             parent=base,
-            fontName=_FONT_BOLD,
+            fontName=font_bold,
             fontSize=_NAME_PT,
             leading=_NAME_PT * 1.1,
             spaceAfter=2,
@@ -124,17 +134,17 @@ def _styles(header_alignment: str = "center") -> dict[str, ParagraphStyle]:
         "heading": ParagraphStyle(
             "heading",
             parent=base,
-            fontName=_FONT_BOLD,
+            fontName=font_bold,
             fontSize=11,
             leading=13,
-            spaceBefore=10,
-            spaceAfter=3,
-            textColor=_INK,
+            spaceBefore=10 * heading_gap,
+            spaceAfter=3 * heading_gap,
+            textColor=heading_color,
         ),
         "entry1": ParagraphStyle(
             "entry1",
             parent=base,
-            fontName=_FONT_BOLD,
+            fontName=font_bold,
             spaceAfter=0,
         ),
         "bullet": ParagraphStyle(
@@ -191,8 +201,16 @@ class TwoColLine(Flowable):
             self.canv.drawRightString(self.width, 2, self.right)
 
 
-def _flowables(resume: TailoredResume, *, plain: bool, header_alignment: str = "center") -> list:
-    styles = _styles(header_alignment)
+def _flowables(
+    resume: TailoredResume,
+    *,
+    plain: bool,
+    header_alignment: str = "center",
+    spec: FormatSpec | None = None,
+) -> list:
+    styles = _styles(header_alignment, spec)
+    # Heading rule shows in non-plain modes; a format can suppress it (minimal).
+    rule = (spec.heading_rule if spec is not None else True) and not plain
     out: list = []
     for block in build_blocks(resume):
         if isinstance(block, Header):
@@ -204,7 +222,7 @@ def _flowables(resume: TailoredResume, *, plain: bool, header_alignment: str = "
                     out.append(Paragraph(escape(line), styles["header_contact"]))
         elif isinstance(block, Heading):
             out.append(Paragraph(escape(block.text), styles["heading"]))
-            if not plain:
+            if rule:
                 out.append(HRule())
                 out.append(Spacer(1, 3))
         elif isinstance(block, Para):
@@ -225,20 +243,32 @@ def _flowables(resume: TailoredResume, *, plain: bool, header_alignment: str = "
 
 
 def _build(
-    resume: TailoredResume, *, mode: str | None, header_alignment: str = "center"
+    resume: TailoredResume,
+    *,
+    mode: str | None,
+    header_alignment: str = "center",
+    fmt: str | None = None,
+    custom: dict | None = None,
 ) -> tuple[bytes, int]:
-    """Build the PDF and return (bytes, page_count)."""
-    chosen = (mode or resume.meta.mode or "visual").lower()
-    plain = chosen == "plain"
+    """Build the PDF and return (bytes, page_count). `fmt`/`custom` select an
+    /ats format; when omitted the legacy `mode` behaviour is unchanged."""
+    spec = resolve_format(fmt, custom) if fmt is not None else None
+    if spec is not None:
+        plain = spec.plain
+        margin = spec.margins * inch
+    else:
+        chosen = (mode or resume.meta.mode or "visual").lower()
+        plain = chosen == "plain"
+        margin = _MARGIN
 
     buf = io.BytesIO()
     doc = BaseDocTemplate(
         buf,
         pagesize=letter,
-        leftMargin=_MARGIN,
-        rightMargin=_MARGIN,
-        topMargin=_MARGIN,
-        bottomMargin=_MARGIN,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
         title="Tailored resume",
     )
     frame = Frame(
@@ -253,24 +283,34 @@ def _build(
         id="body",
     )
     doc.addPageTemplates([PageTemplate(id="single", frames=[frame])])
-    doc.build(_flowables(resume, plain=plain, header_alignment=header_alignment))
+    doc.build(_flowables(resume, plain=plain, header_alignment=header_alignment, spec=spec))
     # BaseDocTemplate.page holds the last page number after a build.
     return buf.getvalue(), max(1, doc.page)
 
 
 def render_pdf(
-    resume: TailoredResume, *, mode: str | None = None, header_alignment: str = "center"
+    resume: TailoredResume,
+    *,
+    mode: str | None = None,
+    header_alignment: str = "center",
+    fmt: str | None = None,
+    custom: dict | None = None,
 ) -> bytes:
-    """Render `resume` to PDF bytes. `mode` is "visual" (default) or
-    "plain"; falls back to the resume's own `meta.mode`. `header_alignment`
-    ("left" | "center" | "right", default "center") positions the name +
-    contact header block; body text always stays left."""
-    return _build(resume, mode=mode, header_alignment=header_alignment)[0]
+    """Render `resume` to PDF bytes. Legacy `mode` ("visual"/"plain") unchanged;
+    pass `fmt`/`custom` to select an /ats format. `header_alignment` positions
+    the name+contact block; body text always stays left."""
+    return _build(resume, mode=mode, header_alignment=header_alignment, fmt=fmt, custom=custom)[0]
 
 
-def count_pages(resume: TailoredResume, *, mode: str | None = None) -> int:
-    """Return the exact rendered page count for `resume` in `mode`."""
-    return _build(resume, mode=mode)[1]
+def count_pages(
+    resume: TailoredResume,
+    *,
+    mode: str | None = None,
+    fmt: str | None = None,
+    custom: dict | None = None,
+) -> int:
+    """Return the exact rendered page count for `resume`."""
+    return _build(resume, mode=mode, fmt=fmt, custom=custom)[1]
 
 
 __all__ = ["render_pdf", "count_pages"]

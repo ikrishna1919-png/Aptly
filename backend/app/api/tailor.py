@@ -280,6 +280,10 @@ class RenderRequest(BaseModel):
         default="center",
         description='Header (name + contact) alignment: "left" | "center" | "right".',
     )
+    # /ats format selection. When set, overrides `mode`: "modern" | "classic" |
+    # "minimal" | "plain" | "custom". `custom_options` carries the custom knobs.
+    fmt: str | None = Field(default=None, description="ATS format name (overrides mode).")
+    custom_options: dict | None = Field(default=None, description="Custom-format options.")
     filename: str | None = Field(
         default=None, max_length=128, description="Override the suggested filename"
     )
@@ -301,7 +305,13 @@ def tailor_docx(
     Contact details live on the resume itself (reconciled server-side from
     the profile at generate time), so the download reflects the saved
     profile without re-running the LLM."""
-    raw = render_docx(payload.resume, mode=payload.mode, header_alignment=payload.header_alignment)
+    raw = render_docx(
+        payload.resume,
+        mode=payload.mode,
+        header_alignment=payload.header_alignment,
+        fmt=payload.fmt,
+        custom=payload.custom_options,
+    )
     name = _filename(payload.filename, "docx")
     return StreamingResponse(
         io.BytesIO(raw),
@@ -317,7 +327,13 @@ def tailor_pdf(
 ) -> StreamingResponse:
     """Stream the tailored resume as a PDF in the requested `mode`. Same
     text content as the DOCX — only the styling differs."""
-    raw = render_pdf(payload.resume, mode=payload.mode, header_alignment=payload.header_alignment)
+    raw = render_pdf(
+        payload.resume,
+        mode=payload.mode,
+        header_alignment=payload.header_alignment,
+        fmt=payload.fmt,
+        custom=payload.custom_options,
+    )
     name = _filename(payload.filename, "pdf")
     return StreamingResponse(
         io.BytesIO(raw),

@@ -21,7 +21,7 @@ analyze step finds no askable gaps.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -62,6 +62,20 @@ class TailorRun(Base):
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # User-facing error message on `error`. Null otherwise.
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── ATS resume-hub fields (additive; null for plain tailor runs) ──────────
+    # 'jd_paste' | 'upload_docx' | 'upload_pdf_fallback'. Null = a normal
+    # job-page tailor run.
+    option_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    uploaded_filename: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Original DOCX bytes, kept for the keyword-injection path (edited in place
+    # to preserve the user's exact formatting).
+    uploaded_docx_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # 'modern' | 'classic' | 'minimal' | 'plain' | 'custom'.
+    format_selection: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # {base, accent_color, font_family, margins} for the custom format.
+    custom_options_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # The 6 customization answers (length/tone/emphasis/skills/roles/additional).
+    questions_answers_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
