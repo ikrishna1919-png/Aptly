@@ -37,7 +37,8 @@
         "https://job-boards.greenhouse.io/*"
       ],
       "js": ["src/content/greenhouse.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "externally_connectable": {

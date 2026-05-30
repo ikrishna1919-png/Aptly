@@ -75,7 +75,34 @@ extension/
       api.js  storage.js  config.js
   public/icons/            16/32/48/128 px icons
   scripts/build.mjs        validate + emit dist/
+  test/detection.test.mjs  node test for the field-detection heuristic
 ```
+
+Run `npm test` (no deps) to exercise the detection heuristic against a DOM
+stub; `npm run validate` to check the manifest references resolve.
+
+## How form detection works (and the Greenhouse DOM)
+
+Detection is **selector-agnostic** so it survives Greenhouse DOM changes
+without per-version selectors:
+
+- It scans the whole document for visible `<input>/<select>/<textarea>`
+  (`isApplicationInput` in `shared.js`), excluding chrome (nav/header/footer),
+  search boxes, and subscribe/language widgets.
+- A page counts as an application form once **≥ 3** such inputs are present.
+- A debounced `MutationObserver` on `document.body` re-detects as the page
+  renders, and the popup re-detects fresh on open (`GH_PING`). Console logs are
+  prefixed `[Aptly]` for easy debugging.
+
+Greenhouse runs **two DOM generations**:
+
+- **Old — `boards.greenhouse.io`:** server-rendered, fields inside a real
+  `<form id="application_form">`, questions in `<label for=…>`.
+- **New — `job-boards.greenhouse.io`:** a React SPA. The application form mounts
+  *after* initial load (so one-shot detection misses it) and may **not** wrap
+  fields in a `<form>` at all — which is exactly why the old form-centric
+  detection failed. The page-wide scan + `MutationObserver` handle both, and
+  `all_frames: true` covers forms embedded in iframes on custom company domains.
 
 ## Hard rules (by design)
 
