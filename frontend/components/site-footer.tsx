@@ -1,8 +1,17 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 
 import { Logo } from "@/components/logo";
 
 export function SiteFooter() {
+  // The landing route (`/`) is a self-contained full-viewport experience with
+  // its own minimal "© Aptly" footer line, so the global footer steps aside
+  // there. Only `/` is affected; every other route keeps the standard footer.
+  const pathname = usePathname() || "/";
+  if (pathname === "/") return null;
+
   return (
     <footer className="border-t border-border/60 bg-background">
       <div className="container flex flex-col gap-8 py-12 text-sm text-muted-foreground sm:flex-row sm:items-start sm:justify-between">
