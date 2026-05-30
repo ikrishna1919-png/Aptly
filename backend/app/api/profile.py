@@ -28,11 +28,14 @@ operator endpoints under `/api/admin/*` (ingest, manual jobs).
 
 from __future__ import annotations
 
+import io
 import logging
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session

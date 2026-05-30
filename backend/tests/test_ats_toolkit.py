@@ -9,7 +9,6 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import Settings
 from app.database import Base
-from app.models.candidate import Candidate
 from app.models.user import User
 from app.services import ats
 
@@ -40,7 +39,8 @@ class _Client:
 
 def test_keyword_retry_recovers_from_bad_json():
     ats.keyword_parse_failures.update({"first": 0, "retry": 0})
-    bad = '{"edits":[{"original_text":"Python","replacement_text":"Python, Kafka",}]}'  # trailing comma
+    # Trailing comma → invalid JSON on the first reply.
+    bad = '{"edits":[{"original_text":"Python","replacement_text":"Python, Kafka",}]}'
     good = (
         '{"edits":[{"original_text":"Python","replacement_text":"Python and Kafka","reason":"jd"}]}'
     )
