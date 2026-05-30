@@ -11,7 +11,7 @@ import {
   fieldType,
   contactKeyFor,
   isSensitive,
-  isSalary,
+  isApplicationInput,
   setInputValue,
   setSelectValue,
   clickRadioOrCheckbox,
@@ -20,26 +20,29 @@ import {
 const STATE = {
   fields: [],
   filledOnce: false,
+  lastCount: -1,
 };
 
 const DOT_CLASS = "aptly-status-dot";
 const COLORS = { green: "#16a34a", yellow: "#eab308", red: "#dc2626" };
+const LOG = "[Aptly]";
 
-function findForm() {
-  return (
-    document.querySelector("#application_form, #application-form, form[action*='application']") ||
-    document.querySelector("form")
+// Minimum form-like inputs for a page to count as an application form. Fewer
+// than this is probably just a search box / login, not an application.
+const MIN_FIELDS = 3;
+
+// Selector-AGNOSTIC detection: scan the whole document (works on the old
+// boards.greenhouse.io <form> markup AND the new job-boards.greenhouse.io
+// React SPA, which may not wrap fields in a <form> at all). Searching from a
+// found <form> when one exists narrows noise; otherwise scan the document.
+function collectFields() {
+  const form = document.querySelector(
+    "#application_form, #application-form, form[action*='application'], form",
   );
-}
-
-function collectFields(form) {
-  if (!form) return [];
-  const els = Array.from(form.querySelectorAll("input, select, textarea")).filter((el) => {
-    const t = (el.getAttribute("type") || "").toLowerCase();
-    if (["hidden", "submit", "button"].includes(t)) return false;
-    if (el.disabled) return false;
-    return true;
-  });
+  const root = form || document;
+  const els = Array.from(root.querySelectorAll("input, select, textarea")).filter(
+    isApplicationInput,
+  );
   // Group radios/checkboxes by name so a group counts as one question.
   const seenGroups = new Set();
   const fields = [];
@@ -74,33 +77,43 @@ function setDot(el, color) {
         : "Needs your input";
 }
 
-function reportCount() {
-  const form = findForm();
-  STATE.fields = collectFields(form);
-  chrome.runtime.sendMessage({
-    type: "GH_FIELDS",
-    count: STATE.fields.length,
-    hasForm: !!form,
-    url: location.href,
-  });
+// Run detection, push the count to the background (badge) + log when it
+// changes. `hasForm` is true once we clear the MIN_FIELDS threshold — the popup
+// keys off this, not off the presence of a literal <form> element.
+function detectFormFields(reason) {
+  STATE.fields = collectFields();
+  const count = STATE.fields.length;
+  const hasForm = count >= MIN_FIELDS;
+  if (count !== STATE.lastCount) {
+    console.log(`${LOG} ${reason}: ${count} field${count === 1 ? "" : "s"} found`);
+    STATE.lastCount = count;
+  }
+  chrome.runtime.sendMessage({ type: "GH_FIELDS", count, hasForm, url: location.href });
+  return count;
 }
 
-// Wait for Greenhouse's late re-render before counting.
+let detectTimeout = null;
+
+// The new Greenhouse pages mount the form after initial load (React). Watch the
+// whole body and re-detect, debounced, until the DOM settles.
 function init() {
-  setTimeout(reportCount, 600);
-  const form = findForm();
-  if (form) {
-    const obs = new MutationObserver(() => {
-      // Re-validate previously-filled fields; mark reverted ones red.
-      if (STATE.filledOnce) {
-        for (const f of STATE.fields) {
-          if (f.type === "text" && f.filled && !f.el.value) setDot(f.el, COLORS.red);
-        }
+  console.log(`${LOG} Content script loaded on ${location.href}`);
+  detectFormFields("Initial form detection");
+
+  const observer = new MutationObserver(() => {
+    // Re-validate previously-filled fields; mark reverted ones red.
+    if (STATE.filledOnce) {
+      for (const f of STATE.fields) {
+        if (f.type === "text" && f.filled && f.el && !f.el.value) setDot(f.el, COLORS.red);
       }
-      reportCount();
-    });
-    obs.observe(form, { childList: true, subtree: true });
-  }
+    }
+    clearTimeout(detectTimeout);
+    detectTimeout = setTimeout(() => {
+      console.log(`${LOG} DOM changed, re-detecting...`);
+      detectFormFields("After re-detection");
+    }, 300);
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
 }
 
 async function fillFields({ profile, resume, prefs }) {
@@ -198,9 +211,10 @@ function applyValue(f, value) {
 // Messages from the popup / background.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "GH_PING") {
-    reportCount();
-    const form = findForm();
-    sendResponse({ hasForm: !!form, count: STATE.fields.length, url: location.href });
+    // Re-detect FRESH on every popup open so a late-rendered form is picked up
+    // even if the observer hasn't fired since the user last looked.
+    const count = detectFormFields("Popup ping");
+    sendResponse({ hasForm: count >= MIN_FIELDS, count, url: location.href });
     return true;
   }
   if (msg.type === "GH_FILL") {

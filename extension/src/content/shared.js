@@ -60,6 +60,42 @@ function clean(text) {
     .trim();
 }
 
+// ── Page-wide, selector-agnostic field detection ───────────────────────────
+// Works on both the old boards.greenhouse.io <form> markup and the new
+// job-boards.greenhouse.io React SPA (which may not wrap fields in a <form>).
+// Pure functions (DOM-in, value-out) so they're unit-testable with a stub DOM.
+
+const SKIP_TYPES = new Set(["hidden", "submit", "button", "reset", "image"]);
+const SKIP_PLACEHOLDER = /search|subscribe|newsletter|language|filter|keyword|find jobs/i;
+const SKIP_NAME = /search|query|locale|lang|subscribe|newsletter/i;
+
+export function isVisible(el) {
+  // offsetParent is null for display:none + detached nodes; honour aria-hidden
+  // and zero-size, with a client-rect fallback for position:fixed elements.
+  if (el.getAttribute("aria-hidden") === "true") return false;
+  if (el.offsetParent != null) return true;
+  const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+  return r.width > 0 && r.height > 0;
+}
+
+export function inChrome(el) {
+  return !!(el.closest && el.closest("nav, header, footer, [role='navigation'], [role='search']"));
+}
+
+export function isApplicationInput(el) {
+  const tag = (el.tagName || "").toLowerCase();
+  if (!["input", "select", "textarea"].includes(tag)) return false;
+  if (el.disabled) return false;
+  const t = (el.getAttribute("type") || "").toLowerCase();
+  if (SKIP_TYPES.has(t)) return false;
+  if (tag === "input" && (t === "search" || el.getAttribute("role") === "searchbox")) return false;
+  if (SKIP_PLACEHOLDER.test(el.getAttribute("placeholder") || "")) return false;
+  if (SKIP_NAME.test(el.getAttribute("name") || "")) return false;
+  if (inChrome(el)) return false;
+  if (!isVisible(el)) return false;
+  return true;
+}
+
 export function fieldType(el) {
   const tag = el.tagName.toLowerCase();
   if (tag === "textarea") return "text";
