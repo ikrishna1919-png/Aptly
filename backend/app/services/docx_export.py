@@ -31,6 +31,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
+from app.services.resume_formats import resolve_format
 from app.services.resume_layout import (
     SEP,
     Bullet,
@@ -68,28 +69,48 @@ def render_docx(
     *,
     mode: str | None = None,
     header_alignment: str = "center",
+    fmt: str | None = None,
+    custom: dict[str, Any] | None = None,
 ) -> bytes:
-    """Render `resume` to DOCX bytes. `mode` is "visual" (default) or
-    "plain"; falls back to the resume's own `meta.mode`. `header_alignment`
-    ("left" | "center" | "right", default "center") positions the name +
-    contact header block; body text always stays left. The legacy
-    `candidate` arg is accepted and ignored — contact now lives on the
-    resume itself (reconciled server-side from the profile)."""
-    chosen = (mode or resume.meta.mode or "visual").lower()
-    plain = chosen == "plain"
+    """Render `resume` to DOCX bytes.
+
+    Back-compat path (default): `mode` is "visual" or "plain" — unchanged from
+    PR #58/#70. New: pass `fmt` ("modern" | "classic" | "minimal" | "plain" |
+    "custom") to select an /ats format; `custom` carries the three custom
+    controls. Formats only change font / accent / heading rule / spacing /
+    margins — the #58 layout contract is identical. `header_alignment`
+    positions the name+contact block; body text always stays left."""
     align = _DOCX_HEADER_ALIGN.get(header_alignment, WD_ALIGN_PARAGRAPH.CENTER)
+
+    if fmt is not None:
+        spec = resolve_format(fmt, custom)
+        plain = spec.plain
+        font = spec.font
+        margins = spec.margins
+        accent = RGBColor(*spec.accent)
+        rule = spec.heading_rule
+        gap = spec.section_gap
+    else:
+        chosen = (mode or resume.meta.mode or "visual").lower()
+        plain = chosen == "plain"
+        font = _FONT
+        margins = _MARGIN_INCHES
+        accent = _HEADING_INK
+        rule = True
+        gap = 1.0
+
     blocks = build_blocks(resume)
 
     doc = Document()
     section = doc.sections[0]
-    section.left_margin = _inches(_MARGIN_INCHES)
-    section.right_margin = _inches(_MARGIN_INCHES)
-    section.top_margin = _inches(_MARGIN_INCHES)
-    section.bottom_margin = _inches(_MARGIN_INCHES)
+    section.left_margin = _inches(margins)
+    section.right_margin = _inches(margins)
+    section.top_margin = _inches(margins)
+    section.bottom_margin = _inches(margins)
     right_tab_pos = section.page_width - section.left_margin - section.right_margin
 
     style = doc.styles["Normal"]
-    style.font.name = _FONT
+    style.font.name = font
     style.font.size = Pt(_BODY_PT)
     style.paragraph_format.space_after = Pt(2)
 
@@ -97,7 +118,7 @@ def render_docx(
         if isinstance(block, Header):
             _render_header(doc, block, alignment=align)
         elif isinstance(block, Heading):
-            _render_heading(doc, block.text, plain=plain)
+            _render_heading(doc, block.text, plain=plain, accent=accent, rule=rule, gap=gap)
         elif isinstance(block, Para):
             doc.add_paragraph(block.text)
         elif isinstance(block, Entry):
@@ -136,17 +157,27 @@ def _render_header(doc: Any, header: Header, *, alignment: Any = WD_ALIGN_PARAGR
             cp.runs[0].font.color.rgb = RGBColor(0x44, 0x44, 0x44)
 
 
-def _render_heading(doc: Any, text: str, *, plain: bool) -> None:
+def _render_heading(
+    doc: Any,
+    text: str,
+    *,
+    plain: bool,
+    accent: RGBColor = _HEADING_INK,
+    rule: bool = True,
+    gap: float = 1.0,
+) -> None:
     p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(10)
-    p.paragraph_format.space_after = Pt(3)
+    p.paragraph_format.space_before = Pt(10 * gap)
+    p.paragraph_format.space_after = Pt(3 * gap)
     run = p.add_run(text)
     run.bold = True
     run.font.size = Pt(11)
     if not plain:
-        # Visual mode: a touch of ink + a hairline rule under the heading.
-        run.font.color.rgb = _HEADING_INK
-        _add_bottom_border(p)
+        # Non-plain: heading ink in the format's accent colour, plus an
+        # optional hairline rule (modern/classic have it; minimal doesn't).
+        run.font.color.rgb = accent
+        if rule:
+            _add_bottom_border(p)
 
 
 def _render_entry(doc: Any, entry: Entry, *, right_tab_pos: int, plain: bool) -> None:

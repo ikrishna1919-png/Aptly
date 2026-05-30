@@ -809,12 +809,23 @@ export async function downloadResume(
   format: "docx" | "pdf",
   mode: ResumeMode = "visual",
   headerAlignment: HeaderAlignment = "center",
+  // /ats format: when set, overrides `mode` server-side ("modern" | "classic"
+  // | "minimal" | "plain" | "custom"). `custom` carries the custom knobs.
+  fmt?: string,
+  custom?: Record<string, unknown> | null,
 ): Promise<Blob> {
   const res = await fetch(`${API_URL}/api/tailor/${format}`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ resume, filename, mode, header_alignment: headerAlignment }),
+    body: JSON.stringify({
+      resume,
+      filename,
+      mode,
+      header_alignment: headerAlignment,
+      fmt: fmt ?? null,
+      custom_options: custom ?? null,
+    }),
   });
   if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   return await res.blob();
