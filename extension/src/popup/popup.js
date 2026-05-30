@@ -1,8 +1,8 @@
 // Popup controller (vanilla JS, no build step). Renders one of a few states:
 //   disconnected → "Sign in to Aptly"
-//   connected, not on Greenhouse → status
+//   connected, not on a supported ATS → status
 //   connected, no done tailor-run → "Tailor a resume first"
-//   connected, on Greenhouse → resume picker + "Start filling" → fill summary
+//   connected, on a supported ATS → resume picker + "Start filling" → summary
 import { api, AuthError } from "../lib/api.js";
 import { getToken, setToken, clearToken } from "../lib/storage.js";
 import { CONNECT_URL } from "../lib/config.js";
@@ -19,8 +19,23 @@ async function activeTab() {
   return tab;
 }
 
-function isGreenhouse(url) {
-  return /https:\/\/([a-z0-9-]+\.)?(job-boards\.)?greenhouse\.io\//i.test(url || "");
+// Hosts handled by the standard-DOM content script (content/greenhouse.js).
+const ATS_HOST_PATTERNS = [
+  /https:\/\/([a-z0-9-]+\.)?(job-boards\.)?greenhouse\.io\//i, // Greenhouse
+  /https:\/\/jobs\.lever\.co\//i, // Lever
+  /https:\/\/([a-z0-9-]+\.)?ashbyhq\.com\//i, // Ashby
+  /https:\/\/(jobs|careers)\.smartrecruiters\.com\//i, // SmartRecruiters
+];
+
+// Workday is handled by the separate, experimental content/workday.js and is
+// labelled distinctly in the UI.
+function isWorkday(url) {
+  return /https:\/\/[a-z0-9-]+\.myworkdayjobs\.com\//i.test(url || "");
+}
+
+function isSupportedAts(url) {
+  const u = url || "";
+  return ATS_HOST_PATTERNS.some((re) => re.test(u)) || isWorkday(u);
 }
 
 async function render() {
@@ -37,9 +52,9 @@ async function render() {
   accountEl.textContent = me.name || me.email || "";
 
   const tab = await activeTab();
-  if (!isGreenhouse(tab?.url)) return renderIdle(me);
+  if (!isSupportedAts(tab?.url)) return renderIdle(me);
 
-  // On a Greenhouse page — ask the content script what it sees.
+  // On a supported ATS page — ask the content script what it sees.
   let info = { hasForm: false, count: 0 };
   try {
     info = await chrome.tabs.sendMessage(tab.id, { type: "GH_PING" });
@@ -49,7 +64,7 @@ async function render() {
   if (!info?.hasForm) return renderIdle(me, "No application form detected on this page yet.");
   if (!me.has_active_tailor_run) return renderNoResume();
 
-  renderGreenhouse(me, tab, info);
+  renderAts(me, tab, info, isWorkday(tab?.url));
 }
 
 function renderDisconnected(note) {
@@ -57,7 +72,7 @@ function renderDisconnected(note) {
   h(`
     ${note ? `<p class="muted">${note}</p>` : ""}
     <h2>Connect to Aptly</h2>
-    <p class="muted">Connect your Aptly account to fill Greenhouse application forms with your
+    <p class="muted">Connect your Aptly account to fill job application forms with your
       profile and tailored resumes. You review every field and submit yourself.</p>
     <button class="primary" id="signin">Sign in with your Aptly account</button>
 
@@ -130,7 +145,7 @@ function signoutBar() {
 function renderIdle(me, note) {
   h(`
     <h2>Signed in as ${me.name || me.email}</h2>
-    <p class="muted">${note || "Open a Greenhouse application page and I'll help you fill it."}</p>
+    <p class="muted">${note || "Open a job application on a supported site (Greenhouse, Lever, Ashby, SmartRecruiters) and I'll help you fill it."}</p>
     ${signoutBar()}
   `);
 }
@@ -144,7 +159,7 @@ function renderNoResume() {
   `);
 }
 
-async function renderGreenhouse(me, tab, info) {
+async function renderAts(me, tab, info, experimental) {
   let runs = [];
   try {
     runs = await api.tailorRuns();
@@ -154,9 +169,18 @@ async function renderGreenhouse(me, tab, info) {
   const options = runs
     .map((r) => `<option value="${r.id}">${r.job_title || "Tailored resume"}</option>`)
     .join("");
+  // Workday support is unverified — surface that prominently so the user knows
+  // to scrutinise every field, not just trust the dots.
+  const heading = experimental ? "Workday form detected" : "Application form detected";
+  const experimentalNote = experimental
+    ? `<div class="hint" style="background:#fef9c3;border-color:#fde68a">
+         <b>Experimental.</b> Workday support is new and unverified — review every
+         field carefully before you submit.</div>`
+    : "";
   h(`
-    <h2>Greenhouse application detected</h2>
+    <h2>${heading}</h2>
     <p class="muted"><b>${info.count}</b> field${info.count === 1 ? "" : "s"} found</p>
+    ${experimentalNote}
     <div class="card">
       <label class="muted" for="run">Use which tailored resume?</label>
       <select id="run">${options || `<option value="">(none)</option>`}</select>
@@ -169,7 +193,7 @@ async function renderGreenhouse(me, tab, info) {
         <span><i class="dot" style="background:#dc2626"></i> your input</span>
       </div>
     </div>
-    <div class="hint">Aptly never submits for you — you click submit on Greenhouse yourself.</div>
+    <div class="hint">Aptly never submits for you — you click submit yourself.</div>
     <div id="result"></div>
     ${signoutBar()}
   `);
@@ -209,7 +233,7 @@ function renderSummary(summary, runId) {
       <p style="margin:0 0 6px"><b>${summary.green}</b> from profile ·
          <b>${summary.yellow}</b> to review · <b>${summary.red}</b> need your input</p>
       ${summary.sensitive > 0 ? `<p class="muted" style="margin:0">${summary.sensitive} demographic field(s) left blank (voluntary).</p>` : ""}
-      <p class="muted" style="margin:8px 0 0">Review each field on the page, then submit on Greenhouse yourself.</p>
+      <p class="muted" style="margin:8px 0 0">Review each field on the page, then submit it yourself.</p>
     </div>
     ${fileNote}
   `;

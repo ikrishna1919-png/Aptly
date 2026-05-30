@@ -1,6 +1,13 @@
-// Greenhouse content script (v1.0). Detects the application form, reports the
-// field count to the popup via the badge, and — only when the user clicks
-// "Start filling" in the popup — fills fields it can and colour-codes each one.
+// Standard-DOM ATS content script. Despite the filename (kept as-is this
+// release to avoid a churny rename), this now serves every ATS that exposes a
+// conventional <input>/<select>/<textarea> form: Greenhouse, Lever, Ashby, and
+// SmartRecruiters. Detection + fill are selector-agnostic (see shared.js), so
+// one script covers all four. Workday is handled separately by workday.js
+// because its custom-widget DOM needs bespoke fillers.
+//
+// Detects the application form, reports the field count to the popup via the
+// badge, and — only when the user clicks "Start filling" in the popup — fills
+// fields it can and colour-codes each one.
 //
 // Hard rules: never submits; never auto-fills sensitive/demographic fields
 // without opt-in; never modifies the page beyond filling values + a tiny
@@ -10,6 +17,7 @@ import {
   questionFor,
   fieldType,
   contactKeyFor,
+  contactValue,
   isSensitive,
   isApplicationInput,
   setInputValue,
@@ -39,10 +47,19 @@ function collectFields() {
   const form = document.querySelector(
     "#application_form, #application-form, form[action*='application'], form",
   );
-  const root = form || document;
-  const els = Array.from(root.querySelectorAll("input, select, textarea")).filter(
-    isApplicationInput,
-  );
+  // Prefer the matched <form>, but if it's too sparse to be the application
+  // form — e.g. a header search/login <form> that happens to match first on a
+  // Lever/Ashby/SmartRecruiters page — widen to a whole-document scan so we
+  // don't miss fields rendered outside it. On Greenhouse the real application
+  // form clears MIN_FIELDS, so behaviour there is unchanged.
+  let els = form
+    ? Array.from(form.querySelectorAll("input, select, textarea")).filter(isApplicationInput)
+    : [];
+  if (els.length < MIN_FIELDS) {
+    els = Array.from(document.querySelectorAll("input, select, textarea")).filter(
+      isApplicationInput,
+    );
+  }
   // Group radios/checkboxes by name so a group counts as one question.
   const seenGroups = new Set();
   const fields = [];
@@ -174,31 +191,6 @@ async function fillFields({ profile, resume, prefs }) {
   }
   STATE.filledOnce = true;
   return summary;
-}
-
-function contactValue(key, p) {
-  switch (key) {
-    case "name":
-      return p.name;
-    case "first_name":
-      return (p.name || "").split(" ")[0];
-    case "last_name":
-      return (p.name || "").split(" ").slice(1).join(" ");
-    case "email":
-      return p.email;
-    case "phone":
-      return p.phone;
-    case "linkedin":
-      return p.linkedin;
-    case "github":
-      return p.github;
-    case "portfolio":
-      return p.portfolio;
-    case "location":
-      return p.location;
-    default:
-      return "";
-  }
 }
 
 function applyValue(f, value) {

@@ -1,16 +1,19 @@
-# Aptly Application Assistant — Chrome Extension (v1.0)
+# Aptly Application Assistant — Chrome Extension
 
-A Manifest V3 browser extension that helps you fill **Greenhouse** job
-application forms with your Aptly profile and tailored resumes. **You review
-every field and click submit yourself** — the extension never submits for you.
+A Manifest V3 browser extension that helps you fill job application forms with
+your Aptly profile and tailored resumes. **You review every field and click
+submit yourself** — the extension never submits for you.
 
-> v1.0 supports Greenhouse only. Lever, Ashby, and Workday adapters are
-> planned as separate phased releases after v1.0 is validated with real usage.
+> **Supported ATSes:** Greenhouse, Lever, Ashby, and SmartRecruiters (one
+> selector-agnostic content script covers all four standard-DOM forms).
+> **Workday is experimental and unverified** — it ships behind a separate,
+> clearly-labelled content script and must be tested on a real Workday
+> application before it's relied on. Review every Workday field carefully.
 
 ## What it does
 
-- Detects a Greenhouse application form and shows the field count on the
-  toolbar badge.
+- Detects a job application form on a supported ATS and shows the field count
+  on the toolbar badge.
 - On your click, fills what it can and **colour-codes every field**:
   - 🟢 **green** — filled from your Aptly profile (name, email, links)
   - 🟡 **yellow** — a suggestion from a previous application; **review it**
@@ -36,12 +39,13 @@ every field and click submit yourself** — the extension never submits for you.
 ## Load unpacked (development)
 
 Almost no-build: the popup (HTML) and background (ESM module worker) load as
-authored source. The **content script is the one exception** — MV3 content
+authored source. The **content scripts are the one exception** — MV3 content
 scripts are classic scripts and can't use ESM `import`, so `npm run build`
-flattens `src/content/greenhouse.js` + its imports (`shared.js`, `config.js`)
-into a single import-free IIFE at `content/greenhouse.js` (the path the
-manifest references). The bundled file is committed, so the repo loads
-unpacked from the root with no build step.
+flattens each entry + its imports (`shared.js`, `config.js`) into a single
+import-free IIFE: `src/content/greenhouse.js → content/greenhouse.js`
+(Greenhouse/Lever/Ashby/SmartRecruiters) and `src/content/workday.js →
+content/workday.js` (experimental Workday). The bundled files are committed, so
+the repo loads unpacked from the root with no build step.
 
 1. `cd extension && npm run build` — flattens content scripts + validates the
    manifest. (Run this after editing anything under `src/content/`.)
@@ -51,7 +55,7 @@ unpacked from the root with no build step.
 4. Pin the Aptly icon to the toolbar.
 
 > Editing `src/content/*`? Re-run `npm run build` and reload the extension —
-> `content/greenhouse.js` is generated; don't hand-edit it.
+> the `content/*.js` bundles are generated; don't hand-edit them.
 
 ## Connect your account
 
@@ -76,7 +80,8 @@ extension/
   src/
     background.js          service worker (auth handoff, badge, QA relay)
     content/
-      greenhouse.js        Greenhouse adapter (detect + fill + colour-code)
+      greenhouse.js        standard-DOM ATSes: Greenhouse/Lever/Ashby/SmartRecruiters
+      workday.js           experimental Workday adapter (custom dropdowns)
       shared.js            platform-agnostic field detection/fill helpers
     popup/
       popup.html / popup.js      toolbar UI
@@ -86,25 +91,32 @@ extension/
   public/icons/            16/32/48/128 px icons
   scripts/build.mjs        validate + emit dist/
   test/detection.test.mjs  node test for the field-detection heuristic
+  test/workday.test.mjs    node test for the Workday dropdown matcher
 ```
 
-Run `npm test` (no deps) to exercise the detection heuristic against a DOM
-stub; `npm run validate` to check the manifest references resolve.
+Run `npm test` (no deps) to exercise the detection heuristic + the Workday
+dropdown matcher against DOM stubs; `npm run validate` to check the manifest
+references resolve.
 
-## How form detection works (and the Greenhouse DOM)
+## How form detection works (and the ATS DOMs)
 
-Detection is **selector-agnostic** so it survives Greenhouse DOM changes
-without per-version selectors:
+Detection is **selector-agnostic** so it survives DOM changes — and works
+across ATSes — without per-version selectors:
 
 - It scans the whole document for visible `<input>/<select>/<textarea>`
   (`isApplicationInput` in `shared.js`), excluding chrome (nav/header/footer),
   search boxes, and subscribe/language widgets.
 - A page counts as an application form once **≥ 3** such inputs are present.
+  When a first `<form>` is too sparse to be the application (e.g. a header
+  search/login form on a non-Greenhouse ATS), the scan widens to the whole
+  document so fields rendered outside it aren't missed.
 - A debounced `MutationObserver` on `document.body` re-detects as the page
   renders, and the popup re-detects fresh on open (`GH_PING`). Console logs are
   prefixed `[Aptly]` for easy debugging.
 
-Greenhouse runs **two DOM generations**:
+Because it's selector-agnostic, the **same** content script (`greenhouse.js`)
+serves Greenhouse, Lever, Ashby, and SmartRecruiters. Greenhouse alone runs
+**two DOM generations**:
 
 - **Old — `boards.greenhouse.io`:** server-rendered, fields inside a real
   `<form id="application_form">`, questions in `<label for=…>`.
@@ -113,6 +125,19 @@ Greenhouse runs **two DOM generations**:
   fields in a `<form>` at all — which is exactly why the old form-centric
   detection failed. The page-wide scan + `MutationObserver` handle both, and
   `all_frames: true` covers forms embedded in iframes on custom company domains.
+
+### Workday (experimental, unverified)
+
+Workday is **not** a standard-DOM form, so it gets its own content script
+(`workday.js`, matched only on `*.myworkdayjobs.com`). It reuses the shared
+helpers + the `GH_*` message protocol but adds Workday-specific fillers:
+fields are discovered by `data-automation-id`; **custom dropdowns** are buttons
+that open a `[role="listbox"]` of `[role="option"]` nodes (not `<select>`), so
+it clicks the trigger, waits for the listbox, and clicks the option whose text
+matches (`matchOptionByText` in `shared.js`, unit-tested); **date/spinbutton and
+file fields are left as "review" (yellow), never guessed**. The popup labels
+Workday clearly as experimental. **Its DOM has not been verified against a live
+Workday application — test it before relying on it.**
 
 ## Hard rules (by design)
 

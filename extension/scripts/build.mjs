@@ -22,7 +22,12 @@ const check = process.argv.includes("--check");
 
 // Content-script entry points: authored ESM source → flat IIFE output (the
 // path the manifest references). Add future content scripts here.
-const CONTENT_ENTRIES = [{ src: "src/content/greenhouse.js", out: "content/greenhouse.js" }];
+//   * greenhouse.js → standard-DOM ATSes (Greenhouse, Lever, Ashby, SmartRecruiters)
+//   * workday.js    → experimental Workday adapter (separate match block)
+const CONTENT_ENTRIES = [
+  { src: "src/content/greenhouse.js", out: "content/greenhouse.js" },
+  { src: "src/content/workday.js", out: "content/workday.js" },
+];
 
 async function exists(p) {
   try {
