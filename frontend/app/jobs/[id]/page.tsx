@@ -8,7 +8,6 @@ import { SponsorshipInsights } from "@/components/jobs/sponsorship";
 import { TailorCta } from "@/components/jobs/tailor-cta";
 import { CompanyMark } from "@/components/company-mark";
 import { JobDescription } from "@/components/job-description";
-import { TailorPanel } from "@/components/tailor-panel";
 import { fetchJob, MANUAL_SOURCE } from "@/lib/api";
 import { formatRelative, workModelLabel } from "@/lib/utils";
 
@@ -100,18 +99,12 @@ export default async function JobDetailPage({ params }: { params: { id: string }
         <SponsorshipInsights />
       </div>
 
-      {/* 4. Tailor CTA — gated action: scrolls to the embedded tailoring
-          panel when signed in, prompts sign-in otherwise. */}
+      {/* 4. Tailor CTA — gated action: routes to the ATS Resume Generator
+          (/ats/generate?jobId=) with the JD pre-filled and the user's default
+          format applied; prompts sign-in otherwise. */}
       <div className="mt-4">
-        <TailorCta />
+        <TailorCta jobId={job.id} />
       </div>
-
-      <Separator className="my-7" />
-
-      {/* Embedded tailoring flow, preselected to this job. */}
-      <section id="tailor-panel" className="scroll-mt-4" aria-label="Tailor my resume">
-        <TailorPanel job={job} />
-      </section>
 
       <Separator className="my-7" />
 

@@ -10,7 +10,7 @@ now looks up `Candidate.user_id == current_user.id`.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, LargeBinary, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -52,6 +52,15 @@ class Candidate(Base):
     # Null until the user picks one; app code falls back to "modern".
     default_resume_format: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     default_cover_letter_format: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # One saved ("active") resume per user — uploaded on /profile, reused by
+    # the /ats match-upload + builder paths. All nullable (additive, 0023).
+    active_resume_filename: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    active_resume_content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    active_resume_uploaded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    active_resume_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
 
 DEMO_SLUG = "demo"

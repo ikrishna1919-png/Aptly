@@ -44,6 +44,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { ExtensionSettings } from "@/components/profile/extension-settings";
+import { SavedResume } from "@/components/profile/saved-resume";
 
 const EMPTY_PROFILE: Profile = {
   name: "",

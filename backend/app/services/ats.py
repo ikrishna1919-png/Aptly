@@ -260,8 +260,27 @@ _KEYWORD_SYSTEM = (
     'Return ONLY JSON: {"edits": [{"original_text": "...", '
     '"replacement_text": "...", "reason": "..."}]}. `original_text` MUST '
     "be copied verbatim from the resume so it can be found exactly. Propose at "
-    "most 12 edits. No markdown fences, no prose."
+    "most 12 edits.\n\n"
+    "Return ONLY valid JSON. No markdown formatting. No commentary before or "
+    "after the JSON. The response must be parseable with Python's json.loads() "
+    "with no preprocessing."
 )
+
+# Corrective turn appended on the one retry when the first reply won't parse.
+_KEYWORD_JSON_FIX = (
+    "Your previous response had a JSON syntax error: {error}. Return ONLY the "
+    "corrected JSON, no markdown fences, no prose."
+)
+
+
+class KeywordInjectionError(Exception):
+    """Raised when keyword-edit JSON can't be parsed after a retry. The worker
+    turns this into a clear, user-facing message (never a raw traceback)."""
+
+
+# Monitoring: how often the keyword-edit JSON failed to parse, by stage. Read
+# via `keyword_parse_failures` so recurrence can be watched after the fix.
+keyword_parse_failures: dict[str, int] = {"first": 0, "retry": 0}
 
 
 def compute_keyword_edits(
@@ -277,19 +296,41 @@ def compute_keyword_edits(
     if not settings.has_anthropic_key:
         return []
     api = _build_client(settings, client)
-    resp = api.messages.create(
-        model=MODEL,
-        max_tokens=1500,
-        system=[{"type": "text", "text": _KEYWORD_SYSTEM}],
-        messages=[
-            {
-                "role": "user",
-                "content": f"RESUME TEXT:\n{resume_text}\n\nTARGET JOB:\n{jd_text}\n\n"
-                "Return the JSON edits.",
-            }
-        ],
+    user_content = (
+        f"RESUME TEXT:\n{resume_text}\n\nTARGET JOB:\n{jd_text}\n\nReturn the JSON edits."
     )
-    obj = _extract_json_object(_first_text(resp))
+    messages: list[dict[str, Any]] = [{"role": "user", "content": user_content}]
+
+    def _call() -> str:
+        resp = api.messages.create(
+            model=MODEL,
+            max_tokens=1500,
+            system=[{"type": "text", "text": _KEYWORD_SYSTEM}],
+            messages=messages,
+        )
+        return _first_text(resp)
+
+    # Prompt-based JSON (NOT structured-output/grammar — that 400s on complex
+    # schemas). Parse, and on a syntax error retry ONCE with a corrective turn;
+    # a second failure raises KeywordInjectionError for a clean user message.
+    text = _call()
+    try:
+        obj = _extract_json_object(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        keyword_parse_failures["first"] += 1
+        log.warning("ats keyword-inject: first parse failed (%s) — retrying", e)
+        messages.append({"role": "assistant", "content": text})
+        messages.append({"role": "user", "content": _KEYWORD_JSON_FIX.format(error=e)})
+        retry_text = _call()
+        try:
+            obj = _extract_json_object(retry_text)
+        except (json.JSONDecodeError, ValueError) as e2:
+            keyword_parse_failures["retry"] += 1
+            log.warning("ats keyword-inject: retry parse also failed (%s)", e2)
+            raise KeywordInjectionError(
+                "Couldn't generate keyword edits — try again, or use the standard "
+                "JD-paste flow instead."
+            ) from e2
     out: list[dict[str, str]] = []
     for e in obj.get("edits", []):
         o, r = str(e.get("original_text", "")).strip(), str(e.get("replacement_text", "")).strip()

@@ -1068,3 +1068,41 @@ export async function deleteSavedQA(id: string): Promise<void> {
     throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
   }
 }
+
+// ── Active resume (one saved resume per user) ───────────────────────────────
+
+export type ActiveResume =
+  | { present: false }
+  | { present: true; filename: string; content_type: string; uploaded_at: string | null };
+
+export async function getActiveResume(): Promise<ActiveResume> {
+  const res = await fetch(`${API_URL}/api/profile/active-resume`, { credentials: "include" });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return res.json();
+}
+
+export async function uploadActiveResume(file: File): Promise<ActiveResume> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/api/profile/active-resume`, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  return res.json();
+}
+
+export async function deleteActiveResume(): Promise<void> {
+  const res = await fetch(`${API_URL}/api/profile/active-resume`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error((await safeDetail(res)) || `Failed (${res.status})`);
+  }
+}
+
+export function activeResumeDownloadUrl(): string {
+  return `${API_URL}/api/profile/active-resume/download`;
+}
