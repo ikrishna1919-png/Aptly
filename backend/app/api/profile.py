@@ -394,7 +394,7 @@ async def upload_active_resume(
     else:
         raise HTTPException(status_code=415, detail="Upload a .docx or .pdf.")
 
-    row = _candidate_for(db, user)
+    row = _load_or_seed(db, user)
     row.active_resume_filename = file.filename or (
         "resume.docx" if content_type == _DOCX_MIME else "resume.pdf"
     )
