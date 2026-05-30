@@ -8,16 +8,29 @@
 import { api, AuthError } from "./lib/api.js";
 import { setToken, getToken } from "./lib/storage.js";
 
-// Token handoff from the connect page on aptly.fyi.
+// Token handoff from the connect page on aptly.fyi. Primary type is
+// APTLY_CONNECT_TOKEN; the older APTLY_CONNECT is still accepted so a
+// connect-page/extension version skew doesn't break sign-in.
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
-  if (msg && msg.type === "APTLY_CONNECT" && typeof msg.token === "string") {
-    if (sender.origin === "https://aptly.fyi") {
-      setToken(msg.token).then(() => sendResponse({ ok: true }));
-      return true;
-    }
-    sendResponse({ ok: false, error: "bad origin" });
+  const isConnect =
+    msg && (msg.type === "APTLY_CONNECT_TOKEN" || msg.type === "APTLY_CONNECT");
+  if (!isConnect || typeof msg.token !== "string") {
+    sendResponse({ error: "Unknown message type" });
+    return false;
   }
-  return false;
+  // Only trust the marketing origin (defense-in-depth alongside
+  // externally_connectable in the manifest).
+  if (!sender.origin || !sender.origin.startsWith("https://aptly.fyi")) {
+    sendResponse({ error: "Unauthorized origin" });
+    return false;
+  }
+  setToken(msg.token).then(() => {
+    // Wake the popup if it's open so it can advance to the signed-in state.
+    // No receiver (popup closed) throws lastError — swallow it.
+    chrome.runtime.sendMessage({ type: "TOKEN_RECEIVED" }).catch(() => {});
+    sendResponse({ ok: true });
+  });
+  return true; // async sendResponse
 });
 
 // Content script → field count → badge.
