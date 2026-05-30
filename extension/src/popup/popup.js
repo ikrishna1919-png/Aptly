@@ -4,7 +4,7 @@
 //   connected, no done tailor-run → "Tailor a resume first"
 //   connected, on Greenhouse → resume picker + "Start filling" → fill summary
 import { api, AuthError } from "../lib/api.js";
-import { getToken, clearToken } from "../lib/storage.js";
+import { getToken, setToken, clearToken } from "../lib/storage.js";
 import { CONNECT_URL } from "../lib/config.js";
 
 const root = document.getElementById("root");
@@ -56,14 +56,56 @@ function renderDisconnected(note) {
   accountEl.textContent = "";
   h(`
     ${note ? `<p class="muted">${note}</p>` : ""}
-    <h2>Fill applications faster</h2>
+    <h2>Connect to Aptly</h2>
     <p class="muted">Connect your Aptly account to fill Greenhouse application forms with your
       profile and tailored resumes. You review every field and submit yourself.</p>
-    <button class="primary" id="signin">Sign in to Aptly</button>
+    <button class="primary" id="signin">Sign in with your Aptly account</button>
+
+    <div class="divider"><span>or paste a code</span></div>
+
+    <label class="muted" for="code">Have a connection code?</label>
+    <input id="code" class="code-input" type="text" placeholder="Paste your code" autocomplete="off" spellcheck="false" />
+    <button class="secondary" id="connect" disabled>Connect</button>
+    <p class="err" id="code-err" style="display:none"></p>
   `);
+
+  // Primary path: open the connect page WITH this extension's id so the page
+  // can hand the token straight back via postMessage (externally_connectable).
   document.getElementById("signin").onclick = () => {
-    chrome.tabs.create({ url: CONNECT_URL });
-    window.close();
+    const url = `${CONNECT_URL}?ext_id=${encodeURIComponent(chrome.runtime.id)}`;
+    chrome.tabs.create({ url });
+    // Don't close — leave the popup open so the TOKEN_RECEIVED message can
+    // auto-advance it. (User can also close it; reopening shows signed-in.)
+  };
+
+  // Fallback path: paste a code minted by the connect page.
+  const input = document.getElementById("code");
+  const connectBtn = document.getElementById("connect");
+  const errEl = document.getElementById("code-err");
+  input.addEventListener("input", () => {
+    connectBtn.disabled = input.value.trim().length === 0;
+    errEl.style.display = "none";
+  });
+  connectBtn.onclick = async () => {
+    const code = input.value.trim();
+    if (!code) return;
+    connectBtn.disabled = true;
+    connectBtn.textContent = "Connecting…";
+    errEl.style.display = "none";
+    // Validate by storing the token then probing /me. On failure we roll the
+    // token back so a bad paste can't leave a broken half-connected state.
+    await setToken(code);
+    try {
+      await api.me();
+      render(); // success → re-render into signed-in state
+    } catch (_) {
+      await clearToken();
+      errEl.textContent = "That code didn't work. Try the Sign in button above.";
+      errEl.style.display = "block";
+      connectBtn.disabled = false;
+      connectBtn.textContent = "Connect";
+      // Per spec: don't clear the input.
+    }
   };
 }
 
@@ -172,5 +214,13 @@ function renderSummary(summary, runId) {
     ${fileNote}
   `;
 }
+
+// Auto-advance when the connect page hands the token to the service worker via
+// postMessage (the primary flow). Background broadcasts TOKEN_RECEIVED once
+// it has stored the token; if this popup is still open, re-render into the
+// signed-in state.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === "TOKEN_RECEIVED") render();
+});
 
 render();
