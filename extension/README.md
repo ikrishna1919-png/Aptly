@@ -35,13 +35,23 @@ every field and click submit yourself** — the extension never submits for you.
 
 ## Load unpacked (development)
 
-This is a no-bundler extension — it loads as-is.
+Almost no-build: the popup (HTML) and background (ESM module worker) load as
+authored source. The **content script is the one exception** — MV3 content
+scripts are classic scripts and can't use ESM `import`, so `npm run build`
+flattens `src/content/greenhouse.js` + its imports (`shared.js`, `config.js`)
+into a single import-free IIFE at `content/greenhouse.js` (the path the
+manifest references). The bundled file is committed, so the repo loads
+unpacked from the root with no build step.
 
-1. `cd extension && npm run validate` (checks the manifest references resolve).
+1. `cd extension && npm run build` — flattens content scripts + validates the
+   manifest. (Run this after editing anything under `src/content/`.)
 2. Open `chrome://extensions`, enable **Developer mode**.
 3. Click **Load unpacked** and select the `extension/` directory
-   (or `extension/dist/` after `npm run build`).
+   (or `extension/dist/` for the zip-ready copy).
 4. Pin the Aptly icon to the toolbar.
+
+> Editing `src/content/*`? Re-run `npm run build` and reload the extension —
+> `content/greenhouse.js` is generated; don't hand-edit it.
 
 ## Connect your account
 
