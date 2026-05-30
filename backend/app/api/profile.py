@@ -361,9 +361,7 @@ def get_active_resume(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Metadata only (never the blob) so the UI can render its state."""
-    row = db.execute(
-        select(Candidate).where(Candidate.user_id == user.id)
-    ).scalar_one_or_none()
+    row = db.execute(select(Candidate).where(Candidate.user_id == user.id)).scalar_one_or_none()
     if row is None or row.active_resume_blob is None:
         return {"present": False}
     return {
@@ -397,7 +395,9 @@ async def upload_active_resume(
         raise HTTPException(status_code=415, detail="Upload a .docx or .pdf.")
 
     row = _candidate_for(db, user)
-    row.active_resume_filename = file.filename or ("resume.docx" if content_type == _DOCX_MIME else "resume.pdf")
+    row.active_resume_filename = file.filename or (
+        "resume.docx" if content_type == _DOCX_MIME else "resume.pdf"
+    )
     row.active_resume_content_type = content_type
     row.active_resume_blob = raw
     row.active_resume_uploaded_at = datetime.now(UTC)
@@ -415,9 +415,7 @@ def delete_active_resume(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    row = db.execute(
-        select(Candidate).where(Candidate.user_id == user.id)
-    ).scalar_one_or_none()
+    row = db.execute(select(Candidate).where(Candidate.user_id == user.id)).scalar_one_or_none()
     if row is not None:
         row.active_resume_filename = None
         row.active_resume_content_type = None
@@ -431,9 +429,7 @@ def download_active_resume(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    row = db.execute(
-        select(Candidate).where(Candidate.user_id == user.id)
-    ).scalar_one_or_none()
+    row = db.execute(select(Candidate).where(Candidate.user_id == user.id)).scalar_one_or_none()
     if row is None or row.active_resume_blob is None:
         raise HTTPException(status_code=404, detail="No saved resume.")
     fname = row.active_resume_filename or "resume"
