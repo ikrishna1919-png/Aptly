@@ -15,6 +15,7 @@ import re
 import zipfile
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from app.services.docx_export import render_docx
 from app.services.pdf_export import count_pages, render_pdf
@@ -178,3 +179,63 @@ def test_pdf_renders_both_modes():
         assert pdf[:4] == b"%PDF"
         assert len(pdf) > 1000
         assert count_pages(_resume(), mode=mode) in (1, 2)
+
+
+# ── Header alignment (additive; orthogonal to mode) ─────────────────────────
+
+_DOCX_EXPECT = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT,
+    "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+}
+
+
+def test_docx_header_alignment_applies_to_header_only():
+    """Name (header) follows header_alignment; summary + experience lines stay
+    left-aligned regardless."""
+    for alignment in ("left", "center", "right"):
+        for mode in ("visual", "plain"):
+            doc = Document(
+                io.BytesIO(render_docx(_resume(), mode=mode, header_alignment=alignment))
+            )
+            paras = doc.paragraphs
+            name_p = next(p for p in paras if p.text == "Alex Rivera")
+            assert name_p.alignment == _DOCX_EXPECT[alignment], (alignment, mode)
+            # Body text never follows the header alignment.
+            summary_p = next(p for p in paras if p.text.startswith("Senior backend engineer"))
+            assert summary_p.alignment in (None, WD_ALIGN_PARAGRAPH.LEFT)
+            company_p = next(p for p in paras if "Forge Labs" in p.text)
+            assert company_p.alignment in (None, WD_ALIGN_PARAGRAPH.LEFT)
+
+
+def test_docx_default_header_alignment_is_center():
+    doc = Document(io.BytesIO(render_docx(_resume())))
+    name_p = next(p for p in doc.paragraphs if p.text == "Alex Rivera")
+    assert name_p.alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+
+def test_pdf_renders_all_alignments():
+    for alignment in ("left", "center", "right"):
+        for mode in ("visual", "plain"):
+            pdf = render_pdf(_resume(), mode=mode, header_alignment=alignment)
+            assert pdf[:4] == b"%PDF"
+            assert len(pdf) > 1000
+
+
+def test_pdf_styles_align_header_not_body():
+    """The header styles follow the choice; body + the entry meta line
+    (shared 'contact' style) stay left so experience/education don't move."""
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+
+    from app.services.pdf_export import _styles
+
+    want = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
+    for alignment, expected in want.items():
+        styles = _styles(alignment)
+        assert styles["name"].alignment == expected
+        assert styles["headline"].alignment == expected
+        assert styles["header_contact"].alignment == expected
+        # Body + the Entry meta line must NOT move.
+        assert styles["body"].alignment == TA_LEFT
+        assert styles["contact"].alignment == TA_LEFT
+        assert styles["entry1"].alignment == TA_LEFT

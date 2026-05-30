@@ -250,6 +250,47 @@ def test_docx_export(client):
     assert pdf.content[:4] == b"%PDF"
 
 
+def test_download_header_alignment_and_edits_respected(client):
+    """Downloads accept header_alignment (left/center/right) for both formats,
+    reject bad values, and render the EDITED resume from the request body
+    (not a re-fetched original)."""
+    import io as _io
+
+    from docx import Document
+
+    test_client, Session = client
+    with Session() as s:
+        job = _seed_job(s)
+    gen = test_client.post("/api/tailor/generate", json={"job_id": job.id, "answers": {}}).json()
+    resume = gen["resume"]
+
+    # Simulate a user edit in the preview, then download that edited state.
+    edited_marker = "EDITED BULLET ZZZ unique-token-42"
+    resume["experience"][0]["bullets"] = [edited_marker]
+
+    for fmt, magic in (("docx", b"PK"), ("pdf", b"%PDF")):
+        for alignment in ("left", "center", "right"):
+            r = test_client.post(
+                f"/api/tailor/{fmt}",
+                json={"resume": resume, "mode": "visual", "header_alignment": alignment},
+            )
+            assert r.status_code == 200, (fmt, alignment, r.text[:300])
+            assert r.content[: len(magic)] == magic
+
+    # The edit must appear in the rendered DOCX (edits respected, CASE D).
+    docx = test_client.post(
+        "/api/tailor/docx", json={"resume": resume, "mode": "visual", "header_alignment": "center"}
+    )
+    text = "\n".join(p.text for p in Document(_io.BytesIO(docx.content)).paragraphs)
+    assert edited_marker in text
+
+    # Default header_alignment is accepted when omitted.
+    assert test_client.post("/api/tailor/docx", json={"resume": resume}).status_code == 200
+    # An invalid alignment is rejected by validation.
+    bad = test_client.post("/api/tailor/pdf", json={"resume": resume, "header_alignment": "middle"})
+    assert bad.status_code == 422
+
+
 def test_generate_smoke_matches_ats_schema_no_dashes(client):
     """Spec smoke test: the tailor endpoint returns JSON matching the new
     ATS schema, with no em/en dashes in any string, at least one matched

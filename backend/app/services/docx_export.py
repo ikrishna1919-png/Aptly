@@ -52,19 +52,32 @@ _LIGHT = RGBColor(0x55, 0x55, 0x55)
 _HEADING_INK = RGBColor(0x22, 0x22, 0x22)
 _MARGIN_INCHES = 0.6
 
+# Header alignment is a user choice (left/center/right), applied to the name +
+# headline + contact/links block ONLY. Body text (summary and everything below)
+# stays left-aligned regardless — readable body copy is always left.
+_DOCX_HEADER_ALIGN = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT,
+    "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+}
+
 
 def render_docx(
     resume: TailoredResume,
     candidate: dict[str, Any] | None = None,  # noqa: ARG001 — kept for call-site compatibility
     *,
     mode: str | None = None,
+    header_alignment: str = "center",
 ) -> bytes:
     """Render `resume` to DOCX bytes. `mode` is "visual" (default) or
-    "plain"; falls back to the resume's own `meta.mode`. The legacy
+    "plain"; falls back to the resume's own `meta.mode`. `header_alignment`
+    ("left" | "center" | "right", default "center") positions the name +
+    contact header block; body text always stays left. The legacy
     `candidate` arg is accepted and ignored — contact now lives on the
     resume itself (reconciled server-side from the profile)."""
     chosen = (mode or resume.meta.mode or "visual").lower()
     plain = chosen == "plain"
+    align = _DOCX_HEADER_ALIGN.get(header_alignment, WD_ALIGN_PARAGRAPH.CENTER)
     blocks = build_blocks(resume)
 
     doc = Document()
@@ -82,7 +95,7 @@ def render_docx(
 
     for block in blocks:
         if isinstance(block, Header):
-            _render_header(doc, block)
+            _render_header(doc, block, alignment=align)
         elif isinstance(block, Heading):
             _render_heading(doc, block.text, plain=plain)
         elif isinstance(block, Para):
@@ -100,9 +113,9 @@ def render_docx(
 # --- block renderers --------------------------------------------------------
 
 
-def _render_header(doc: Any, header: Header) -> None:
+def _render_header(doc: Any, header: Header, *, alignment: Any = WD_ALIGN_PARAGRAPH.CENTER) -> None:
     name_p = doc.add_paragraph()
-    name_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    name_p.alignment = alignment
     name_p.paragraph_format.space_after = Pt(2)
     name_run = name_p.add_run(header.name)
     name_run.bold = True
@@ -110,6 +123,7 @@ def _render_header(doc: Any, header: Header) -> None:
 
     if header.headline:
         hp = doc.add_paragraph()
+        hp.alignment = alignment
         hr = hp.add_run(header.headline)
         hr.font.size = Pt(_HEADLINE_PT)
         hr.font.color.rgb = _LIGHT
@@ -117,6 +131,7 @@ def _render_header(doc: Any, header: Header) -> None:
     for line in (header.contact_line, header.links_line):
         if line:
             cp = doc.add_paragraph(line)
+            cp.alignment = alignment
             cp.runs[0].font.size = Pt(_SMALL_PT)
             cp.runs[0].font.color.rgb = RGBColor(0x44, 0x44, 0x44)
 

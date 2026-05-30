@@ -17,6 +17,7 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  type HeaderAlignment,
   type Job,
   type ResumeMode,
   type TailoredResume,
@@ -962,6 +963,9 @@ function DownloadMenu({ resume, job }: { resume: TailoredResume; job: Job }) {
   const [open, setOpen] = useState(false);
   const [format, setFormat] = useState<"docx" | "pdf">("docx");
   const [mode, setMode] = useState<ResumeMode>("visual");
+  // Header alignment defaults to center (most common resume style) and is
+  // remembered for the rest of the session via this state.
+  const [headerAlignment, setHeaderAlignment] = useState<HeaderAlignment>("center");
   const [downloading, setDownloading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -979,7 +983,7 @@ function DownloadMenu({ resume, job }: { resume: TailoredResume; job: Job }) {
     setDownloading(true);
     setErr(null);
     try {
-      const blob = await downloadResume(resume, filename, format, mode);
+      const blob = await downloadResume(resume, filename, format, mode, headerAlignment);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -1023,6 +1027,16 @@ function DownloadMenu({ resume, job }: { resume: TailoredResume; job: Job }) {
             ]}
             value={mode}
             onChange={(v) => setMode(v as ResumeMode)}
+          />
+          <Choice
+            label="Header alignment"
+            options={[
+              { value: "left", label: "Left" },
+              { value: "center", label: "Center" },
+              { value: "right", label: "Right" },
+            ]}
+            value={headerAlignment}
+            onChange={(v) => setHeaderAlignment(v as HeaderAlignment)}
           />
           {err && <p className="text-xs text-destructive">{err}</p>}
           <Button className="w-full" disabled={downloading} onClick={() => void download()}>

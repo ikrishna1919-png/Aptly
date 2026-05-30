@@ -25,7 +25,7 @@ import io
 from xml.sax.saxutils import escape
 
 from reportlab.lib.colors import Color
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
@@ -63,7 +63,14 @@ _LIGHT = Color(0.33, 0.33, 0.33)
 _RULE = Color(0.6, 0.6, 0.6)
 
 
-def _styles() -> dict[str, ParagraphStyle]:
+# Header alignment is a user choice applied to the name + headline + contact
+# block ONLY. Everything else (body, headings, entries, bullets) stays
+# TA_LEFT — readable body copy is always left.
+_PDF_HEADER_ALIGN = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
+
+
+def _styles(header_alignment: str = "center") -> dict[str, ParagraphStyle]:
+    header_align = _PDF_HEADER_ALIGN.get(header_alignment, TA_CENTER)
     base = ParagraphStyle(
         "body",
         fontName=_FONT,
@@ -82,6 +89,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=_NAME_PT,
             leading=_NAME_PT * 1.1,
             spaceAfter=2,
+            alignment=header_align,
         ),
         "headline": ParagraphStyle(
             "headline",
@@ -90,7 +98,10 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=_HEADLINE_PT * 1.2,
             textColor=_LIGHT,
             spaceAfter=2,
+            alignment=header_align,
         ),
+        # Left-aligned: used for the Entry meta line (company/dates) in plain
+        # mode, which must NOT follow header alignment.
         "contact": ParagraphStyle(
             "contact",
             parent=base,
@@ -98,6 +109,17 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=_SMALL_PT * 1.25,
             textColor=_LIGHT,
             spaceAfter=1,
+        ),
+        # Same look as "contact" but follows the chosen header alignment —
+        # used only for the header's contact/links lines.
+        "header_contact": ParagraphStyle(
+            "header_contact",
+            parent=base,
+            fontSize=_SMALL_PT,
+            leading=_SMALL_PT * 1.25,
+            textColor=_LIGHT,
+            spaceAfter=1,
+            alignment=header_align,
         ),
         "heading": ParagraphStyle(
             "heading",
@@ -169,8 +191,8 @@ class TwoColLine(Flowable):
             self.canv.drawRightString(self.width, 2, self.right)
 
 
-def _flowables(resume: TailoredResume, *, plain: bool) -> list:
-    styles = _styles()
+def _flowables(resume: TailoredResume, *, plain: bool, header_alignment: str = "center") -> list:
+    styles = _styles(header_alignment)
     out: list = []
     for block in build_blocks(resume):
         if isinstance(block, Header):
@@ -179,7 +201,7 @@ def _flowables(resume: TailoredResume, *, plain: bool) -> list:
                 out.append(Paragraph(escape(block.headline), styles["headline"]))
             for line in (block.contact_line, block.links_line):
                 if line:
-                    out.append(Paragraph(escape(line), styles["contact"]))
+                    out.append(Paragraph(escape(line), styles["header_contact"]))
         elif isinstance(block, Heading):
             out.append(Paragraph(escape(block.text), styles["heading"]))
             if not plain:
@@ -202,7 +224,9 @@ def _flowables(resume: TailoredResume, *, plain: bool) -> list:
     return out
 
 
-def _build(resume: TailoredResume, *, mode: str | None) -> tuple[bytes, int]:
+def _build(
+    resume: TailoredResume, *, mode: str | None, header_alignment: str = "center"
+) -> tuple[bytes, int]:
     """Build the PDF and return (bytes, page_count)."""
     chosen = (mode or resume.meta.mode or "visual").lower()
     plain = chosen == "plain"
@@ -229,15 +253,19 @@ def _build(resume: TailoredResume, *, mode: str | None) -> tuple[bytes, int]:
         id="body",
     )
     doc.addPageTemplates([PageTemplate(id="single", frames=[frame])])
-    doc.build(_flowables(resume, plain=plain))
+    doc.build(_flowables(resume, plain=plain, header_alignment=header_alignment))
     # BaseDocTemplate.page holds the last page number after a build.
     return buf.getvalue(), max(1, doc.page)
 
 
-def render_pdf(resume: TailoredResume, *, mode: str | None = None) -> bytes:
+def render_pdf(
+    resume: TailoredResume, *, mode: str | None = None, header_alignment: str = "center"
+) -> bytes:
     """Render `resume` to PDF bytes. `mode` is "visual" (default) or
-    "plain"; falls back to the resume's own `meta.mode`."""
-    return _build(resume, mode=mode)[0]
+    "plain"; falls back to the resume's own `meta.mode`. `header_alignment`
+    ("left" | "center" | "right", default "center") positions the name +
+    contact header block; body text always stays left."""
+    return _build(resume, mode=mode, header_alignment=header_alignment)[0]
 
 
 def count_pages(resume: TailoredResume, *, mode: str | None = None) -> int:
