@@ -126,6 +126,33 @@
       .summary b { font-variant-numeric: tabular-nums; }
       .err { color: var(--red); font-size: 12.5px; margin-top: 8px; }
       a { color: var(--primary); }
+      /* Review panel (JD + profile), shown above "Start filling". */
+      .review-detail {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px 10px;
+        margin-top: 10px;
+      }
+      .review-detail > summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 13px;
+        list-style: none;
+      }
+      .review-detail > summary::-webkit-details-marker { display: none; }
+      .review-detail > summary::before { content: "▸ "; color: var(--muted); }
+      .review-detail[open] > summary::before { content: "▾ "; }
+      .jd-text {
+        white-space: pre-wrap;
+        max-height: 160px;
+        overflow: auto;
+        margin-top: 8px;
+        font-size: 12.5px;
+        line-height: 1.45;
+        color: var(--ink);
+      }
+      .profile-summary { margin-top: 8px; font-size: 12.5px; line-height: 1.5; }
+      .profile-summary .muted { font-size: 12.5px; }
     </style>
   </head>
   <body>

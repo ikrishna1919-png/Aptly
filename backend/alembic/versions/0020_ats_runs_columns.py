@@ -34,7 +34,9 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("tailor_runs", sa.Column("option_type", sa.String(length=32), nullable=True))
-    op.add_column("tailor_runs", sa.Column("uploaded_filename", sa.String(length=256), nullable=True))
+    op.add_column(
+        "tailor_runs", sa.Column("uploaded_filename", sa.String(length=256), nullable=True)
+    )
     op.add_column("tailor_runs", sa.Column("uploaded_docx_blob", sa.LargeBinary(), nullable=True))
     op.add_column("tailor_runs", sa.Column("format_selection", sa.String(length=32), nullable=True))
     op.add_column("tailor_runs", sa.Column("custom_options_json", sa.JSON(), nullable=True))

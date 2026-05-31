@@ -29,6 +29,7 @@ import {
   attachFileToInput,
   dropFileOnZone,
   dropZoneFor,
+  extractJobDescription,
 } from "./shared.js";
 
 const STATE = {
@@ -250,6 +251,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "GH_FILL") {
     fillFields(msg.payload).then((summary) => sendResponse({ summary }));
     return true; // async
+  }
+  if (msg.type === "GET_PAGE_CONTEXT") {
+    // Read-only context for the popup's review panel: the parsed JD + the
+    // current field count + host. Never mutates the page.
+    const fieldCount = detectFormFields("Popup context");
+    let jdText = "";
+    try {
+      jdText = extractJobDescription(document);
+    } catch (_) {
+      jdText = "";
+    }
+    sendResponse({ jdText, fieldCount, host: location.host });
+    return true;
   }
   return false;
 });
