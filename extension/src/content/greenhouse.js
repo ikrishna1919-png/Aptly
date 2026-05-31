@@ -45,28 +45,17 @@ const LOG = "[Aptly]";
 // than this is probably just a search box / login, not an application.
 const MIN_FIELDS = 3;
 
-// Selector-AGNOSTIC detection: scan the whole document (works on the old
-// boards.greenhouse.io <form> markup AND the new job-boards.greenhouse.io
-// React SPA, which may not wrap fields in a <form> at all). Searching from a
-// found <form> when one exists narrows noise; otherwise scan the document.
+// Selector-AGNOSTIC, shadow-DOM-piercing detection. We ALWAYS scan the whole
+// document with queryAllDeep (which descends into OPEN shadow roots) and filter
+// with isApplicationInput. This is a superset of any single-<form> scan, so it
+// can't under-count, and it removes the wrong-form hijack where a stray
+// non-application <form> with >=3 inputs (search/login/newsletter) used to
+// satisfy the threshold and block the real apply fields — e.g. SmartRecruiters,
+// whose fields (id="first-name-input", …) are mounted in an open shadow root.
+// Works on old Greenhouse <form> markup, the React SPA, Lever/Ashby, and
+// SmartRecruiters alike. (Closed shadow roots are unreachable to any extension.)
 function collectFields() {
-  const form = document.querySelector(
-    "#application_form, #application-form, form[action*='application'], form",
-  );
-  // Prefer the matched <form>, but if it's too sparse to be the application
-  // form — e.g. a header search/login <form> that happens to match first on a
-  // Lever/Ashby/SmartRecruiters page — widen to a whole-document scan so we
-  // don't miss fields rendered outside it. On Greenhouse the real application
-  // form clears MIN_FIELDS, so behaviour there is unchanged.
-  let els = form
-    ? Array.from(form.querySelectorAll("input, select, textarea")).filter(isApplicationInput)
-    : [];
-  if (els.length < MIN_FIELDS) {
-    // Deep scan pierces OPEN shadow roots (SmartRecruiters et al. mount fields
-    // there, so a plain document scan returns 0). Also rescues a hijacked form
-    // root (first <form> was a header search/login form).
-    els = queryAllDeep(document, "input, select, textarea").filter(isApplicationInput);
-  }
+  const els = queryAllDeep(document, "input, select, textarea").filter(isApplicationInput);
   // Group radios/checkboxes by name so a group counts as one question.
   const seenGroups = new Set();
   const fields = [];
