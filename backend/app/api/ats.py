@@ -13,6 +13,7 @@ and are driven by `ats_runs` background workers.
 from __future__ import annotations
 
 import io
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Path, UploadFile, status
@@ -235,6 +236,22 @@ def ats_run_status(
 class DownloadDocxRequest(BaseModel):
     # Indices into the run's `applied` edits the user accepted (default: all).
     accepted: list[int] | None = None
+    # Optional user-chosen output name (sanitized server-side; blank → default).
+    filename: str | None = None
+
+
+def _sanitize_docx_filename(raw: str | None, *, default: str) -> str:
+    """Make a safe DOCX download name: drop any path components, strip control
+    chars / quotes, trim, cap length, and enforce exactly one trailing `.docx`.
+    Blank/None → `default`. Defends the Content-Disposition header."""
+
+    def _clean(s: str | None) -> str:
+        s = (s or "").replace("\\", "/").split("/")[-1]  # no path traversal
+        s = re.sub(r'[\x00-\x1f"\']', "", s).strip().strip(".")
+        return re.sub(r"\.docx$", "", s, flags=re.IGNORECASE).strip()[:128].strip()
+
+    name = _clean(raw) or _clean(default) or "resume"
+    return f"{name}.docx"
 
 
 @router.post("/ats/runs/{run_id}/download-docx")
@@ -254,7 +271,8 @@ def ats_download_docx(
     if payload.accepted is not None:
         applied = [applied[i] for i in payload.accepted if 0 <= i < len(applied)]
     new_bytes, _, _ = ats.apply_docx_edits(run.uploaded_docx_blob, applied)
-    fname = (run.uploaded_filename or "resume.docx").rsplit(".", 1)[0] + "-tailored.docx"
+    default = (run.uploaded_filename or "resume.docx").rsplit(".", 1)[0] + "-tailored"
+    fname = _sanitize_docx_filename(payload.filename, default=default)
     return StreamingResponse(
         io.BytesIO(new_bytes),
         media_type=_DOCX_MIME,

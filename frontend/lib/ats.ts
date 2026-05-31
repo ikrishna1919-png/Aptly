@@ -98,13 +98,18 @@ export async function fetchAtsRun(runId: string): Promise<AtsRun> {
 }
 
 /** Download the keyword-injected DOCX (Option 2). `accepted` = indices into
- * the run's applied edits to keep (omit = all). */
-export async function downloadAtsDocx(runId: string, accepted?: number[]): Promise<Blob> {
+ * the run's applied edits to keep (omit = all). `filename` = optional output
+ * name (sanitized server-side; omit = default). */
+export async function downloadAtsDocx(
+  runId: string,
+  accepted?: number[],
+  filename?: string,
+): Promise<Blob> {
   const res = await fetch(`${API_URL}/api/ats/runs/${encodeURIComponent(runId)}/download-docx`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accepted: accepted ?? null }),
+    body: JSON.stringify({ accepted: accepted ?? null, filename: filename ?? null }),
   });
   if (!res.ok) throw new Error(await detail(res));
   return res.blob();

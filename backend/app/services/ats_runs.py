@@ -238,9 +238,10 @@ def _execute_docx_inject(run_id: str, settings: Settings | None = None) -> None:
                 _finish(run_id, status=TAILOR_STATUS_ERROR, error_text="Upload not found.")
                 return
             blob, jd = run.uploaded_docx_blob, run.jd_text or ""
+            answers = run.questions_answers_json
             resume_text = ats.extract_docx_text(blob)
         try:
-            edits = ats.compute_keyword_edits(resume_text, jd, settings=settings)
+            edits = ats.compute_keyword_edits(resume_text, jd, answers=answers, settings=settings)
         except ats.KeywordInjectionError as e:
             # Clean, user-facing message (the LLM returned unparseable JSON
             # twice) — never a raw traceback.
