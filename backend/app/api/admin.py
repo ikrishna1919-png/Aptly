@@ -32,7 +32,7 @@ from app.database import get_db
 from app.models.ingest_run import IngestRun
 from app.models.job import MANUAL_SOURCE, Job
 from app.models.user import User
-from app.services.ingest import start_background_ingest
+from app.services.ingest import effective_run_status, start_background_ingest
 
 router = APIRouter()
 
@@ -101,6 +101,21 @@ class IngestRunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+def _run_out(run: IngestRun, settings: Settings) -> IngestRunOut:
+    """Serialize a run, REPORTING `stale` for a `running` row whose
+    heartbeat has gone quiet past STALE_RUN_MINUTES. Read-only — the row
+    itself is left untouched (the reaper on the next trigger persists the
+    `failed` transition)."""
+    return IngestRunOut(
+        run_id=run.run_id,
+        status=effective_run_status(run, settings),
+        stats=run.stats or {},
+        error=run.error,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+    )
+
+
 @router.post(
     "/admin/ingest",
     status_code=status.HTTP_202_ACCEPTED,
@@ -131,7 +146,7 @@ def latest_ingest_run(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
-) -> IngestRun:
+) -> IngestRunOut:
     """Return the most recently started ingest run (any status)."""
     _require_admin(settings, x_admin_token)
     run = db.execute(
@@ -139,7 +154,7 @@ def latest_ingest_run(
     ).scalar_one_or_none()
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no ingest runs yet")
-    return run
+    return _run_out(run, settings)
 
 
 @router.get("/admin/ingest/{run_id}", response_model=IngestRunOut)
@@ -148,12 +163,12 @@ def get_ingest_run(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
-) -> IngestRun:
+) -> IngestRunOut:
     _require_admin(settings, x_admin_token)
     run = db.execute(select(IngestRun).where(IngestRun.run_id == run_id)).scalar_one_or_none()
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ingest run not found")
-    return run
+    return _run_out(run, settings)
 
 
 class ManualJobIn(BaseModel):

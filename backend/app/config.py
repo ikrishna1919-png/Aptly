@@ -15,8 +15,12 @@ class Settings(BaseSettings):
     environment: str = Field(default="development", alias="ENVIRONMENT")
 
     # Rolling-window size for the job feed. Anything older than this is
-    # deleted on each ingest pass.
-    hours_window: int = Field(default=48, alias="HOURS_WINDOW")
+    # deleted on each ingest pass. Default 720h (30 days). NOTE: the window
+    # only takes effect once a run actually FINISHES — the expiry/cleanup
+    # step runs at the END of `run_ingest`, so a pass killed mid-run never
+    # reaches it. Widening the window therefore does nothing until the host
+    # is always-on (Render Starter) and a full pass can complete.
+    hours_window: int = Field(default=720, alias="HOURS_WINDOW")
 
     # Shared secret required by the admin ingest endpoint. The scheduled
     # GitHub Actions workflow sends it in the X-Admin-Token header.
@@ -47,7 +51,8 @@ class Settings(BaseSettings):
     # invocations. Bounds wall-clock per run so a single pass always
     # finishes within the scheduled budget — important once `sources`
     # has hundreds of rows. Set to a very large number to disable
-    # the cap.
+    # the cap, or to <= 0 to process ALL enabled sources in one pass
+    # (use once the host is always-on so one run can cover everything).
     ingest_max_per_run: int = Field(default=150, alias="INGEST_MAX_PER_RUN")
 
     # Within a single run, sources are processed in batches: each
@@ -58,6 +63,17 @@ class Settings(BaseSettings):
     # 25-source unit of work durable on disk before the next one
     # starts so a mid-run timeout never wipes the whole pass.
     ingest_batch_size: int = Field(default=25, alias="INGEST_BATCH_SIZE")
+
+    # A background ingest run writes a heartbeat (progress snapshot +
+    # `last_progress_at` timestamp) onto its IngestRun row after every
+    # batch. If a run is still `running` but its last heartbeat (or, with
+    # no heartbeat yet, its `started_at`) is older than this many minutes,
+    # it's treated as dead: the status endpoints REPORT it as `stale`, and
+    # the next `POST /admin/ingest` reaps it to `failed` ("superseded/stale").
+    # Guards against a sleepy free-tier host killing the worker thread
+    # mid-run and leaving the row stuck at `running` forever. 15 min
+    # comfortably exceeds a healthy full pass.
+    stale_run_minutes: int = Field(default=15, alias="STALE_RUN_MINUTES")
 
     # ── Google sign-in (Phase 5 multi-user auth) ───────────────────────
     # Client credentials issued in the Google Cloud console. Without

@@ -37,3 +37,7 @@ class IngestRun(Base):
 INGEST_STATUS_RUNNING = "running"
 INGEST_STATUS_SUCCESS = "success"
 INGEST_STATUS_FAILED = "failed"
+# Derived/reported status only — a `running` row whose heartbeat has gone
+# quiet past STALE_RUN_MINUTES. Never persisted by the worker; the reaper
+# self-heals such rows to `failed`. Surfaced by the status endpoints.
+INGEST_STATUS_STALE = "stale"

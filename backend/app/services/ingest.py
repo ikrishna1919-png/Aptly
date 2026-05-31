@@ -67,6 +67,8 @@ from app.config import Settings
 from app.database import SessionLocal
 from app.models.ingest_run import (
     INGEST_STATUS_FAILED,
+    INGEST_STATUS_RUNNING,
+    INGEST_STATUS_STALE,
     INGEST_STATUS_SUCCESS,
     IngestRun,
 )
@@ -139,7 +141,7 @@ def _ensure_aware(dt: datetime | None) -> datetime | None:
     return dt
 
 
-def _load_due_sources(db: Session, *, limit: int) -> list[Source]:
+def _load_due_sources(db: Session, *, limit: int | None) -> list[Source]:
     """The next `limit` sources to ingest, oldest-checked first.
 
     Order is `last_run_at ASC NULLS FIRST` so never-checked rows are
@@ -148,19 +150,22 @@ def _load_due_sources(db: Session, *, limit: int) -> list[Source]:
     source — important once `sources` has hundreds of rows and one
     pass can't cover them all within the scheduler's budget.
     `source_type` + `token` are tiebreakers so the order is stable
-    across processes (log diffs are sane)."""
-    return list(
-        db.execute(
-            select(Source)
-            .where(Source.enabled.is_(True))
-            .order_by(
-                Source.last_run_at.asc().nullsfirst(),
-                Source.source_type,
-                Source.token,
-            )
-            .limit(limit)
-        ).scalars()
+    across processes (log diffs are sane).
+
+    `limit=None` loads EVERY enabled source (used when
+    INGEST_MAX_PER_RUN<=0 — one pass covers the whole table)."""
+    q = (
+        select(Source)
+        .where(Source.enabled.is_(True))
+        .order_by(
+            Source.last_run_at.asc().nullsfirst(),
+            Source.source_type,
+            Source.token,
+        )
     )
+    if limit is not None:
+        q = q.limit(limit)
+    return list(db.execute(q).scalars())
 
 
 def _chunked(items: list, size: int):
@@ -267,6 +272,7 @@ def run_ingest(
     settings: Settings,
     sources: list[Source] | None = None,
     source_factories: dict[str, type[JobSource]] | None = None,
+    run_id: str | None = None,
 ) -> IngestStats:
     """Run a bounded ingest+cleanup pass.
 
@@ -280,15 +286,19 @@ def run_ingest(
     table so every enabled source eventually gets pulled."""
 
     source_factories = source_factories if source_factories is not None else SOURCES
-    max_per_run = max(1, int(getattr(settings, "ingest_max_per_run", 150)))
+    raw_max = int(getattr(settings, "ingest_max_per_run", 150))
     batch_size = max(1, int(getattr(settings, "ingest_batch_size", 25)))
     threshold = max(1, int(getattr(settings, "source_failure_threshold", 3)))
     concurrency = max(1, int(getattr(settings, "ingest_concurrency", 10)))
 
     if sources is not None:
         source_rows = sources
+    elif raw_max <= 0:
+        # <= 0 disables the per-run cap: pull every enabled source in one
+        # pass (sensible once the host is always-on). Still rotation-ordered.
+        source_rows = _load_due_sources(db, limit=None)
     else:
-        source_rows = _load_due_sources(db, limit=max_per_run)
+        source_rows = _load_due_sources(db, limit=max(1, raw_max))
 
     stats = IngestStats(window_hours=settings.hours_window, started_at=_utcnow().isoformat())
     window_start = _utcnow() - timedelta(hours=settings.hours_window)
@@ -317,6 +327,12 @@ def run_ingest(
                 seen=seen,
                 threshold=threshold,
             )
+        # Heartbeat: snapshot progress-so-far onto the IngestRun row after
+        # each batch so a run killed before it finishes shows its last
+        # progress instead of an empty {}. No-op when run outside the
+        # background worker (run_id=None: CLI / direct test calls).
+        if run_id is not None:
+            _write_heartbeat(db, run_id, stats)
 
     stats.deleted_expired = _delete_expired(db, window_start)
     db.commit()
@@ -573,6 +589,82 @@ def _launch_worker(target, args: tuple) -> None:
     threading.Thread(target=target, args=args, daemon=True).start()
 
 
+def _write_heartbeat(db: Session, run_id: str, stats: IngestStats) -> None:
+    """Persist a progress snapshot onto the IngestRun row after a batch.
+
+    Writes stats-so-far plus a `last_progress_at` timestamp into the JSON
+    `stats` column (no schema change needed) and commits. If the worker
+    thread is later killed mid-run, the row keeps this last snapshot
+    instead of the empty {} it started with — so the status endpoints and
+    the operator can see how far it got. Silent if the row is gone."""
+    run = db.execute(select(IngestRun).where(IngestRun.run_id == run_id)).scalar_one_or_none()
+    if run is None:
+        return
+    snapshot = stats.to_dict()
+    snapshot["last_progress_at"] = _utcnow().isoformat()
+    run.stats = snapshot
+    db.commit()
+
+
+def _last_activity(run: IngestRun) -> datetime | None:
+    """When the run last showed signs of life: its newest heartbeat
+    (`stats['last_progress_at']`) if present, else its `started_at`.
+    Always tz-aware so it's safe to compare against `_utcnow()`."""
+    stats = run.stats if isinstance(run.stats, dict) else {}
+    ts = stats.get("last_progress_at")
+    if ts:
+        try:
+            return _ensure_aware(datetime.fromisoformat(ts))
+        except (TypeError, ValueError):
+            pass
+    return _ensure_aware(run.started_at)
+
+
+def effective_run_status(run: IngestRun, settings: Settings) -> str:
+    """The status to REPORT for a run (read-only — never mutates/commits).
+
+    A row still marked `running` whose last activity is older than
+    `STALE_RUN_MINUTES` is reported as `stale` — the worker was almost
+    certainly killed mid-run. Terminal statuses pass through unchanged.
+    The actual self-heal to `failed` happens in `_reap_stale_runs` on the
+    next trigger; this is just so a dead run stops masquerading as live."""
+    if run.status != INGEST_STATUS_RUNNING:
+        return run.status
+    last = _last_activity(run)
+    if last is None:
+        return run.status
+    stale_after = max(1, int(getattr(settings, "stale_run_minutes", 15)))
+    age_minutes = (_utcnow() - last).total_seconds() / 60.0
+    return INGEST_STATUS_STALE if age_minutes > stale_after else run.status
+
+
+def _reap_stale_runs(db: Session, settings: Settings) -> int:
+    """Mark abandoned `running` rows as `failed` so the table self-heals.
+
+    Called at the start of every trigger. Any row still `running` whose
+    last activity is older than `STALE_RUN_MINUTES` is flipped to `failed`
+    with error 'superseded/stale': a worker killed by a sleepy host never
+    wrote its terminal status, so without this it would masquerade as live
+    forever and `GET /admin/ingest` would lie. Returns the count reaped."""
+    stale_after = max(1, int(getattr(settings, "stale_run_minutes", 15)))
+    cutoff = _utcnow() - timedelta(minutes=stale_after)
+    running = list(
+        db.execute(select(IngestRun).where(IngestRun.status == INGEST_STATUS_RUNNING)).scalars()
+    )
+    reaped = 0
+    for run in running:
+        last = _last_activity(run)
+        if last is not None and last < cutoff:
+            run.status = INGEST_STATUS_FAILED
+            run.error = f"superseded/stale: no progress for over {stale_after} min"
+            run.finished_at = _utcnow()
+            reaped += 1
+    if reaped:
+        db.commit()
+        log.warning("reaped %d stale ingest run(s) to failed", reaped)
+    return reaped
+
+
 def _finish_run(
     db: Session,
     run_id: str,
@@ -599,7 +691,7 @@ def _execute_ingest_run(run_id: str, settings: Settings) -> None:
     """Worker entrypoint. Opens its own DB session(s); never raises out."""
     try:
         with SessionLocal() as db:
-            stats = run_ingest(db, settings)
+            stats = run_ingest(db, settings, run_id=run_id)
         with SessionLocal() as db:
             _finish_run(
                 db,
@@ -636,6 +728,10 @@ def start_background_ingest(settings: Settings) -> str:
     """
     run_id = uuid.uuid4().hex
     with SessionLocal() as db:
+        # Self-heal first: flip any abandoned (killed-mid-run) `running`
+        # rows to `failed` so the table is trustworthy and this new run is
+        # the only live one.
+        _reap_stale_runs(db, settings)
         db.add(IngestRun(run_id=run_id, status="running", stats={}))
         db.commit()
     _launch_worker(_execute_ingest_run, (run_id, settings))

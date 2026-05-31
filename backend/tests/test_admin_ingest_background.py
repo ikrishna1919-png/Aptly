@@ -254,7 +254,7 @@ def test_worker_failure_recorded_as_failed_status(client, monkeypatch):
     error message — never get stuck at `running` forever."""
     test_client, _ = client
 
-    def boom(db, settings):
+    def boom(db, settings, **kwargs):
         raise RuntimeError("simulated worker explosion")
 
     monkeypatch.setattr(ingest_module, "run_ingest", boom)
