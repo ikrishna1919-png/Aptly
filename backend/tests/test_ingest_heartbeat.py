@@ -32,7 +32,14 @@ from app.models.ingest_run import (
 )
 from app.models.source import Source
 from app.services import ingest as ingest_module
-from app.services.ingest import effective_run_status, run_ingest
+from app.services.ingest import (
+    IngestStats,
+    _FetchOutcome,
+    _process_outcome,
+    _SourceRef,
+    effective_run_status,
+    run_ingest,
+)
 from app.sources.base import JobSource, NormalizedJob
 
 # ── fixtures / helpers ──────────────────────────────────────────────────────
@@ -354,3 +361,78 @@ def test_budget_stops_starting_batches_and_still_succeeds(factories):
     # Finished cleanly (cleanup ran, finished_at stamped) — the success path,
     # not an exception.
     assert stats.finished_at != ""
+
+
+# ── transaction hygiene: no idle-in-transaction connection during fetches ────
+
+
+def test_no_open_transaction_entering_fetch(factories, monkeypatch):
+    """The Session must NOT be mid-transaction when the network fetch begins —
+    otherwise the connection idles in-transaction through 20s-per-board I/O and
+    Neon terminates it (IdleInTransactionSessionTimeout), killing the run before
+    any telemetry commits. A probe records the tx state at each fetch entry."""
+    with factories() as setup:
+        for i in range(5):
+            setup.add(Source(source_type="fake", token=f"co-{i}", enabled=True))
+        setup.commit()
+
+    settings = _settings(INGEST_MAX_PER_RUN=5, INGEST_BATCH_SIZE=2)  # 3 batches
+
+    tx_at_fetch: list[bool] = []
+    holder: dict = {}
+
+    async def probe(source_refs, source_factories, concurrency, timeout):
+        # Same Session the run uses — it must be idle (no open tx) right here,
+        # before any awaited network work.
+        tx_at_fetch.append(holder["db"].in_transaction())
+        return [_FetchOutcome(ref=r, status="ok", postings=[_nj(r.token)]) for r in source_refs]
+
+    monkeypatch.setattr(ingest_module, "_fetch_all_async", probe)
+
+    with factories() as db:
+        holder["db"] = db
+        run_ingest(db, settings, run_id=None, source_factories={"fake": _GoodSource})
+
+    assert tx_at_fetch, "fetch was never entered"
+    assert all(
+        state is False for state in tx_at_fetch
+    ), f"session was mid-transaction entering fetch: {tx_at_fetch}"
+    # Per-source telemetry still committed for every source.
+    with factories() as s:
+        assert s.query(Source).filter(Source.last_run_at.isnot(None)).count() == 5
+
+
+def test_process_outcome_requeries_source_by_id_after_commit(factories):
+    """_process_outcome re-loads the Source by id (it never holds an ORM object
+    across the fetch/commit boundary), so the telemetry write can't hit a
+    detached/expired instance — and lands on the right row."""
+    with factories() as s:
+        s.add(Source(source_type="fake", token="co-x", enabled=True))
+        s.commit()
+        src_id = s.query(Source).filter_by(token="co-x").one().id
+
+    with factories() as s:
+        # Commit so any ORM identity is expired (mimics the post-fetch state),
+        # then process an outcome that references the source ONLY by id.
+        s.commit()
+        outcome = _FetchOutcome(
+            ref=_SourceRef(id=src_id, source_type="fake", token="co-x"),
+            status="ok",
+            postings=[_nj("co-x")],
+        )
+        stats = IngestStats(window_hours=48)
+        _process_outcome(
+            s,
+            outcome,
+            stats=stats,
+            window_start=datetime.now(UTC) - timedelta(hours=48),
+            seen=set(),
+            threshold=100,
+        )
+
+    with factories() as s:
+        row = s.query(Source).filter_by(id=src_id).one()
+    assert row.last_status == "success"
+    assert row.last_run_at is not None
+    assert row.jobs_found_last_run == 1
+    assert stats.inserted == 1

@@ -183,24 +183,53 @@ def _chunked(items: list, size: int):
         yield items[i : i + size]
 
 
+def _ensure_no_tx(db: Session) -> None:
+    """Leave the session with NO open transaction before long network I/O.
+
+    A SQLAlchemy Session autobegins a transaction on the first statement and
+    holds it until commit/rollback. If we entered the async fetch (up to 20s
+    per board, ~25 boards) with a transaction open, the connection would sit
+    idle-in-transaction and Neon would terminate it
+    (`idle_in_transaction_session_timeout`, a few minutes, not ours to raise) —
+    the next per-source `UPDATE sources …` then fails on a dead connection and
+    the whole run dies with `attempted` stuck. We commit any pending work (it's
+    meant to be durable per-source anyway) so the fetch starts clean."""
+    if db.in_transaction():
+        db.commit()
+
+
+@dataclass(frozen=True)
+class _SourceRef:
+    """Plain, detached snapshot of a source row's identity.
+
+    Passed through the async fetch phase INSTEAD of the `Source` ORM object so
+    the network I/O never touches the Session: reading a token/type can't
+    trigger a lazy-load (the rows are expired after each commit) that would
+    autobegin a transaction and leave the connection idle-in-transaction during
+    the fetch. The DB phase re-queries the row by `id`."""
+
+    id: int
+    source_type: str
+    token: str
+
+
 @dataclass
 class _FetchOutcome:
     """One source row's network result, ready for the sync DB phase.
 
     `status` is one of `"ok"`, `"unknown"`, `"error"`, `"unexpected"`.
     `postings` is set only when `status == "ok"`; `error` carries the
-    message in the other cases. The structure is intentionally
-    serialisation-friendly so adding a test fixture / log line doesn't
-    require crossing the async boundary."""
+    message in the other cases. Carries a detached `_SourceRef` (not the ORM
+    row) so nothing in the async phase holds a Session-bound object."""
 
-    src: Source
+    ref: _SourceRef
     status: str
     postings: list[NormalizedJob] | None = None
     error: str | None = None
 
 
 async def _fetch_one(
-    src: Source,
+    ref: _SourceRef,
     adapter: JobSource | None,
     async_client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
@@ -213,30 +242,31 @@ async def _fetch_one(
     async with sem:
         if adapter is None:
             return _FetchOutcome(
-                src=src,
+                ref=ref,
                 status="unknown",
-                error=f"unknown source type {src.source_type!r}",
+                error=f"unknown source type {ref.source_type!r}",
             )
         try:
-            postings = await adapter.fetch_async(src.token, async_client=async_client)
-            return _FetchOutcome(src=src, status="ok", postings=list(postings))
+            postings = await adapter.fetch_async(ref.token, async_client=async_client)
+            return _FetchOutcome(ref=ref, status="ok", postings=list(postings))
         except SourceUnavailable as e:
-            return _FetchOutcome(src=src, status="error", error=str(e))
+            return _FetchOutcome(ref=ref, status="error", error=str(e))
         except Exception as e:  # noqa: BLE001
-            log.exception("%s (%s): unexpected fetch failure", src.token, src.source_type)
-            return _FetchOutcome(src=src, status="unexpected", error=f"unexpected: {e}")
+            log.exception("%s (%s): unexpected fetch failure", ref.token, ref.source_type)
+            return _FetchOutcome(ref=ref, status="unexpected", error=f"unexpected: {e}")
 
 
 async def _fetch_all_async(
-    source_rows: list[Source],
+    source_refs: list[_SourceRef],
     source_factories: dict[str, type[JobSource]],
     concurrency: int,
     timeout: float,
 ) -> list[_FetchOutcome]:
     """Run every source's `fetch_async` concurrently, bounded by a
-    semaphore. Returns one `_FetchOutcome` per input row in input
-    order."""
-    if not source_rows:
+    semaphore. Returns one `_FetchOutcome` per input ref in input
+    order. Operates only on detached `_SourceRef`s — never the Session — so
+    it can't open a transaction that idles through the network waits."""
+    if not source_refs:
         return []
 
     # Instantiate every adapter we'll need up front so the per-task
@@ -246,20 +276,20 @@ async def _fetch_all_async(
     # safe. For the default `to_thread(fetch)` path, the underlying
     # sync `httpx.Client` is already thread-safe.
     instances: dict[str, JobSource] = {}
-    for src in source_rows:
-        if src.source_type in instances:
+    for ref in source_refs:
+        if ref.source_type in instances:
             continue
-        cls = source_factories.get(src.source_type)
+        cls = source_factories.get(ref.source_type)
         if cls is None:
             continue
-        instances[src.source_type] = cls()
+        instances[ref.source_type] = cls()
 
     sem = asyncio.Semaphore(max(1, concurrency))
     try:
         async with httpx.AsyncClient(timeout=timeout) as async_client:
             tasks = [
-                _fetch_one(src, instances.get(src.source_type), async_client, sem)
-                for src in source_rows
+                _fetch_one(ref, instances.get(ref.source_type), async_client, sem)
+                for ref in source_refs
             ]
             return await asyncio.gather(*tasks)
     finally:
@@ -309,8 +339,17 @@ def run_ingest(
     else:
         source_rows = _load_due_sources(db, limit=max(1, raw_max))
 
+    # Snapshot each selected source's identity into a PLAIN, detached struct
+    # NOW (rows are fresh / not yet expired). The async fetch phase uses only
+    # these — never the ORM rows — so it can't lazy-load across a commit and
+    # leave the connection idle-in-transaction during the network waits. The DB
+    # phase re-queries each row by id.
+    source_refs = [
+        _SourceRef(id=s.id, source_type=s.source_type, token=s.token) for s in source_rows
+    ]
+
     stats = IngestStats(window_hours=settings.hours_window, started_at=_utcnow().isoformat())
-    stats.total_sources = len(source_rows)
+    stats.total_sources = len(source_refs)
     window_start = _utcnow() - timedelta(hours=settings.hours_window)
     seen: set[tuple[str, str]] = set()
 
@@ -325,7 +364,7 @@ def run_ingest(
     if run_id is not None:
         _write_heartbeat(db, run_id, stats)
 
-    for batch in _chunked(source_rows, batch_size):
+    for batch in _chunked(source_refs, batch_size):
         # Soft budget: once exceeded, stop STARTING new batches. Already-
         # processed batches are durable; we end the pass cleanly (success +
         # budget_truncated) and rotation picks up the rest next run — instead
@@ -339,6 +378,12 @@ def run_ingest(
                 stats.total_sources,
             )
             break
+
+        # Transaction hygiene: enter the network phase with NO open transaction
+        # (the initial heartbeat / prior batch's per-source commits, or the
+        # source-selection SELECT, may have left one open). Otherwise the
+        # connection idles in-transaction through the fetch and Neon kills it.
+        _ensure_no_tx(db)
 
         # Fetch this batch concurrently (bounded by the semaphore inside
         # `_fetch_all_async`), then drain its outcomes into the DB. By
@@ -405,22 +450,28 @@ def _process_outcome(
     and commit per-source telemetry via `_record_source_result`. Splits
     out of `run_ingest` so the batch loop reads cleanly and so partial
     work survives — every call here ends in a commit."""
-    src = outcome.src
-    source_name = src.source_type
-    token = src.token
+    ref = outcome.ref
+    source_name = ref.source_type
+    token = ref.token
+    # Re-query the source row by id (we deliberately did NOT hold the ORM
+    # object across the network phase). This attaches a fresh row in THIS
+    # post-fetch transaction, so the telemetry UPDATE never runs on the idle
+    # connection used for I/O. None ⇒ row deleted mid-run: skip its telemetry.
+    src = db.get(Source, ref.id)
 
     if outcome.status == "unknown":
         stats.boards_skipped += 1
         log.warning("%s (%s): skipped — %s", token, source_name, outcome.error)
-        _record_source_result(
-            db,
-            src,
-            status=STATUS_SKIPPED,
-            error=outcome.error,
-            jobs_found=None,
-            failure_threshold=threshold,
-            stats=stats,
-        )
+        if src is not None:
+            _record_source_result(
+                db,
+                src,
+                status=STATUS_SKIPPED,
+                error=outcome.error,
+                jobs_found=None,
+                failure_threshold=threshold,
+                stats=stats,
+            )
         return
 
     stats.boards_attempted += 1
@@ -431,15 +482,16 @@ def _process_outcome(
             {"board": f"{source_name}:{token}", "error": outcome.error or ""}
         )
         log.warning("%s (%s): error — %s", token, source_name, outcome.error)
-        _record_source_result(
-            db,
-            src,
-            status=STATUS_ERROR,
-            error=outcome.error,
-            jobs_found=0,
-            failure_threshold=threshold,
-            stats=stats,
-        )
+        if src is not None:
+            _record_source_result(
+                db,
+                src,
+                status=STATUS_ERROR,
+                error=outcome.error,
+                jobs_found=0,
+                failure_threshold=threshold,
+                stats=stats,
+            )
         return
 
     postings = outcome.postings or []
@@ -487,15 +539,20 @@ def _process_outcome(
         duplicates,
         unchanged,
     )
-    _record_source_result(
-        db,
-        src,
-        status=STATUS_SUCCESS,
-        error=None,
-        jobs_found=added + updated,
-        failure_threshold=threshold,
-        stats=stats,
-    )
+    if src is not None:
+        _record_source_result(
+            db,
+            src,
+            status=STATUS_SUCCESS,
+            error=None,
+            jobs_found=added + updated,
+            failure_threshold=threshold,
+            stats=stats,
+        )
+    else:
+        # Source row vanished mid-run; its upserted jobs are still pending and
+        # get committed by the next heartbeat / the final commit.
+        db.commit()
 
 
 def _record_source_result(
