@@ -256,7 +256,10 @@ _KEYWORD_SYSTEM = (
     "You are NOT rewriting the resume. Each edit replaces an exact existing "
     "phrase with a lightly-adjusted version that incorporates a relevant JD "
     "keyword the candidate genuinely supports. NEVER invent skills, employers, "
-    "metrics, or experience. Keep replacements close in length to the original.\n\n"
+    "metrics, or experience. Each replacement_text MUST stay CLOSE to the "
+    "original's length (within a few characters) — do NOT materially grow a "
+    "bullet or summary line, so the resume's line count and layout stay visually "
+    "intact. Swap a word or two; never expand a phrase into a sentence.\n\n"
     'Return ONLY JSON: {"edits": [{"original_text": "...", '
     '"replacement_text": "...", "reason": "..."}]}. `original_text` MUST '
     "be copied verbatim from the resume so it can be found exactly. Propose at "
@@ -353,9 +356,13 @@ def apply_docx_edits(
     docx_bytes: bytes, edits: list[dict[str, str]]
 ) -> tuple[bytes, list[dict[str, str]], list[dict[str, str]]]:
     """Apply {original_text → replacement_text} swaps to a DOCX in place,
-    preserving formatting. An edit is applied only when `original_text` lives
-    entirely within a single run (replacing across runs would shatter the
-    run's formatting, so those are SKIPPED and logged for visibility).
+    preserving formatting. Matching is PARAGRAPH-LEVEL: an edit applies even
+    when `original_text` spans multiple runs (Word splits text into runs at
+    arbitrary boundaries), via run-splicing — the full replacement goes into the
+    FIRST overlapped run and the overlapped remainder is blanked from the other
+    runs. Every other run is left untouched, so formatting (bold/size/colour/
+    etc.) is preserved. An edit is skipped ONLY when its text isn't present in
+    any single paragraph at all.
 
     Returns (new_docx_bytes, applied, skipped)."""
     from docx import Document  # noqa: PLC0415
@@ -374,24 +381,54 @@ def apply_docx_edits(
 
     paragraphs = list(_all_paragraphs())
     for edit in edits:
-        original = edit["original_text"]
-        replacement = edit["replacement_text"]
-        done = False
-        for para in paragraphs:
-            for run in para.runs:
-                if original in run.text:
-                    run.text = run.text.replace(original, replacement)
-                    applied.append(edit)
-                    done = True
-                    break
-            if done:
-                break
-        if not done:
-            # Either not found, or it spans multiple runs — skip to protect
-            # formatting. Log so it's visible.
-            log.info("ats keyword-inject: skipped edit (not in a single run): %r", original[:60])
+        if _apply_one_edit(paragraphs, edit["original_text"], edit["replacement_text"]):
+            applied.append(edit)
+        else:
+            log.info(
+                "ats keyword-inject: skipped edit (not found in any paragraph): %r",
+                edit["original_text"][:60],
+            )
             skipped.append(edit)
 
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue(), applied, skipped
+
+
+def _apply_one_edit(paragraphs: list, original: str, replacement: str) -> bool:
+    """Replace the FIRST occurrence of `original` in the FIRST paragraph that
+    contains it (across run boundaries), preserving each run's formatting.
+    Returns True if applied. Pure run-splicing — no new runs, no formatting
+    changes, no net-new lines."""
+    if not original:
+        return False
+    for para in paragraphs:
+        runs = para.runs
+        if not runs:
+            continue
+        # Snapshot original run texts BEFORE mutating, so the offset math is
+        # immune to length changes we make along the way.
+        texts = [r.text for r in runs]
+        full = "".join(texts)
+        idx = full.find(original)
+        if idx < 0:
+            continue
+        end = idx + len(original)
+        pos = 0
+        first_overlap = True
+        for run, t in zip(runs, texts, strict=True):
+            r_start, r_end = pos, pos + len(t)
+            pos = r_end
+            ov_start, ov_end = max(idx, r_start), min(end, r_end)
+            if ov_start >= ov_end:
+                continue  # this run doesn't overlap the match
+            ls, le = ov_start - r_start, ov_end - r_start
+            if first_overlap:
+                # Whole replacement lands here, inheriting THIS run's formatting.
+                run.text = t[:ls] + replacement + t[le:]
+                first_overlap = False
+            else:
+                # Blank only the overlapped slice; keep this run's tail + style.
+                run.text = t[:ls] + t[le:]
+        return True
+    return False

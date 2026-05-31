@@ -141,16 +141,18 @@ class TestDocxKeywordInjection:
         text = "\n".join(p.text for p in Document(io.BytesIO(new)).paragraphs)
         assert "Python and Kafka data pipelines" in text
 
-    def test_cross_run_edit_skipped(self):
-        # "Built pipelines" spans two separate runs → must be skipped, not break.
+    def test_cross_run_edit_applied(self):
+        # "Built pipelines" spans two separate runs → now APPLIED via run-
+        # splicing (previously skipped). The whole replacement lands in the
+        # first overlapped run; the rest of the span is blanked.
         blob = _docx_with_runs(["Built ", "pipelines"])
         new, applied, skipped = apply_docx_edits(
             blob,
             [{"original_text": "Built pipelines", "replacement_text": "Built Kafka pipelines"}],
         )
-        assert not applied and len(skipped) == 1
-        # Document still opens + runs intact.
-        assert Document(io.BytesIO(new)) is not None
+        assert len(applied) == 1 and not skipped
+        text = "\n".join(p.text for p in Document(io.BytesIO(new)).paragraphs)
+        assert text == "Built Kafka pipelines"
 
     def test_absent_edit_skipped(self):
         blob = _docx_with_runs(["Hello world."])

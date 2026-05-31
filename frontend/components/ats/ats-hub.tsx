@@ -12,7 +12,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useAuthGate } from "@/lib/use-login-modal";
-import { fetchJob, fetchProfile, downloadResume, type TailoredResume } from "@/lib/api";
+import {
+  fetchJob,
+  fetchProfile,
+  downloadResume,
+  getActiveResume,
+  type TailoredResume,
+} from "@/lib/api";
 import {
   ATS_MAX_WAIT_MS,
   ATS_POLL_MS,
@@ -70,6 +76,11 @@ export function AtsHub() {
   // the saved default.
   const [defaultFmtLabel, setDefaultFmtLabel] = useState<string>("Modern");
   const [overrideFmt, setOverrideFmt] = useState<AtsFormat | null>(null);
+  // Saved tailoring SOURCE ("ai" | "resume" | "available") + whether a DOCX is
+  // saved. When source is "resume" (match my resume format) we SKIP the
+  // customize screen and go straight to the in-place docx_inject run.
+  const [source, setSource] = useState<string | null>(null);
+  const [hasDocx, setHasDocx] = useState<boolean>(false);
   const [custom, setCustom] = useState<AtsCustomOptions>({
     base: "modern",
     accent_color: "blue",
@@ -95,7 +106,9 @@ export function AtsHub() {
         if (!cancelled && job?.description) {
           setOption("jd");
           setJdText(job.description);
-          setStep("questions");
+          // Land on the JD step; "Continue" then routes by saved source
+          // (customize for A, straight-to-docx_inject for B).
+          setStep("entry");
         }
       } catch {
         /* fall back to chooser */
@@ -118,10 +131,21 @@ export function AtsHub() {
         const f = d.format as AtsFormat;
         setFormat(KNOWN.includes(f) ? f : "modern");
         setDefaultFmtLabel(d.format.charAt(0).toUpperCase() + d.format.slice(1));
+        setSource((d.source as string) ?? "ai");
       })
       .catch(() => {
         /* keep Modern fallback */
       });
+    // Whether a DOCX is saved (needed for the "match my resume format" route).
+    getActiveResume()
+      .then((r) =>
+        setHasDocx(
+          !!r.present &&
+            r.content_type ===
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+      )
+      .catch(() => setHasDocx(false));
   }, []);
 
   // Load profile skills/roles for the chip pickers (best-effort).
@@ -230,6 +254,24 @@ export function AtsHub() {
     }
   }
 
+  // After the JD is submitted: for the "match my resume format" source (B),
+  // SKIP the customize screen and go straight to the in-place docx_inject run
+  // (the customize answers don't apply to that path). Otherwise → customize.
+  function continueFromJd() {
+    if (source === "resume") {
+      if (hasDocx) {
+        void onGenerate(); // → /ats/generate routes to docx_inject by source
+      } else {
+        setError(
+          "To use “Match my resume format”, upload a .docx resume on your Profile first — " +
+            "or switch your ATS format to “Let AI choose”.",
+        );
+      }
+      return;
+    }
+    setStep("questions");
+  }
+
   function reset() {
     setStep("chooser");
     setOption(null);
@@ -262,12 +304,7 @@ export function AtsHub() {
           )}
 
           {step === "entry" && option === "jd" && (
-            <JdEntry
-              value={jdText}
-              onChange={setJdText}
-              onBack={reset}
-              onContinue={() => setStep("questions")}
-            />
+            <JdEntry value={jdText} onChange={setJdText} onBack={reset} onContinue={continueFromJd} />
           )}
 
           {step === "entry" && option === "upload" && (
@@ -831,7 +868,14 @@ function Preview({
   }
   // Done.
   if (run.diff) {
-    return <DiffView diff={run.diff} runId={runId!} onStartOver={onStartOver} />;
+    return (
+      <DiffView
+        diff={run.diff}
+        demoMode={run.demo_mode}
+        runId={runId!}
+        onStartOver={onStartOver}
+      />
+    );
   }
   return (
     <StepShell title="Your tailored resume" onBack={onStartOver} backLabel="Start over">
@@ -911,10 +955,12 @@ function GenerateDownload({
 
 function DiffView({
   diff,
+  demoMode,
   runId,
   onStartOver,
 }: {
   diff: { applied: { original_text: string; replacement_text: string }[]; skipped: { original_text: string }[] };
+  demoMode: boolean;
   runId: string;
   onStartOver: () => void;
 }) {
@@ -943,10 +989,17 @@ function DiffView({
   }
   return (
     <StepShell title="Review keyword changes" onBack={onStartOver} backLabel="Start over">
+      {diff.applied.length > 0 && (
+        <p className="mb-3 text-sm text-muted-foreground">
+          {diff.applied.length} in-place keyword edit{diff.applied.length === 1 ? "" : "s"} applied —
+          wording only; your formatting, sections, and layout are unchanged. Review and download below.
+        </p>
+      )}
       {diff.applied.length === 0 && (
         <p className="text-sm text-muted-foreground">
-          No safe in-place keyword swaps were found (or demo mode). Your original document is
-          unchanged.
+          {demoMode
+            ? "Demo mode — set ANTHROPIC_API_KEY for live keyword edits. Your original document is unchanged."
+            : "No safe in-place keyword swaps were found for this job. Your original document is unchanged."}
         </p>
       )}
       <ul className="space-y-2">
