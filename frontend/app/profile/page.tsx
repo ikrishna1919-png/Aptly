@@ -667,6 +667,11 @@ function ProfileEditor() {
           </p>
         </header>
 
+        {/* Upload your resume — the single source of truth for tailoring.
+            DOCX only; persists until replaced. Below it the page offers
+            "Parse from your resume" (pre-fill the form) and manual entry. */}
+        <SavedResume />
+
         {showNewcomerHint && (
           <div
             role="status"
@@ -808,11 +813,12 @@ function ProfileEditor() {
             <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:space-y-0">
               <div className="space-y-1">
                 <CardTitle className="font-display text-lg font-medium tracking-tight">
-                  Start from a resume
+                  Parse from your resume
                 </CardTitle>
                 <CardDescription>
-                  Optional — drop a PDF or DOCX and we&apos;ll pre-fill the
-                  sections below. Nothing saves until you click Save.
+                  Optional — drop a resume or paste its text and we&apos;ll pre-fill the
+                  sections below to review. Prefer to type it in? Just fill the form
+                  manually. Nothing saves until you click Save.
                 </CardDescription>
               </div>
               <Button
@@ -821,7 +827,7 @@ function ProfileEditor() {
                 size="sm"
                 onClick={() => setShowResumeTools((s) => !s)}
               >
-                {showResumeTools ? "Hide" : "Import from resume"}
+                {showResumeTools ? "Hide" : "Parse from resume"}
               </Button>
             </CardHeader>
             {showResumeTools && (

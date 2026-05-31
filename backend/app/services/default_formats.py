@@ -20,6 +20,23 @@ from app.services.demo_candidate import get_candidate
 _RESUME_FALLBACK = {"format": "modern", "custom": None}
 _COVER_FALLBACK = {"format": "traditional", "custom": None}
 
+# Tailoring SOURCE stored alongside the render format in default_resume_format:
+#   "ai"        — Let AI choose (heuristic format) → from-scratch generate path
+#   "resume"    — Match my resume format → in-place keyword inject on the user's
+#                 saved active_resume DOCX (NO from-scratch generation)
+#   "available" — Choose an available template (placeholder / coming soon)
+# Unset → "ai" so existing users keep the generate path (backward compatible).
+RESUME_SOURCES = ("ai", "resume", "available")
+DEFAULT_RESUME_SOURCE = "ai"
+
+
+def resume_source(db: Session, user_id: int | None) -> str:
+    """The user's saved tailoring SOURCE choice for resumes ('ai'|'resume'|
+    'available'), defaulting to 'ai' when unset or unrecognised."""
+    src = resolve_default(db, user_id, "resume").get("source")
+    return src if src in RESUME_SOURCES else DEFAULT_RESUME_SOURCE
+
+
 _SENIOR_HINTS = ("senior", "staff", "principal", "lead", "head", "director", "vp", "chief")
 _ACADEMIC_HINTS = ("phd", "professor", "researcher", "postdoc", "lecturer", "research scientist")
 

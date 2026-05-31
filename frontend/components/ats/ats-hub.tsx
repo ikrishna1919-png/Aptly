@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { FileText, Upload, ArrowLeft, Check } from "lucide-react";
@@ -257,10 +258,6 @@ export function AtsHub() {
                 setOption("jd");
                 setStep("entry");
               }}
-              onUpload={() => {
-                setOption("upload");
-                setStep("entry");
-              }}
             />
           )}
 
@@ -343,15 +340,16 @@ export function AtsHub() {
 
 // ─── Step 1: chooser ──────────────────────────────────────────────────────────
 
-function Chooser({ onJd, onUpload }: { onJd: () => void; onUpload: () => void }) {
+function Chooser({ onJd }: { onJd: () => void }) {
   return (
     <div>
       <h1 className="font-display text-3xl font-bold tracking-tight">Resume generator</h1>
       <p className="mt-2 text-muted-foreground">
-        Generate an ATS-optimized resume from your profile, or keyword-optimize a resume you
-        already have.
+        Paste a job description — we tailor your resume using your saved profile and your chosen
+        format (set it on the <Link href="/ats/format" className="text-primary underline">ATS format</Link>{" "}
+        page; upload a resume on your <Link href="/profile" className="text-primary underline">Profile</Link>).
       </p>
-      <div className="mt-8 grid gap-4 sm:grid-cols-2">
+      <div className="mt-8 grid gap-4">
         <button
           onClick={onJd}
           className="group rounded-2xl border border-border bg-card p-6 text-left shadow-card transition-all hover:border-primary/40 hover:shadow-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -359,25 +357,11 @@ function Chooser({ onJd, onUpload }: { onJd: () => void; onUpload: () => void })
           <FileText className="h-7 w-7 text-primary" aria-hidden />
           <p className="mt-3 text-lg font-semibold">Paste a job description</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Generate an ATS-optimized resume from your profile, tailored to a specific job
-            description.
+            Tailor your resume to a specific posting. Your format choice decides how — AI-generated
+            from your profile, or in-place keyword edits on your saved resume.
           </p>
           <span className="mt-4 inline-flex items-center text-sm font-medium text-primary">
             Start →
-          </span>
-        </button>
-        <button
-          onClick={onUpload}
-          className="group rounded-2xl border border-border bg-card p-6 text-left shadow-card transition-all hover:border-primary/40 hover:shadow-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <Upload className="h-7 w-7 text-primary" aria-hidden />
-          <p className="mt-3 text-lg font-semibold">Upload your resume</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Get a keyword-optimized version of your existing resume (DOCX preserves your exact
-            formatting).
-          </p>
-          <span className="mt-4 inline-flex items-center text-sm font-medium text-primary">
-            Upload →
           </span>
         </button>
       </div>

@@ -390,17 +390,22 @@ async def upload_active_resume(
     if not raw:
         raise HTTPException(status_code=400, detail="Empty file.")
     name = (file.filename or "").lower()
+    # DOCX ONLY: the saved resume is the single source of truth for in-place
+    # tailoring ("match my resume format"), which edits the .docx's existing
+    # text runs — a PDF can't be edited that way. Reject PDF with a clear path.
     if name.endswith(".docx") or file.content_type == _DOCX_MIME:
         content_type = _DOCX_MIME
-    elif name.endswith(".pdf") or file.content_type == _PDF_MIME:
-        content_type = _PDF_MIME
     else:
-        raise HTTPException(status_code=415, detail="Upload a .docx or .pdf.")
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "Upload a Word .docx file. PDF isn't supported for the saved "
+                "resume — export your resume to .docx and try again."
+            ),
+        )
 
     row = _load_or_seed(db, user)
-    row.active_resume_filename = file.filename or (
-        "resume.docx" if content_type == _DOCX_MIME else "resume.pdf"
-    )
+    row.active_resume_filename = file.filename or "resume.docx"
     row.active_resume_content_type = content_type
     row.active_resume_blob = raw
     row.active_resume_uploaded_at = datetime.now(UTC)

@@ -854,9 +854,17 @@ export type TailorRunState = {
   cached: boolean;
   /** The gap analysis (questions etc.) — present from `pending_questions` on. */
   analysis: Analysis | null;
-  /** The tailored resume — PARTIAL while `generating`, final on `done`. */
+  /** The tailored resume — PARTIAL while `generating`, final on `done`.
+   * Always null in "docx_inject" mode (the result is the saved DOCX, edited
+   * in place — downloaded, not edited as JSON). */
   resume: TailoredResume | null;
   error: string | null;
+  /** "generate" (editable resume JSON) or "docx_inject" (in-place keyword edits
+   * on the user's saved DOCX → download). Drives which result UI shows. */
+  mode?: "generate" | "docx_inject";
+  /** docx_inject only: counts of keyword edits applied / skipped. */
+  docx_applied?: number | null;
+  docx_skipped?: number | null;
 };
 
 /** Poll cadence + ceiling for a tailor run. Generation is hard-capped at 90s

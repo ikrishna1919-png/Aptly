@@ -95,8 +95,30 @@ class RunIdResponse(BaseModel):
 def ats_generate(
     payload: GenerateRequest,
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> RunIdResponse:
+    # Saved tailoring SOURCE is the single source of truth. "resume" (match my
+    # resume format) ALWAYS runs in-place keyword inject against the user's
+    # saved DOCX — never the from-scratch generate path — regardless of the
+    # request's option_type/format.
+    if default_formats.resume_source(db, user.id) == "resume":
+        run_id = ats_runs.start_docx_inject_from_active_resume(
+            user_id=user.id,
+            jd_text=payload.jd_text,
+            customization=payload.questions,
+            settings=settings,
+        )
+        if run_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No saved resume. Upload a .docx on your Profile to use "
+                    "'Match my resume format', or switch your ATS format to 'Let AI choose'."
+                ),
+            )
+        return RunIdResponse(run_id=run_id)
+
     if payload.option_type == "upload_docx":
         if not payload.upload_id:
             raise HTTPException(status_code=400, detail="upload_id required for upload_docx.")
@@ -248,12 +270,17 @@ class DefaultFormatOut(BaseModel):
     format: str
     custom: dict[str, Any] | None = None
     reason: str | None = None
+    # Resume-only tailoring SOURCE: "ai" | "resume" | "available". None for cover.
+    source: str | None = None
 
 
 class SaveDefaultRequest(BaseModel):
     kind: Literal["resume", "cover"]
     format: str
     custom: dict[str, Any] | None = None
+    # "ai" | "resume" | "available" (resume kind only). Drives generate vs
+    # in-place docx-inject routing.
+    source: Literal["ai", "resume", "available"] | None = None
 
 
 @router.get("/ats/default-format/{kind}", response_model=DefaultFormatOut)
@@ -264,7 +291,10 @@ def get_default_format(
 ) -> DefaultFormatOut:
     value = default_formats.resolve_default(db, user.id, kind)
     return DefaultFormatOut(
-        kind=kind, format=value.get("format", "modern"), custom=value.get("custom")
+        kind=kind,
+        format=value.get("format", "modern"),
+        custom=value.get("custom"),
+        source=value.get("source") if kind == "resume" else None,
     )
 
 
@@ -274,10 +304,16 @@ def set_default_format(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DefaultFormatOut:
-    value = default_formats.save_default(
-        db, user.id, payload.kind, {"format": payload.format, "custom": payload.custom}
+    stored: dict[str, Any] = {"format": payload.format, "custom": payload.custom}
+    if payload.kind == "resume" and payload.source is not None:
+        stored["source"] = payload.source
+    value = default_formats.save_default(db, user.id, payload.kind, stored)
+    return DefaultFormatOut(
+        kind=payload.kind,
+        format=value["format"],
+        custom=value.get("custom"),
+        source=value.get("source") if payload.kind == "resume" else None,
     )
-    return DefaultFormatOut(kind=payload.kind, format=value["format"], custom=value.get("custom"))
 
 
 @router.post("/ats/default-format/ai-choose/{kind}", response_model=DefaultFormatOut)
