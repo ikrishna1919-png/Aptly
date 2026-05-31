@@ -286,21 +286,67 @@ class KeywordInjectionError(Exception):
 keyword_parse_failures: dict[str, int] = {"first": 0, "retry": 0}
 
 
+def _keyword_addendum(answers: dict[str, Any] | None) -> str:
+    """Fold the 6 customization answers into a STEER block for the keyword-edit
+    prompt — same spirit as build_customization_addendum, but tuned for in-place
+    swaps: it steers WHICH existing phrases to swap and WHICH JD keywords/skills
+    to weave in. `length` is intentionally omitted (in-place edits can't change
+    page count). Empty answers → empty string (no steer)."""
+    a = answers or {}
+    lines: list[str] = []
+
+    tone = _TONE.get(str(a.get("tone") or "").lower())
+    if tone:
+        lines.append(f"- Tone of replacements: {tone}")
+    emphasis = _EMPHASIS.get(str(a.get("emphasis") or "").lower())
+    if emphasis:
+        lines.append(f"- When choosing which phrases to swap, {emphasis}")
+    skills = [s for s in (a.get("skills") or []) if str(s).strip()]
+    if skills:
+        lines.append(
+            "- Prefer weaving in these skills the candidate genuinely has, where the JD "
+            "asks for them: " + ", ".join(skills) + "."
+        )
+    roles = [r for r in (a.get("roles") or []) if str(r).strip()]
+    if roles:
+        lines.append("- Give more weight to wording in these roles: " + ", ".join(roles) + ".")
+    extra = str(a.get("additional") or "").strip()
+    if extra:
+        lines.append(f"- Candidate's steer: {extra}")
+
+    if not lines:
+        return ""
+    return (
+        "\n\nCANDIDATE STEER (these guide WHICH existing wording to swap and which "
+        "keywords to weave in — they do NOT add content):\n"
+        + "\n".join(lines)
+        + "\nIMPORTANT: in-place edits can only rewrite text ALREADY present in the "
+        "resume. Honor the steer by choosing which existing phrases to adjust; if it "
+        "asks for something not in the resume, partially honor it through wording "
+        "choice and NEVER invent skills, employers, metrics, or experience."
+    )
+
+
 def compute_keyword_edits(
     resume_text: str,
     jd_text: str,
     *,
+    answers: dict[str, Any] | None = None,
     settings: Settings | None = None,
     client: Any | None = None,
 ) -> list[dict[str, str]]:
     """Ask the model for minimal {original_text → replacement_text} swaps.
-    Demo mode (no key) returns an empty list (no silent edits)."""
+    `answers` (the 6 customization fields) steer WHICH existing phrases/keywords
+    to favour — never to add content. Demo mode (no key) returns an empty list
+    (no silent edits)."""
     settings = settings or get_settings()
     if not settings.has_anthropic_key:
         return []
     api = _build_client(settings, client)
     user_content = (
-        f"RESUME TEXT:\n{resume_text}\n\nTARGET JOB:\n{jd_text}\n\nReturn the JSON edits."
+        f"RESUME TEXT:\n{resume_text}\n\nTARGET JOB:\n{jd_text}"
+        + _keyword_addendum(answers)
+        + "\n\nReturn the JSON edits."
     )
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_content}]
 

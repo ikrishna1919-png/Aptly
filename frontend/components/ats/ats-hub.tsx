@@ -254,19 +254,16 @@ export function AtsHub() {
     }
   }
 
-  // After the JD is submitted: for the "match my resume format" source (B),
-  // SKIP the customize screen and go straight to the in-place docx_inject run
-  // (the customize answers don't apply to that path). Otherwise → customize.
+  // After the JD is submitted, both paths show the SAME 6-question customize
+  // screen. For option B the answers STEER which existing keywords/skills to
+  // weave in (they don't add content); generate runs the in-place docx_inject.
+  // Guard: option B needs a saved DOCX first.
   function continueFromJd() {
-    if (source === "resume") {
-      if (hasDocx) {
-        void onGenerate(); // → /ats/generate routes to docx_inject by source
-      } else {
-        setError(
-          "To use “Match my resume format”, upload a .docx resume on your Profile first — " +
-            "or switch your ATS format to “Let AI choose”.",
-        );
-      }
+    if (source === "resume" && !hasDocx) {
+      setError(
+        "To use “Match my resume format”, upload a .docx resume on your Profile first — " +
+          "or switch your ATS format to “Let AI choose”.",
+      );
       return;
     }
     setStep("questions");
@@ -337,7 +334,9 @@ export function AtsHub() {
               defaultFormat={defaultFmtLabel}
               overrideFormat={overrideFmt}
               onOverrideFormat={setOverrideFmt}
-              showDocxNote={isDocxPath}
+              // Option B (match my resume format) preserves the saved DOCX's
+              // format, so show the in-place note + hide the format-override.
+              showDocxNote={isDocxPath || source === "resume"}
             />
           )}
 
@@ -650,7 +649,9 @@ function Questions({
       {/* FIX 6: default format applied automatically; override for this run. */}
       {showDocxNote ? (
         <p className="mt-6 rounded-lg border border-primary/15 bg-primary-soft/40 px-3 py-2 text-sm text-muted-foreground">
-          Using your uploaded resume&apos;s original format (keywords injected in place).
+          Using your saved resume&apos;s original format — keywords are woven into the existing
+          text in place; your formatting and layout are preserved. These answers steer which
+          keywords to favour (they don&apos;t add new content).
         </p>
       ) : (
         <div className="mt-6 rounded-lg border border-border px-3 py-2 text-sm">
@@ -965,6 +966,7 @@ function DiffView({
   onStartOver: () => void;
 }) {
   const [accepted, setAccepted] = useState<boolean[]>(diff.applied.map(() => true));
+  const [filename, setFilename] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   async function dl() {
@@ -972,11 +974,12 @@ function DiffView({
     setErr(null);
     try {
       const idx = accepted.flatMap((a, i) => (a ? [i] : []));
-      const blob = await downloadAtsDocx(runId, idx);
+      const blob = await downloadAtsDocx(runId, idx, filename.trim() || undefined);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "resume-tailored.docx";
+      const out = filename.trim().replace(/\.docx$/i, "");
+      a.download = `${out || "resume-tailored"}.docx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1023,16 +1026,41 @@ function DiffView({
         ))}
       </ul>
       {diff.skipped.length > 0 && (
-        <p className="mt-3 text-xs text-muted-foreground">
-          {diff.skipped.length} suggested change(s) couldn&apos;t be applied without altering your
-          formatting, so they were left out.
-        </p>
+        <div className="mt-4">
+          <p className="text-xs font-medium text-muted-foreground">
+            Couldn&apos;t place {diff.skipped.length} suggested change(s) (the exact phrase
+            wasn&apos;t found in the document) — left out:
+          </p>
+          <ul className="mt-1 space-y-1">
+            {diff.skipped.map((e, i) => (
+              <li key={i} className="rounded border border-dashed border-border px-2 py-1 text-xs text-muted-foreground line-through">
+                {e.original_text}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
-      <div className="mt-5 flex items-center gap-2 border-t border-border pt-4">
-        <Button disabled={downloading} onClick={() => void dl()}>
-          {downloading ? "Preparing…" : "Download DOCX"}
-        </Button>
-        {err && <span className="text-xs text-destructive">{err}</span>}
+      <div className="mt-5 border-t border-border pt-4">
+        <label className="block text-sm font-medium" htmlFor="docx-name">
+          Output file name
+        </label>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <div className="flex items-center">
+            <input
+              id="docx-name"
+              type="text"
+              value={filename}
+              onChange={(e) => setFilename(e.target.value)}
+              placeholder="resume-tailored"
+              className="w-56 rounded-md border border-border bg-background px-3 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <span className="ml-1 text-sm text-muted-foreground">.docx</span>
+          </div>
+          <Button disabled={downloading} onClick={() => void dl()}>
+            {downloading ? "Preparing…" : "Download DOCX"}
+          </Button>
+          {err && <span className="text-xs text-destructive">{err}</span>}
+        </div>
       </div>
     </StepShell>
   );
