@@ -24,9 +24,10 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    # 10 minutes is plenty — the POST returns in ~1s; the only thing
-    # that takes time here is the optional status poll below.
-    timeout-minutes: 10
+    # The POST returns in ~1s; the time here is the optional status poll
+    # below, which now watches a full (possibly unlimited) pass for up to
+    # ~15 min. 20 leaves margin and never blocks the 6-hourly schedule.
+    timeout-minutes: 20
     steps:
       - name: Trigger ingest
         env:
@@ -79,25 +80,35 @@ jobs:
           base="${APTLY_API_URL%/}"
           status_url="${base}/api/admin/ingest/${RUN_ID}"
           echo "Polling ${status_url}"
-          # Poll every 15s for up to 4 minutes. Most runs finish faster;
-          # we don't FAIL the workflow if not — the run keeps going on
-          # the server and the next workflow run will see its result.
-          for i in $(seq 1 16); do
-            sleep 15
-            body=$(curl --silent --show-error \
-                 --max-time 15 \
-                 "${status_url}" \
-                 -H "X-Admin-Token: ${APTLY_ADMIN_TOKEN}")
-            current=$(echo "$body" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('status','unknown'))")
-            echo "[$i] status=${current}"
-            if [ "$current" = "success" ] || [ "$current" = "failed" ]; then
-              echo "::group::Final ingest stats"
-              echo "$body" | python3 -m json.tool
-              echo "::endgroup::"
-              if [ "$current" = "failed" ]; then
-                echo "::warning::ingest run reported failed status"
-              fi
-              exit 0
-            fi
+          # Poll every 20s for up to ~15 minutes. A first UNLIMITED pass
+          # (INGEST_MAX_PER_RUN=0) over many boards can run long, so we
+          # surface the per-batch heartbeat (inserted/updated/attempted +
+          # last_progress_at) on every tick — progress is visible right here
+          # instead of an opaque "running". success/failed/stale are all
+          # terminal (stale = worker presumed killed mid-run). We never FAIL
+          # the workflow on a still-running run — it keeps going server-side.
+          for i in $(seq 1 45); do
+            sleep 20
+            body=$(curl --silent --show-error --max-time 15 \
+                 "${status_url}" -H "X-Admin-Token: ${APTLY_ADMIN_TOKEN}") \
+              || { echo "[$i] status poll failed (transient) — retrying"; continue; }
+            current=$(echo "$body" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status','unknown'))")
+            summary=$(echo "$body" | python3 -c "import json,sys;s=(json.load(sys.stdin).get('stats') or {});print('inserted=%s updated=%s attempted=%s failed=%s last_progress_at=%s'%(s.get('inserted',0),s.get('updated',0),s.get('boards_attempted',0),s.get('boards_failed',0),s.get('last_progress_at','-')))")
+            echo "[$i] status=${current} | ${summary}"
+            case "$current" in
+              success)
+                echo "::group::Final ingest stats"
+                echo "$body" | python3 -m json.tool
+                echo "::endgroup::"
+                exit 0
+                ;;
+              failed|stale)
+                echo "::warning::ingest run reported status=${current}"
+                echo "::group::Final ingest body"
+                echo "$body" | python3 -m json.tool
+                echo "::endgroup::"
+                exit 0
+                ;;
+            esac
           done
-          echo "::notice::run ${RUN_ID} still in progress after polling window; check the dashboard."
+          echo "::notice::run ${RUN_ID} still in progress after the poll window; the heartbeat above shows its last progress — re-check GET /api/admin/ingest/${RUN_ID} or the dashboard."
