@@ -32,6 +32,7 @@ import {
   startTailor,
   submitTailorAnswers,
 } from "@/lib/api";
+import { downloadAtsDocx } from "@/lib/ats";
 import { useAuthGate } from "@/lib/use-login-modal";
 
 // One answer to a gap question. `verdict` drives whether the skill is
@@ -73,6 +74,9 @@ export function TailorPanel({ job }: { job: Job }) {
   // "Reset to AI version"). Both null until generation completes.
   const [draft, setDraft] = useState<TailoredResume | null>(null);
   const [original, setOriginal] = useState<TailoredResume | null>(null);
+  // docx_inject ("match my resume format") result download state.
+  const [docxBusy, setDocxBusy] = useState(false);
+  const [docxErr, setDocxErr] = useState<string | null>(null);
 
   const startedAtRef = useRef<number>(0);
   // ── Latency instrumentation ──────────────────────────────────────────────
@@ -224,6 +228,29 @@ export function TailorPanel({ job }: { job: Job }) {
     setError(null);
     setDraft(null);
     setOriginal(null);
+    setDocxErr(null);
+  }
+
+  // "Match my resume format" result: fetch the in-place-edited DOCX + save it.
+  async function onDownloadDocx() {
+    if (!runId) return;
+    setDocxBusy(true);
+    setDocxErr(null);
+    try {
+      const blob = await downloadAtsDocx(runId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "resume-tailored.docx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setDocxErr(e instanceof Error ? e.message : "Download failed");
+    } finally {
+      setDocxBusy(false);
+    }
   }
 
   const slide = reduce
@@ -326,7 +353,31 @@ export function TailorPanel({ job }: { job: Job }) {
           )}
 
           {/* Ready — editable preview */}
-          {status === "done" && draft && (
+          {status === "done" && run?.mode === "docx_inject" && (
+            <motion.div key="docx-ready" {...slide} className="space-y-4">
+              <div className="rounded-lg border border-border bg-card p-4">
+                <p className="text-sm font-medium">Your saved resume was tailored in place.</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  We rewrote existing wording to weave in this job&apos;s keywords — your exact
+                  formatting, sections, and layout are unchanged.{" "}
+                  {(run?.docx_applied ?? 0)} edit{(run?.docx_applied ?? 0) === 1 ? "" : "s"} applied
+                  {run?.docx_skipped ? `, ${run.docx_skipped} couldn't be placed cleanly and were skipped` : ""}.
+                  This mode rewrites wording only — it never adds new sections or lines.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button disabled={docxBusy} onClick={() => void onDownloadDocx()}>
+                    {docxBusy ? "Preparing…" : "Download tailored .docx"}
+                  </Button>
+                  <Button variant="ghost" onClick={reset}>
+                    Start over
+                  </Button>
+                </div>
+                {docxErr && <p className="mt-2 text-sm text-destructive">{docxErr}</p>}
+              </div>
+            </motion.div>
+          )}
+
+          {status === "done" && run?.mode !== "docx_inject" && draft && (
             <motion.div key="ready" {...slide} className="space-y-4">
               {run?.cached && (
                 <p className="rounded-md border border-primary/15 bg-primary-soft/40 px-3 py-2 text-xs text-muted-foreground">

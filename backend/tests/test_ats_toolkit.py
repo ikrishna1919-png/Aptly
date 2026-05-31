@@ -128,12 +128,20 @@ def test_active_resume_lifecycle(api):
     dl = client.get("/api/profile/active-resume/download")
     assert dl.status_code == 200 and dl.content == b"PKfake-docx-bytes"
     assert _DOCX in dl.headers["content-type"]
-    # Replace with a PDF.
-    client.post(
+    # DOCX-only: a PDF is now rejected (the saved resume drives in-place tailoring).
+    pdf = client.post(
         "/api/profile/active-resume",
         files={"file": ("me.pdf", b"%PDF-1.4", "application/pdf")},
     )
-    assert client.get("/api/profile/active-resume").json()["content_type"] == "application/pdf"
+    assert pdf.status_code == 415
+    # The previously-saved DOCX is untouched by the rejected PDF.
+    assert client.get("/api/profile/active-resume").json()["content_type"] == _DOCX
+    # Replace with another DOCX.
+    client.post(
+        "/api/profile/active-resume",
+        files={"file": ("v2.docx", b"PKsecond-docx", _DOCX)},
+    )
+    assert client.get("/api/profile/active-resume").json()["filename"] == "v2.docx"
     assert client.delete("/api/profile/active-resume").status_code == 204
     assert client.get("/api/profile/active-resume").json() == {"present": False}
 

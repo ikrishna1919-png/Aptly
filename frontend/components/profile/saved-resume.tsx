@@ -31,6 +31,12 @@ export function SavedResume() {
   }, []);
 
   async function onPick(file: File) {
+    // DOCX only — the saved resume drives in-place keyword tailoring, which
+    // edits the .docx's existing text. A PDF can't be edited that way.
+    if (!file.name.toLowerCase().endsWith(".docx")) {
+      setError("Upload a Word .docx file. PDF isn't supported — export to .docx and try again.");
+      return;
+    }
     if (state?.present && !window.confirm("This will replace your current saved resume. Continue?")) {
       return;
     }
@@ -75,7 +81,7 @@ export function SavedResume() {
             <div>
               <p className="text-sm font-medium">{state.filename}</p>
               <p className="text-xs text-muted-foreground">
-                {state.content_type === "application/pdf" ? "PDF" : "DOCX"}
+                DOCX
                 {state.uploaded_at
                   ? ` · uploaded ${new Date(state.uploaded_at).toLocaleDateString()}`
                   : ""}
@@ -101,7 +107,8 @@ export function SavedResume() {
           className="mt-4 flex w-full flex-col items-center gap-2 rounded-2xl border-2 border-dashed border-border bg-card/50 p-8 text-center transition-colors hover:border-primary/40 hover:bg-primary-soft/30"
         >
           <Upload className="h-7 w-7 text-muted-foreground" aria-hidden />
-          <span className="text-sm font-medium">Upload your resume (DOCX or PDF)</span>
+          <span className="text-sm font-medium">Upload your resume (.docx)</span>
+          <span className="text-xs text-muted-foreground">Word .docx only — PDF isn&apos;t supported</span>
           {busy && <span className="text-xs text-primary">Uploading…</span>}
         </button>
       )}
@@ -109,7 +116,7 @@ export function SavedResume() {
       <input
         ref={inputRef}
         type="file"
-        accept=".docx,.pdf"
+        accept=".docx"
         className="hidden"
         onChange={(e) => e.target.files?.[0] && onPick(e.target.files[0])}
       />

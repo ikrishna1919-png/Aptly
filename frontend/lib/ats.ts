@@ -125,7 +125,16 @@ export async function keywordCoverage(jdText: string): Promise<Coverage> {
   return res.json();
 }
 
-export type DefaultFormat = { kind: string; format: string; custom: unknown; reason?: string };
+// `source` (resume kind only): "ai" | "resume" | "available" — the tailoring
+// SOURCE that routes generate vs in-place docx-inject. null/absent → "ai".
+export type ResumeSource = "ai" | "resume" | "available";
+export type DefaultFormat = {
+  kind: string;
+  format: string;
+  custom: unknown;
+  reason?: string;
+  source?: ResumeSource | null;
+};
 
 export async function getDefaultFormat(kind: "resume" | "cover"): Promise<DefaultFormat> {
   const res = await fetch(`${API_URL}/api/ats/default-format/${kind}`, { credentials: "include" });
@@ -137,12 +146,13 @@ export async function setDefaultFormat(
   kind: "resume" | "cover",
   format: string,
   custom?: unknown,
+  source?: ResumeSource,
 ): Promise<DefaultFormat> {
   const res = await fetch(`${API_URL}/api/ats/default-format`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind, format, custom: custom ?? null }),
+    body: JSON.stringify({ kind, format, custom: custom ?? null, source: source ?? null }),
   });
   if (!res.ok) throw new Error(await detail(res));
   return res.json();

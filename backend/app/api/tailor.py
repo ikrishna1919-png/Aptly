@@ -31,6 +31,7 @@ from app.database import get_db
 from app.models.job import Job
 from app.models.tailor_run import TailorRun
 from app.models.user import User
+from app.services import ats_runs, default_formats
 from app.services.demo_candidate import get_candidate
 from app.services.docx_export import render_docx
 from app.services.pdf_export import render_pdf
@@ -45,6 +46,7 @@ from app.services.tailor_runs import (
     start_tailor_run,
     submit_answers,
 )
+from app.sources._text import strip_html
 
 router = APIRouter()
 
@@ -162,6 +164,13 @@ class TailorRunOut(BaseModel):
     # The tailored resume — partial while status == generating, final on done.
     resume: TailoredResume | None = None
     error: str | None = None
+    # "generate" (resume JSON, editable) or "docx_inject" (in-place keyword
+    # edits on the user's saved DOCX → download, no editable JSON). When
+    # "docx_inject", `resume` is null and the client offers the DOCX download
+    # at /api/ats/runs/{run_id}/download-docx; counts describe the diff.
+    mode: str = "generate"
+    docx_applied: int | None = None
+    docx_skipped: int | None = None
 
 
 @router.post(
@@ -194,11 +203,49 @@ def tailor_start(
                     ),
                 },
             )
+    # Saved tailoring SOURCE is the single source of truth. "resume" (match my
+    # resume format) runs in-place keyword inject on the user's saved DOCX —
+    # never the from-scratch generate path — using this job's description as JD.
+    if default_formats.resume_source(db, user.id) == "resume":
+        jd_text = strip_html(job.description or "")[:6000]
+        run_id = ats_runs.start_docx_inject_from_active_resume(
+            user_id=user.id, jd_text=jd_text, customization=None, settings=settings
+        )
+        if run_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "no_resume",
+                    "message": (
+                        "Upload a .docx resume on your Profile to use 'Match my resume "
+                        "format', or switch your ATS format to 'Let AI choose'."
+                    ),
+                },
+            )
+        return StartResponse(run_id=run_id)
+
     run_id = start_tailor_run(user_id=user.id, job=job, settings=settings)
     return StartResponse(run_id=run_id)
 
 
 def _run_to_out(run: TailorRun, *, demo_mode: bool) -> TailorRunOut:
+    # docx_inject runs (the "match my resume format" source) carry no editable
+    # resume JSON — their result is the user's saved DOCX with in-place keyword
+    # swaps, downloaded via /api/ats/runs/{run_id}/download-docx. Report a
+    # distinct mode + the applied/skipped counts so the UI shows a download
+    # instead of the (empty) JSON editor.
+    if run.option_type == "upload_docx":
+        rj = run.result_json if isinstance(run.result_json, dict) else {}
+        return TailorRunOut(
+            run_id=run.run_id,
+            status=run.status,
+            demo_mode=demo_mode,
+            mode="docx_inject",
+            docx_applied=len(rj.get("applied", []) or []),
+            docx_skipped=len(rj.get("skipped", []) or []),
+            error=run.error_text,
+        )
+
     analysis: Analysis | None = None
     if run.missing_skills_json is not None:
         try:

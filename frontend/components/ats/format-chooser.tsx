@@ -7,12 +7,20 @@ import { Sparkles, Upload, LayoutGrid, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { getActiveResume } from "@/lib/api";
-import { aiChooseFormat, getDefaultFormat, setDefaultFormat } from "@/lib/ats";
+import {
+  aiChooseFormat,
+  getDefaultFormat,
+  type ResumeSource,
+  setDefaultFormat,
+} from "@/lib/ats";
 
 /**
- * Shared "choose default format" UI for Feature #1 (resume) and #5 (cover).
- * Three sub-options: AI chooses (heuristic), match an upload, or pick from the
- * pre-builts. `formats` + `kind` differ per feature; everything else is shared.
+ * "Choose default format" UI. For RESUME (Feature #1) this is a single-select
+ * of the tailoring SOURCE: (a) Let AI choose, (b) Match my resume format
+ * (in-place keyword edits on the saved DOCX), (c) Choose available (coming
+ * soon). The choice is saved on default_resume_format and routes BOTH the ATS
+ * generator and the Jobs tailor flow. For COVER (#5) the original
+ * AI/pick-a-prebuilt UI is kept (no docx-inject path for cover letters).
  */
 export function FormatChooser({
   kind,
@@ -24,15 +32,20 @@ export function FormatChooser({
   formats: { id: string; name: string; blurb: string }[];
 }) {
   const [current, setCurrent] = useState<string | null>(null);
+  const [source, setSource] = useState<ResumeSource | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // "Match uploaded" is only valid when a DOCX resume is saved on the profile
-  // (formatting can only be preserved for DOCX). null = still loading.
+  const [editing, setEditing] = useState(false);
+  // "Match my resume format" is only valid when a DOCX resume is saved on the
+  // profile (we can only edit a .docx in place). null = still loading.
   const [hasDocxResume, setHasDocxResume] = useState<boolean | null>(null);
 
   useEffect(() => {
     getDefaultFormat(kind)
-      .then((d) => setCurrent(d.format))
+      .then((d) => {
+        setCurrent(d.format);
+        if (kind === "resume") setSource((d.source as ResumeSource) ?? "ai");
+      })
       .catch(() => setCurrent(null));
   }, [kind]);
 
@@ -52,10 +65,9 @@ export function FormatChooser({
       .catch(() => setHasDocxResume(false));
   }, [kind]);
 
-  // Auto-fade the "Saved as default" toast.
   useEffect(() => {
     if (!note) return;
-    const t = setTimeout(() => setNote(null), 2500);
+    const t = setTimeout(() => setNote(null), 3000);
     return () => clearTimeout(t);
   }, [note]);
 
@@ -83,6 +95,146 @@ export function FormatChooser({
     }
   }
 
+  // ── RESUME: a/b/c source single-select ─────────────────────────────────────
+  if (kind === "resume") {
+    const selected: ResumeSource = source ?? "ai";
+    const locked = !editing;
+
+    async function chooseSource(next: ResumeSource) {
+      if (busy) return;
+      if (next === "available") {
+        setNote("A template library is coming soon — for now use AI-choose or match your resume.");
+        return;
+      }
+      if (next === "resume" && !hasDocxResume) {
+        setNote("Upload a .docx resume on your Profile first to match its format.");
+        return;
+      }
+      setBusy(true);
+      setNote(null);
+      try {
+        if (next === "ai") {
+          // Heuristic format pick, then stamp the source so routing uses generate.
+          const d = await aiChooseFormat("resume");
+          await setDefaultFormat("resume", d.format, null, "ai");
+          setCurrent(d.format);
+          setNote(`Let AI choose — picked ${d.format}${d.reason ? ` (${d.reason})` : ""}.`);
+        } else {
+          await setDefaultFormat("resume", current ?? "modern", null, "resume");
+          setNote("We'll tailor by editing your saved resume in place — formatting preserved.");
+        }
+        setSource(next);
+        setEditing(false);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    const options: {
+      id: ResumeSource;
+      icon: typeof Sparkles;
+      name: string;
+      blurb: string;
+      comingSoon?: boolean;
+    }[] = [
+      {
+        id: "ai",
+        icon: Sparkles,
+        name: "Let AI choose",
+        blurb:
+          "We generate a fresh, ATS-friendly resume and pick the most fitting layout for your background.",
+      },
+      {
+        id: "resume",
+        icon: Upload,
+        name: "Match my resume format",
+        blurb:
+          "Tailor by editing the existing text of your saved .docx in place — your exact formatting is preserved. (Rewrites wording only; never adds new sections or lines.)",
+      },
+      {
+        id: "available",
+        icon: LayoutGrid,
+        name: "Choose available",
+        blurb: "Pick from a library of templates.",
+        comingSoon: true,
+      },
+    ];
+
+    return (
+      <div className="container max-w-3xl py-10">
+        <h1 className="font-display text-2xl font-bold tracking-tight">{title}</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          How should tailoring build your resume? This applies to the ATS generator and the
+          one-click &ldquo;Tailor for this job&rdquo; on every posting.
+        </p>
+
+        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+          {options.map((o) => {
+            const isSelected = selected === o.id;
+            const greyed = (locked && !isSelected) || o.comingSoon;
+            return (
+              <button
+                key={o.id}
+                type="button"
+                disabled={busy || (locked && !isSelected) || o.comingSoon}
+                onClick={() => void chooseSource(o.id)}
+                aria-pressed={isSelected}
+                className={cn(
+                  "relative rounded-xl border p-4 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  isSelected
+                    ? "border-2 border-primary bg-primary-soft/40"
+                    : "border-border hover:border-primary/40",
+                  greyed && "opacity-50",
+                )}
+              >
+                {isSelected && (
+                  <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground">
+                    <Check className="h-3 w-3" aria-hidden /> Selected
+                  </span>
+                )}
+                {o.comingSoon && (
+                  <span className="absolute right-2 top-2 rounded-full border border-border px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    Coming soon
+                  </span>
+                )}
+                <o.icon className="h-5 w-5 text-primary" aria-hidden />
+                <p className="mt-2 text-sm font-semibold">{o.name}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{o.blurb}</p>
+                {o.id === "resume" && hasDocxResume === false && (
+                  <Link
+                    href="/profile"
+                    className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary underline"
+                  >
+                    <Upload className="h-3 w-3" aria-hidden /> Upload a .docx on your Profile first
+                  </Link>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {locked && (
+          <Button
+            className="mt-4"
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => setEditing(true)}
+          >
+            Edit
+          </Button>
+        )}
+
+        {note && (
+          <p className="mt-4 rounded-md border border-primary/15 bg-primary-soft/40 px-3 py-2 text-sm text-foreground/90">
+            {note}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  // ── COVER: original AI / pick-a-prebuilt UI (unchanged) ─────────────────────
   return (
     <div className="container max-w-3xl py-10">
       <h1 className="font-display text-2xl font-bold tracking-tight">{title}</h1>
@@ -92,7 +244,6 @@ export function FormatChooser({
         </p>
       )}
 
-      {/* 1a AI chooses */}
       <Section icon={Sparkles} title="Let AI choose">
         <p className="text-sm text-muted-foreground">
           We pick the most fitting pre-built based on your experience level and field (a simple,
@@ -103,36 +254,6 @@ export function FormatChooser({
         </Button>
       </Section>
 
-      {/* 1b match uploaded resume — enabled only with a saved DOCX resume */}
-      {kind === "resume" && (
-        <Section icon={Upload} title="Match your uploaded resume">
-          <p className="text-sm text-muted-foreground">
-            Reuse the exact formatting of the DOCX resume saved on your profile.
-          </p>
-          {hasDocxResume ? (
-            <Button
-              className="mt-3"
-              variant="outline"
-              disabled={busy}
-              onClick={() => void pick("match_upload")}
-            >
-              Use my uploaded resume&apos;s format
-            </Button>
-          ) : (
-            <Link
-              href="/profile"
-              title="Upload a DOCX resume to your profile first."
-              className="mt-3 inline-flex cursor-not-allowed items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-medium text-muted-foreground/70"
-              aria-disabled="true"
-            >
-              <Upload className="h-4 w-4" aria-hidden />
-              Upload a DOCX resume to your profile first
-            </Link>
-          )}
-        </Section>
-      )}
-
-      {/* 1c pick a pre-built */}
       <Section icon={LayoutGrid} title="Pick a format">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {formats.map((f) => (

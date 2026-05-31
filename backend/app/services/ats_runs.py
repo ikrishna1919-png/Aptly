@@ -23,6 +23,7 @@ from sqlalchemy import select
 
 from app.config import Settings, get_settings
 from app.database import SessionLocal
+from app.models.candidate import Candidate
 from app.models.tailor_run import (
     TAILOR_STATUS_DONE,
     TAILOR_STATUS_ERROR,
@@ -38,6 +39,8 @@ from app.services.tailor import (
 )
 
 log = logging.getLogger(__name__)
+
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 def _launch(target: Any, args: tuple) -> None:
@@ -82,6 +85,40 @@ def create_docx_upload(*, user_id: int | None, filename: str, docx_blob: bytes) 
 
 
 # ─── Entry points ─────────────────────────────────────────────────────────────
+
+
+def start_docx_inject_from_active_resume(
+    *,
+    user_id: int | None,
+    jd_text: str,
+    customization: dict[str, Any] | None,
+    settings: Settings | None = None,
+) -> str | None:
+    """Run the EXISTING in-place keyword-inject path against the user's SAVED
+    active_resume DOCX — the "match my resume format" (source 'b') route, shared
+    by /ats/generate AND the Jobs tailor flow. Seeds a fresh upload_docx run
+    from the saved blob, then flips it into docx_inject. Returns the run_id, or
+    None when no DOCX is saved (caller surfaces 'upload a resume first'). NO
+    from-scratch generation; formatting/sections/colours are untouched."""
+    settings = settings or get_settings()
+    with SessionLocal() as db:
+        cand = db.execute(
+            select(Candidate).where(Candidate.user_id == user_id)
+        ).scalar_one_or_none()
+        blob = cand.active_resume_blob if cand else None
+        ctype = cand.active_resume_content_type if cand else None
+        fname = (cand.active_resume_filename if cand else None) or "resume.docx"
+    if not blob or ctype != _DOCX_MIME:
+        return None
+    run_id = create_docx_upload(user_id=user_id, filename=fname, docx_blob=blob)
+    ok = start_docx_inject(
+        run_id=run_id,
+        user_id=user_id,
+        jd_text=jd_text,
+        customization=customization,
+        settings=settings,
+    )
+    return run_id if ok else None
 
 
 def start_generate(
