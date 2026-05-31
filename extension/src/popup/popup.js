@@ -29,9 +29,10 @@ const ATS_HOST_PATTERNS = [
 ];
 
 // Workday is handled by the separate, experimental content/workday.js and is
-// labelled distinctly in the UI.
+// labelled distinctly in the UI. The host is usually multi-segment
+// ({tenant}.wd1.myworkdayjobs.com, wd5, …), so match one-or-more subdomains.
 function isWorkday(url) {
-  return /https:\/\/[a-z0-9-]+\.myworkdayjobs\.com\//i.test(url || "");
+  return /https:\/\/([a-z0-9-]+\.)+myworkdayjobs\.com\//i.test(url || "");
 }
 
 function isSupportedAts(url) {
