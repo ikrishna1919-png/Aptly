@@ -30,9 +30,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("candidates", sa.Column("active_resume_filename", sa.String(length=256), nullable=True))
-    op.add_column("candidates", sa.Column("active_resume_content_type", sa.String(length=128), nullable=True))
-    op.add_column("candidates", sa.Column("active_resume_uploaded_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column(
+        "candidates", sa.Column("active_resume_filename", sa.String(length=256), nullable=True)
+    )
+    op.add_column(
+        "candidates", sa.Column("active_resume_content_type", sa.String(length=128), nullable=True)
+    )
+    op.add_column(
+        "candidates",
+        sa.Column("active_resume_uploaded_at", sa.DateTime(timezone=True), nullable=True),
+    )
     op.add_column("candidates", sa.Column("active_resume_blob", sa.LargeBinary(), nullable=True))
 
 
