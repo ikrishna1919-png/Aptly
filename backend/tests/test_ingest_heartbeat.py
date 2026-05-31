@@ -14,6 +14,7 @@ plus the read-only `effective_run_status` that reports `stale` without mutating.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
@@ -242,9 +243,7 @@ def test_effective_status_reports_stale_only_for_quiet_running_rows():
     assert effective_run_status(_run("running", started_min_ago=30), settings) == "stale"
     # Old start but a recent heartbeat → still running (it's alive).
     assert (
-        effective_run_status(
-            _run("running", started_min_ago=60, last_progress_min_ago=1), settings
-        )
+        effective_run_status(_run("running", started_min_ago=60, last_progress_min_ago=1), settings)
         == "running"
     )
     # Old heartbeat → stale even though it once made progress.
@@ -265,3 +264,93 @@ def test_effective_status_does_not_mutate_the_row():
     assert effective_run_status(run, settings) == "stale"
     # The persisted column is unchanged — only the reaper mutates.
     assert run.status == "running"
+
+
+# ── observable from the first source: initial + per-source heartbeats ────────
+
+
+def _record_heartbeats(monkeypatch):
+    """Capture (attempted, total) at each heartbeat call, still invoking the
+    real writer so the row is updated too."""
+    seen: list[dict] = []
+    real = ingest_module._write_heartbeat
+
+    def rec(db, run_id, stats):
+        seen.append({"attempted": stats.boards_attempted, "total": stats.total_sources})
+        return real(db, run_id, stats)
+
+    monkeypatch.setattr(ingest_module, "_write_heartbeat", rec)
+    return seen
+
+
+def test_initial_heartbeat_before_first_batch_has_total_sources(factories, monkeypatch):
+    """(a) The very first heartbeat fires BEFORE any source is processed and
+    already carries the planned size — a live run is distinguishable from a
+    dead {} within seconds, not after batch 1's 25 fetches resolve."""
+    seen = _record_heartbeats(monkeypatch)
+    with factories() as s:
+        for i in range(3):
+            s.add(Source(source_type="fake", token=f"co-{i}", enabled=True))
+        s.add(IngestRun(run_id="hb-init", status=INGEST_STATUS_RUNNING, stats={}))
+        s.commit()
+
+    settings = _settings(INGEST_MAX_PER_RUN=3, INGEST_BATCH_SIZE=25)
+    with factories() as s:
+        run_ingest(s, settings, run_id="hb-init", source_factories={"fake": _GoodSource})
+
+    assert seen, "no heartbeats recorded"
+    assert seen[0]["attempted"] == 0
+    assert seen[0]["total"] == 3
+
+
+def test_attempted_advances_per_source(factories, monkeypatch):
+    """(b) `attempted` advances one-by-one (initial 0, then +1 per source),
+    not in batch-sized jumps."""
+    seen = _record_heartbeats(monkeypatch)
+    with factories() as s:
+        for i in range(4):
+            s.add(Source(source_type="fake", token=f"co-{i}", enabled=True))
+        s.add(IngestRun(run_id="hb-adv", status=INGEST_STATUS_RUNNING, stats={}))
+        s.commit()
+
+    settings = _settings(INGEST_MAX_PER_RUN=4, INGEST_BATCH_SIZE=25)  # one batch
+    with factories() as s:
+        run_ingest(s, settings, run_id="hb-adv", source_factories={"fake": _GoodSource})
+
+    assert [h["attempted"] for h in seen] == [0, 1, 2, 3, 4]
+
+
+class _SlowSource(JobSource):
+    """Each fetch sleeps comfortably past the 1s test budget, so the budget is
+    blown after the first batch — deterministically, with a real sleep and a
+    generous margin (budget is integer seconds, so it can't be sub-second)."""
+
+    name = "fake"
+
+    def fetch(self, token):
+        time.sleep(1.2)
+        return [_nj(token)]
+
+
+def test_budget_stops_starting_batches_and_still_succeeds(factories):
+    """(c) With a soft budget and many slow sources, the run stops starting
+    new batches once the budget is exceeded and still ends cleanly (success,
+    with budget_truncated) — rotation covers the rest next run."""
+    with factories() as s:
+        for i in range(6):
+            s.add(Source(source_type="fake", token=f"co-{i}", enabled=True))
+        s.commit()
+
+    # batch_size=1 → one slow (1.2s) source per batch; budget 1s. Batch 1 runs
+    # (elapsed ~0 at its pre-check); the pre-check before batch 2 sees ~1.2s >=
+    # 1s and stops. Only one source is ever fetched, so the test is ~1.2s.
+    settings = _settings(INGEST_MAX_PER_RUN=6, INGEST_BATCH_SIZE=1, INGEST_RUN_BUDGET_SECONDS=1)
+    with factories() as s:
+        stats = run_ingest(s, settings, source_factories={"fake": _SlowSource})
+
+    assert stats.budget_truncated is True
+    assert stats.total_sources == 6
+    assert stats.boards_attempted == 1, "should have stopped after the first batch"
+    # Finished cleanly (cleanup ran, finished_at stamped) — the success path,
+    # not an exception.
+    assert stats.finished_at != ""

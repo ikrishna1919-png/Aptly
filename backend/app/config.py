@@ -64,6 +64,16 @@ class Settings(BaseSettings):
     # starts so a mid-run timeout never wipes the whole pass.
     ingest_batch_size: int = Field(default=25, alias="INGEST_BATCH_SIZE")
 
+    # Optional soft wall-clock budget for ONE run, in seconds. 0 (default)
+    # = unlimited. When > 0, run_ingest stops STARTING new batches once the
+    # budget is exceeded, finishes the batch already in flight, and writes a
+    # normal `success` with `stats.budget_truncated = true`; rotation
+    # (last_run_at ASC) covers the remaining sources on the next run. Lets an
+    # unbounded pass (INGEST_MAX_PER_RUN=0) end CLEANLY on a time-limited /
+    # free-tier host instead of being killed mid-fetch (which leaves the run
+    # `stale`). Leave at 0 once the host is always-on.
+    ingest_run_budget_seconds: int = Field(default=0, alias="INGEST_RUN_BUDGET_SECONDS")
+
     # A background ingest run writes a heartbeat (progress snapshot +
     # `last_progress_at` timestamp) onto its IngestRun row after every
     # batch. If a run is still `running` but its last heartbeat (or, with

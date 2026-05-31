@@ -55,6 +55,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -104,6 +105,14 @@ class IngestStats:
     inserted: int = 0
     updated: int = 0
     deleted_expired: int = 0
+    # Number of source rows this run planned to process (selected up front).
+    # Surfaced in the very first heartbeat so the operator sees the planned
+    # size immediately and can gauge progress (attempted / total_sources).
+    total_sources: int = 0
+    # Set true when a soft per-run budget (ingest_run_budget_seconds) cut the
+    # pass short before all selected sources were processed. The run still
+    # ends cleanly (success); rotation covers the rest next run.
+    budget_truncated: bool = False
     started_at: str = ""
     finished_at: str = ""
 
@@ -301,10 +310,36 @@ def run_ingest(
         source_rows = _load_due_sources(db, limit=max(1, raw_max))
 
     stats = IngestStats(window_hours=settings.hours_window, started_at=_utcnow().isoformat())
+    stats.total_sources = len(source_rows)
     window_start = _utcnow() - timedelta(hours=settings.hours_window)
     seen: set[tuple[str, str]] = set()
 
+    # Soft per-run wall-clock budget (0 = unlimited). monotonic so a clock
+    # change can't skew it.
+    budget = max(0, int(getattr(settings, "ingest_run_budget_seconds", 0)))
+    run_start = time.monotonic()
+
+    # Initial heartbeat BEFORE batch 1, so a live run is distinguishable from a
+    # dead one within seconds (and the operator sees total_sources) instead of
+    # the row sitting at {} until batch 1's `batch_size` fetches all resolve.
+    if run_id is not None:
+        _write_heartbeat(db, run_id, stats)
+
     for batch in _chunked(source_rows, batch_size):
+        # Soft budget: once exceeded, stop STARTING new batches. Already-
+        # processed batches are durable; we end the pass cleanly (success +
+        # budget_truncated) and rotation picks up the rest next run — instead
+        # of a time-limited / free-tier host killing the worker mid-fetch.
+        if budget and (time.monotonic() - run_start) >= budget:
+            stats.budget_truncated = True
+            log.info(
+                "ingest run budget %ds reached after %d/%d sources; stopping cleanly",
+                budget,
+                stats.boards_attempted + stats.boards_skipped,
+                stats.total_sources,
+            )
+            break
+
         # Fetch this batch concurrently (bounded by the semaphore inside
         # `_fetch_all_async`), then drain its outcomes into the DB. By
         # the time we move to the next batch, every row in this batch
@@ -327,12 +362,13 @@ def run_ingest(
                 seen=seen,
                 threshold=threshold,
             )
-        # Heartbeat: snapshot progress-so-far onto the IngestRun row after
-        # each batch so a run killed before it finishes shows its last
-        # progress instead of an empty {}. No-op when run outside the
-        # background worker (run_id=None: CLI / direct test calls).
-        if run_id is not None:
-            _write_heartbeat(db, run_id, stats)
+            # Heartbeat after EVERY source so `attempted` advances
+            # continuously (not just at batch boundaries). The per-source
+            # telemetry already commits, so this is one cheap extra UPDATE;
+            # network fetches — not commits — dominate run time. No-op when
+            # run outside the worker (run_id=None: CLI / direct test calls).
+            if run_id is not None:
+                _write_heartbeat(db, run_id, stats)
 
     stats.deleted_expired = _delete_expired(db, window_start)
     db.commit()
@@ -590,8 +626,10 @@ def _launch_worker(target, args: tuple) -> None:
 
 
 def _write_heartbeat(db: Session, run_id: str, stats: IngestStats) -> None:
-    """Persist a progress snapshot onto the IngestRun row after a batch.
+    """Persist a progress snapshot onto the IngestRun row.
 
+    Called once up front and after every source outcome, so `attempted`
+    advances continuously and a live run is never mistaken for a dead one.
     Writes stats-so-far plus a `last_progress_at` timestamp into the JSON
     `stats` column (no schema change needed) and commits. If the worker
     thread is later killed mid-run, the row keeps this last snapshot
