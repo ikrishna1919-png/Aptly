@@ -241,6 +241,73 @@ export function queryAllDeep(root, selector) {
 
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+// ── Job-description extraction (read-only) ──────────────────────────────────
+// Best-effort visible JD text from the CURRENT page, for the popup's review
+// panel. NEVER mutates the page. Prefers obvious description containers, then
+// falls back to the largest visible text block. Length-capped so a giant page
+// can't bloat the message. The popup escapes this before rendering — it is
+// untrusted third-party page content.
+const JD_MAX_CHARS = 4000;
+
+// Best-first containers that usually wrap a posting's description. The `i`
+// flag makes the attribute substring match case-insensitive (CSS L4, Chrome).
+const JD_CONTAINER_SELECTORS = [
+  "[data-automation-id*='jobPostingDescription' i]", // Workday
+  "[data-automation-id*='description' i]",
+  "[class*='job-description' i]",
+  "[class*='jobdescription' i]",
+  "[class*='posting-description' i]",
+  "[id*='job-description' i]",
+  "[class*='description' i]",
+  "article",
+  "[role='main']",
+  "main",
+];
+
+function visibleText(el) {
+  if (!el || !isVisible(el)) return "";
+  // innerText (not textContent) so hidden subtrees are excluded and block
+  // breaks are preserved; collapse runaway blank lines.
+  return (el.innerText || el.textContent || "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function extractJobDescription(root = document) {
+  let best = "";
+  for (const sel of JD_CONTAINER_SELECTORS) {
+    let candidates = [];
+    try {
+      candidates = queryAllDeep(root, sel);
+    } catch (_) {
+      candidates = [];
+    }
+    for (const el of candidates) {
+      if (inChrome(el)) continue; // skip nav/header/footer/search chrome
+      const t = visibleText(el);
+      if (t.length > best.length) best = t;
+    }
+    // A solid hit from a specific selector is enough — stop before the generic
+    // [class*=description]/main catch-alls over-grab the whole layout.
+    if (best.length >= 600) break;
+  }
+  // Fallback: largest visible text among a FEW structural blocks (then body).
+  // Deliberately not every <div> — innerText forces layout, so keep it bounded.
+  if (best.length < 200) {
+    for (const el of queryAllDeep(root, "main, [role='main'], article, section")) {
+      if (inChrome(el)) continue;
+      const t = visibleText(el);
+      if (t.length > best.length) best = t;
+    }
+    if (best.length < 200 && root && root.body) {
+      const bodyText = visibleText(root.body);
+      if (bodyText.length > best.length) best = bodyText;
+    }
+  }
+  return best.slice(0, JD_MAX_CHARS);
+}
+
 // ── Resume file attach (user-initiated, part of "Start filling") ────────────
 // Decode the base64 DOCX (fetched with the bearer token by the service worker —
 // the binary crosses the messaging boundary as base64 because Chrome messaging

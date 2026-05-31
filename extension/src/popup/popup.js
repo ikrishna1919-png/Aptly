@@ -14,6 +14,18 @@ function h(html) {
   root.innerHTML = html;
 }
 
+// Escape before interpolating into innerHTML. ESSENTIAL for the job-description
+// text, which is untrusted third-party page content; also applied to profile
+// fields defensively.
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
@@ -183,6 +195,7 @@ async function renderAts(me, tab, info, experimental) {
     <h2>${heading}</h2>
     <p class="muted"><b>${info.count}</b> field${info.count === 1 ? "" : "s"} found</p>
     ${experimentalNote}
+    <div id="review"><p class="muted" style="margin:6px 0 0">Loading review…</p></div>
     <div class="card">
       <label class="muted" for="run">Use which tailored resume?</label>
       <select id="run">${options || `<option value="">(none)</option>`}</select>
@@ -222,6 +235,75 @@ async function renderAts(me, tab, info, experimental) {
       btn.textContent = "Start filling";
     }
   };
+
+  // Foundation review panel: parsed JD + saved profile, fetched async so the
+  // form card renders immediately. Each half fails independently (no throwing).
+  loadReview(tab);
+}
+
+// Build the read-only review shown above "Start filling": the job description
+// parsed from the page (GET_PAGE_CONTEXT) and the user's saved Aptly profile
+// (existing authenticated endpoint). Both halves degrade gracefully.
+async function loadReview(tab) {
+  const el = document.getElementById("review");
+  if (!el) return;
+
+  const [ctxRes, profRes] = await Promise.allSettled([
+    chrome.tabs.sendMessage(tab.id, { type: "GET_PAGE_CONTEXT" }),
+    api.profile(),
+  ]);
+
+  const ctx = ctxRes.status === "fulfilled" ? ctxRes.value : null;
+  const jd = ctx && typeof ctx.jdText === "string" ? ctx.jdText.trim() : "";
+  const jdBody = jd
+    ? `<div class="jd-text">${escapeHtml(jd)}</div>`
+    : `<p class="muted" style="margin:6px 0 0">Couldn't read a job description on this page.</p>`;
+
+  const profileBody =
+    profRes.status === "fulfilled"
+      ? renderProfileSummary(profRes.value)
+      : `<p class="muted" style="margin:6px 0 0">Couldn't load your profile.
+         <button class="link" id="review-retry">Retry</button></p>`;
+
+  el.innerHTML = `
+    <details open class="review-detail">
+      <summary>Job description</summary>
+      ${jdBody}
+    </details>
+    <details open class="review-detail">
+      <summary>Your Aptly profile</summary>
+      ${profileBody}
+    </details>
+  `;
+
+  const retry = document.getElementById("review-retry");
+  if (retry) retry.onclick = () => loadReview(tab);
+}
+
+function renderProfileSummary(p) {
+  if (!p) return `<p class="muted" style="margin:6px 0 0">No profile data.</p>`;
+  const rows = [];
+  if (p.name) rows.push(`<b>${escapeHtml(p.name)}</b>`);
+  const role = [p.current_title, p.current_company].filter(Boolean).map(escapeHtml).join(" · ");
+  if (role) rows.push(role);
+  const contact = [p.email, p.phone, p.location].filter(Boolean).map(escapeHtml).join(" · ");
+  if (contact) rows.push(`<span class="muted">${contact}</span>`);
+  const links = [
+    p.linkedin && "LinkedIn",
+    p.github && "GitHub",
+    p.portfolio && "Portfolio",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (links) rows.push(`<span class="muted">${links}</span>`);
+  if (p.work_auth_status) {
+    rows.push(`<span class="muted">Work authorization: ${escapeHtml(p.work_auth_status)}</span>`);
+  }
+  if (!rows.length) {
+    return `<p class="muted" style="margin:6px 0 0">Your profile looks empty — add details at
+      <a href="https://aptly.fyi" target="_blank">aptly.fyi</a>.</p>`;
+  }
+  return `<div class="profile-summary">${rows.map((r) => `<div>${r}</div>`).join("")}</div>`;
 }
 
 function renderSummary(summary, runId) {
