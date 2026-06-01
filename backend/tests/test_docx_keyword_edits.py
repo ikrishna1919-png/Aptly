@@ -93,3 +93,23 @@ def test_single_run_edit_still_works():
     )
     assert len(applied) == 1
     assert Document(io.BytesIO(edited)).paragraphs[0].text == "Python and Kafka developer."
+
+
+def test_apply_is_insertion_free():
+    # Option B never inserts: apply only rewrites EXISTING runs. An absent
+    # original is reported skipped (a suggestion), never added as a new line.
+    blob = _docx([[("Alpha line.", None)], [("Beta line.", None)]])
+    edited, applied, skipped = ats.apply_docx_edits(
+        blob,
+        [
+            {"original_text": "Alpha", "replacement_text": "Alpha Plus"},
+            {"original_text": "Gamma", "replacement_text": "Gamma X"},  # absent
+        ],
+    )
+    d0 = Document(io.BytesIO(blob))
+    d1 = Document(io.BytesIO(edited))
+    # No new paragraphs/lines/sections.
+    assert len(d1.paragraphs) == len(d0.paragraphs) == 2
+    assert len(applied) == 1 and len(skipped) == 1  # absent → skipped, not inserted
+    assert d1.paragraphs[0].text == "Alpha Plus line."
+    assert d1.paragraphs[1].text == "Beta line."  # untouched

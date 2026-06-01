@@ -54,6 +54,8 @@ const DEFAULT_ANSWERS: AtsQuestions = {
   skills: [],
   roles: [],
   additional: "",
+  missing_experience: "",
+  metrics: "",
 };
 
 export function AtsHub() {
@@ -81,6 +83,9 @@ export function AtsHub() {
   // customize screen and go straight to the in-place docx_inject run.
   const [source, setSource] = useState<string | null>(null);
   const [hasDocx, setHasDocx] = useState<boolean>(false);
+  // Option-B skill gap (JD keywords not surfaced on the resume) — the
+  // deterministic keyword-coverage `missing`, fed into the gap question.
+  const [gapSkills, setGapSkills] = useState<string[]>([]);
   const [custom, setCustom] = useState<AtsCustomOptions>({
     base: "modern",
     accent_color: "blue",
@@ -258,13 +263,23 @@ export function AtsHub() {
   // screen. For option B the answers STEER which existing keywords/skills to
   // weave in (they don't add content); generate runs the in-place docx_inject.
   // Guard: option B needs a saved DOCX first.
-  function continueFromJd() {
+  async function continueFromJd() {
     if (source === "resume" && !hasDocx) {
       setError(
         "To use “Match my resume format”, upload a .docx resume on your Profile first — " +
           "or switch your ATS format to “Let AI choose”.",
       );
       return;
+    }
+    // Option B asks gap/relevance questions; pull the deterministic JD skill
+    // gap (keyword-coverage `missing`) to seed the skills-gap question.
+    if (source === "resume") {
+      try {
+        const c = await keywordCoverage(jdText);
+        setGapSkills(c.missing.slice(0, 14));
+      } catch {
+        setGapSkills([]);
+      }
     }
     setStep("questions");
   }
@@ -301,7 +316,12 @@ export function AtsHub() {
           )}
 
           {step === "entry" && option === "jd" && (
-            <JdEntry value={jdText} onChange={setJdText} onBack={reset} onContinue={continueFromJd} />
+            <JdEntry
+              value={jdText}
+              onChange={setJdText}
+              onBack={reset}
+              onContinue={() => void continueFromJd()}
+            />
           )}
 
           {step === "entry" && option === "upload" && (
@@ -319,7 +339,22 @@ export function AtsHub() {
             />
           )}
 
-          {step === "questions" && (
+          {step === "questions" && source === "resume" && (
+            // Option B (match my resume format): gap/relevance questions that
+            // STEER which existing wording to rewrite. No length/tone/emphasis —
+            // in-place edits can't change those.
+            <OptionBQuestions
+              answers={answers}
+              onChange={setAnswers}
+              gapSkills={gapSkills}
+              roles={profileRoles}
+              onBack={() => setStep("entry")}
+              onContinue={() => void onGenerate()}
+              busy={busy}
+            />
+          )}
+
+          {step === "questions" && source !== "resume" && (
             <Questions
               answers={answers}
               onChange={setAnswers}
@@ -334,9 +369,7 @@ export function AtsHub() {
               defaultFormat={defaultFmtLabel}
               overrideFormat={overrideFmt}
               onOverrideFormat={setOverrideFmt}
-              // Option B (match my resume format) preserves the saved DOCX's
-              // format, so show the in-place note + hide the format-override.
-              showDocxNote={isDocxPath || source === "resume"}
+              showDocxNote={isDocxPath}
             />
           )}
 
@@ -568,6 +601,113 @@ function UploadEntry({
       <div className="mt-2 flex items-center justify-end">
         <Button disabled={jdText.trim().length < 200} onClick={onContinue}>
           Continue →
+        </Button>
+      </div>
+    </StepShell>
+  );
+}
+
+// ─── Step 2 (option B): 5 gap/relevance questions, STEER-ONLY ─────────────────
+
+function OptionBQuestions({
+  answers,
+  onChange,
+  gapSkills,
+  roles,
+  onBack,
+  onContinue,
+  busy,
+}: {
+  answers: AtsQuestions;
+  onChange: (a: AtsQuestions) => void;
+  gapSkills: string[];
+  roles: string[];
+  onBack: () => void;
+  onContinue: () => void;
+  busy: boolean;
+}) {
+  const set = <K extends keyof AtsQuestions>(k: K, v: AtsQuestions[K]) =>
+    onChange({ ...answers, [k]: v });
+  const toggle = (k: "skills" | "roles", v: string) => {
+    const cur = answers[k];
+    set(k, cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v]);
+  };
+  const themes = gapSkills.length
+    ? gapSkills.slice(0, 6).join(", ")
+    : "the role's core requirements";
+  return (
+    <StepShell title="A few quick questions" onBack={onBack}>
+      <p className="mb-4 text-sm text-muted-foreground">
+        These steer which of your <span className="font-medium text-foreground">existing</span>{" "}
+        wording gets rewritten toward this job. We never add new lines or sections — your format
+        stays intact.
+      </p>
+      <div className="space-y-6">
+        <QRow label="Missing experience" hint={`The JD emphasizes ${themes}.`}>
+          <Textarea
+            rows={2}
+            value={answers.missing_experience ?? ""}
+            onChange={(e) => set("missing_experience", e.target.value)}
+            placeholder="Which of these have you done that isn't clearly on your resume? We'll reword existing lines to surface it — not add new ones."
+            className="text-sm"
+          />
+        </QRow>
+
+        <QRow
+          label="Skills you genuinely have"
+          hint="JD skills not currently surfaced on your resume. Pick the ones you can honestly back up."
+        >
+          {gapSkills.length ? (
+            <Chips items={gapSkills} selected={answers.skills} onToggle={(v) => toggle("skills", v)} empty="" />
+          ) : (
+            <p className="text-sm text-muted-foreground">No obvious skill gaps detected for this JD.</p>
+          )}
+        </QRow>
+
+        <QRow label="Most-relevant experience" hint="Foreground these roles when rewriting.">
+          <Chips
+            items={roles}
+            selected={answers.roles}
+            onToggle={(v) => toggle("roles", v)}
+            empty="Add experience on your profile to pick here."
+          />
+        </QRow>
+
+        <QRow
+          label="Metrics / scale"
+          hint="Real numbers for your most relevant work — we weave them into existing lines only where truthful."
+        >
+          <Textarea
+            rows={2}
+            value={answers.metrics ?? ""}
+            onChange={(e) => set("metrics", e.target.value)}
+            placeholder="e.g. cut latency 40%, led a team of 6, $2M budget"
+            className="text-sm"
+          />
+        </QRow>
+
+        <QRow label="Anything else to reflect?">
+          <Textarea
+            rows={2}
+            value={answers.additional}
+            onChange={(e) => set("additional", e.target.value)}
+            className="text-sm"
+          />
+        </QRow>
+      </div>
+
+      <p className="mt-6 rounded-lg border border-primary/15 bg-primary-soft/40 px-3 py-2 text-sm text-muted-foreground">
+        Using your saved resume&apos;s original format — keywords are woven into the existing text
+        in place; your formatting and layout are preserved. These answers steer wording choice
+        only; they never add content that isn&apos;t already in your resume.
+      </p>
+
+      <div className="mt-6 flex items-center justify-between">
+        <Button variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+        <Button onClick={onContinue} disabled={busy}>
+          {busy ? "Tailoring…" : "Tailor my resume"}
         </Button>
       </div>
     </StepShell>
@@ -1028,12 +1168,12 @@ function DiffView({
       {diff.skipped.length > 0 && (
         <div className="mt-4">
           <p className="text-xs font-medium text-muted-foreground">
-            Couldn&apos;t place {diff.skipped.length} suggested change(s) (the exact phrase
-            wasn&apos;t found in the document) — left out:
+            {diff.skipped.length} suggestion(s) not in your resume — left as suggestions only
+            (option B never inserts new content). Consider adding these to your base resume:
           </p>
           <ul className="mt-1 space-y-1">
             {diff.skipped.map((e, i) => (
-              <li key={i} className="rounded border border-dashed border-border px-2 py-1 text-xs text-muted-foreground line-through">
+              <li key={i} className="rounded border border-dashed border-border px-2 py-1 text-xs text-muted-foreground">
                 {e.original_text}
               </li>
             ))}

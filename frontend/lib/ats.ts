@@ -22,6 +22,10 @@ export type AtsQuestions = {
   skills: string[];
   roles: string[];
   additional: string;
+  // Option-B (match-my-format) gap/relevance fields. Optional so the option-A
+  // generate flow is unaffected; they steer WHICH existing wording to rewrite.
+  missing_experience?: string;
+  metrics?: string;
 };
 
 export type DocxEdit = { original_text: string; replacement_text: string; reason?: string };

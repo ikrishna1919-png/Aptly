@@ -44,46 +44,59 @@ def _docx_bytes(paragraphs: list[str]) -> bytes:
 
 
 class _Capture:
-    """Fake Anthropic client: records the user prompt, returns a fixed edit."""
+    """Fake Anthropic client: records the user prompt, returns a scripted reply."""
 
-    def __init__(self) -> None:
+    _DEFAULT = '{"edits":[{"original_text":"Python","replacement_text":"Python, Kafka"}]}'
+
+    def __init__(self, reply: str | None = None) -> None:
         self.messages = self
         self.user = ""
+        self._reply = reply or self._DEFAULT
 
     def create(self, **kw):  # noqa: ANN003
         self.user = kw["messages"][0]["content"]
-        block = type(
-            "B",
-            (),
-            {
-                "type": "text",
-                "text": '{"edits":[{"original_text":"Python","replacement_text":"Python, Kafka"}]}',
-            },
-        )()
+        block = type("B", (), {"type": "text", "text": self._reply})()
         return type("M", (), {"content": [block]})()
 
 
-def test_compute_keyword_edits_folds_answers_into_prompt():
-    cap = _Capture()
+def test_compute_keyword_edits_folds_option_b_answers_and_only_touches_existing():
+    # Model returns one PRESENT-original edit ("Python") + one ABSENT one ("Java").
+    cap = _Capture(
+        '{"edits":['
+        '{"original_text":"Python","replacement_text":"Python, Kafka"},'
+        '{"original_text":"Java","replacement_text":"Java, Scala"}]}'
+    )
     resume_text = "I use Python daily."
     out = ats.compute_keyword_edits(
         resume_text,
         "Need Kafka.",
         answers={
-            "emphasis": "technical",
+            "missing_experience": "shipped a Kafka pipeline at scale",
             "skills": ["Kafka"],
+            "roles": ["Engineer at Acme"],
+            "metrics": "cut latency 40%",
             "additional": "lean into streaming systems",
         },
         settings=_key_settings(),
         client=cap,
     )
-    # The 6-answer steer (incl. the free-text "additional") is in the prompt.
-    assert "CANDIDATE STEER" in cap.user
-    assert "lean into streaming systems" in cap.user
-    assert "Kafka" in cap.user
-    # And it returns a swap whose original is verbatim-present in the resume
-    # (the contract: in-place edits only touch existing text).
-    assert out and out[0]["original_text"] == "Python"
+    # The 5-question steer (incl. the free-text fields) folds into the prompt,
+    # with the HARD RULE.
+    u = cap.user
+    assert "CANDIDATE STEER" in u and "HARD RULE" in u
+    assert "shipped a Kafka pipeline at scale" in u  # #1 missing_experience
+    assert "Kafka" in u  # #2 skills-gap
+    assert "Engineer at Acme" in u  # #3 most-relevant roles
+    assert "cut latency 40%" in u  # #4 metrics
+    assert "lean into streaming systems" in u  # #5 free text
+
+    # Steer-only: APPLY touches ONLY existing text — the present edit lands, the
+    # absent one is skipped (a suggestion), never inserted.
+    blob = _docx_bytes(["I use Python daily."])
+    _, applied, skipped = ats.apply_docx_edits(blob, out)
+    assert [e["original_text"] for e in applied] == ["Python"]
+    assert [e["original_text"] for e in skipped] == ["Java"]
+    assert all(e["original_text"] in resume_text for e in applied)
     assert out[0]["original_text"] in resume_text
 
 

@@ -287,43 +287,51 @@ keyword_parse_failures: dict[str, int] = {"first": 0, "retry": 0}
 
 
 def _keyword_addendum(answers: dict[str, Any] | None) -> str:
-    """Fold the 6 customization answers into a STEER block for the keyword-edit
-    prompt — same spirit as build_customization_addendum, but tuned for in-place
-    swaps: it steers WHICH existing phrases to swap and WHICH JD keywords/skills
-    to weave in. `length` is intentionally omitted (in-place edits can't change
-    page count). Empty answers → empty string (no steer)."""
+    """Fold the option-B gap/relevance answers into a STEER block for the
+    keyword-edit prompt. They steer WHICH existing phrases to rewrite and how
+    (relevance, JD skills the candidate confirmed, credible metrics) — they
+    NEVER add content. Empty answers → empty string (no steer)."""
     a = answers or {}
     lines: list[str] = []
 
-    tone = _TONE.get(str(a.get("tone") or "").lower())
-    if tone:
-        lines.append(f"- Tone of replacements: {tone}")
-    emphasis = _EMPHASIS.get(str(a.get("emphasis") or "").lower())
-    if emphasis:
-        lines.append(f"- When choosing which phrases to swap, {emphasis}")
+    missing_exp = str(a.get("missing_experience") or "").strip()
+    if missing_exp:
+        lines.append(
+            "- Relevant experience the candidate has done but that isn't clearly on the "
+            "resume — use ONLY to decide which EXISTING phrases to strengthen/reword toward "
+            f"the JD (do NOT add it as new content): {missing_exp}"
+        )
     skills = [s for s in (a.get("skills") or []) if str(s).strip()]
     if skills:
         lines.append(
-            "- Prefer weaving in these skills the candidate genuinely has, where the JD "
-            "asks for them: " + ", ".join(skills) + "."
+            "- JD skills the candidate confirmed they genuinely have — prefer rewording "
+            "existing phrases to surface these where truthful: " + ", ".join(skills) + "."
         )
     roles = [r for r in (a.get("roles") or []) if str(r).strip()]
     if roles:
-        lines.append("- Give more weight to wording in these roles: " + ", ".join(roles) + ".")
+        lines.append(
+            "- Foreground wording in the candidate's most-relevant roles: " + ", ".join(roles) + "."
+        )
+    metrics = str(a.get("metrics") or "").strip()
+    if metrics:
+        lines.append(
+            "- Credible numbers for the candidate's most relevant work — weave into EXISTING "
+            f"phrases where they truthfully apply; never fabricate: {metrics}"
+        )
     extra = str(a.get("additional") or "").strip()
     if extra:
-        lines.append(f"- Candidate's steer: {extra}")
+        lines.append(f"- Anything else to reflect (steers wording choice only): {extra}")
 
     if not lines:
         return ""
     return (
-        "\n\nCANDIDATE STEER (these guide WHICH existing wording to swap and which "
+        "\n\nCANDIDATE STEER (these guide WHICH existing wording to rewrite and which "
         "keywords to weave in — they do NOT add content):\n"
         + "\n".join(lines)
-        + "\nIMPORTANT: in-place edits can only rewrite text ALREADY present in the "
-        "resume. Honor the steer by choosing which existing phrases to adjust; if it "
-        "asks for something not in the resume, partially honor it through wording "
-        "choice and NEVER invent skills, employers, metrics, or experience."
+        + "\nHARD RULE: rewrite ONLY text already present in the resume above. Do NOT "
+        "invent skills, employers, metrics, or experience, and do NOT output any edit "
+        "whose original_text is not an exact substring of the resume. If the steer asks "
+        "for something not in the resume, partially honor it through wording choice only."
     )
 
 
@@ -387,6 +395,10 @@ def compute_keyword_edits(
             out.append(
                 {"original_text": o, "replacement_text": r, "reason": str(e.get("reason", ""))}
             )
+    # Steer-only is enforced at apply time: apply_docx_edits APPLIES only edits
+    # whose original is already in the resume; anything absent is reported in
+    # `skipped` (surfaced read-only as "consider adding to your base resume"),
+    # never inserted. The prompt's HARD RULE steers the model the same way.
     return out
 
 
