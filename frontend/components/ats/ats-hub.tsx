@@ -27,6 +27,7 @@ import {
   type AtsQuestions,
   type AtsRun,
   downloadAtsDocx,
+  setActiveAutofillRun,
   fetchAtsRun,
   getDefaultFormat,
   keywordCoverage,
@@ -1072,7 +1073,7 @@ function Preview({
       )}
       {run.resume && <ResumeView resume={run.resume} />}
       {run.resume && (
-        <GenerateDownload resume={run.resume} format={format} custom={custom} />
+        <GenerateDownload resume={run.resume} format={format} custom={custom} runId={runId} />
       )}
     </StepShell>
   );
@@ -1082,10 +1083,12 @@ function GenerateDownload({
   resume,
   format,
   custom,
+  runId,
 }: {
   resume: TailoredResume;
   format: AtsFormat;
   custom: AtsCustomOptions;
+  runId: string | null;
 }) {
   const [downloading, setDownloading] = useState<"docx" | "pdf" | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1124,9 +1127,44 @@ function GenerateDownload({
       <Button variant="outline" disabled={downloading !== null} onClick={() => void dl("pdf")}>
         {downloading === "pdf" ? "Preparing…" : "Download PDF"}
       </Button>
+      <AddToExtensionButton runId={runId} />
       <span className="text-xs text-muted-foreground">Format: {format}</span>
       {err && <span className="text-xs text-destructive">{err}</span>}
     </div>
+  );
+}
+
+// "Add to Chrome extension" — marks this run as the user's active autofill
+// resume (a pointer the extension reads). Honest UX: it does NOT push a file
+// into the browser; the user opens a job application and uses Aptly fill.
+function AddToExtensionButton({ runId }: { runId: string | null }) {
+  const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  if (!runId) return null;
+  async function add() {
+    setState("saving");
+    try {
+      await setActiveAutofillRun(runId!);
+      setState("done");
+    } catch {
+      setState("error");
+    }
+  }
+  if (state === "done") {
+    return (
+      <span className="text-xs text-primary">
+        ✓ Set as your autofill resume — open a job application and use Aptly fill.
+      </span>
+    );
+  }
+  return (
+    <>
+      <Button variant="outline" disabled={state === "saving"} onClick={() => void add()}>
+        {state === "saving" ? "Setting…" : "Add to Chrome extension"}
+      </Button>
+      {state === "error" && (
+        <span className="text-xs text-destructive">Couldn&apos;t set it — try again.</span>
+      )}
+    </>
   );
 }
 
@@ -1240,6 +1278,7 @@ function DiffView({
           <Button disabled={downloading} onClick={() => void dl()}>
             {downloading ? "Preparing…" : "Download DOCX"}
           </Button>
+          <AddToExtensionButton runId={runId} />
           {err && <span className="text-xs text-destructive">{err}</span>}
         </div>
       </div>

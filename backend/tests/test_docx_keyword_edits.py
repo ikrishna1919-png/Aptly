@@ -113,3 +113,29 @@ def test_apply_is_insertion_free():
     assert len(applied) == 1 and len(skipped) == 1  # absent → skipped, not inserted
     assert d1.paragraphs[0].text == "Alpha Plus line."
     assert d1.paragraphs[1].text == "Beta line."  # untouched
+
+
+def test_bold_boundary_swap_keeps_per_run_formatting():
+    # A bold label run + a normal values run; the swap spans BOTH. The bold
+    # portion must stay bold and the normal (values) portion must stay NOT bold.
+    blob = _docx([[("Databases:", True), (" SQL Server, Oracle", None)]])
+    edited, applied, skipped = ats.apply_docx_edits(
+        blob,
+        [
+            {
+                "original_text": "Databases: SQL Server, Oracle",
+                "replacement_text": "Databases: PostgreSQL, Oracle, MySQL",
+            }
+        ],
+    )
+    assert len(applied) == 1 and skipped == []
+    d = Document(io.BytesIO(edited))
+    runs = d.paragraphs[0].runs
+    # The label run is still bold; the values run is still NOT bold.
+    label = next(r for r in runs if "Databases" in r.text)
+    assert label.bold is True
+    values = [r for r in runs if r.text and "Databases" not in r.text]
+    assert values, "values run vanished"
+    assert all(r.bold is not True for r in values), "values leaked bold formatting"
+    # Full replacement text is present across the runs, in order.
+    assert "".join(r.text for r in runs) == "Databases: PostgreSQL, Oracle, MySQL"

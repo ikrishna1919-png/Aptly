@@ -108,12 +108,22 @@ class Analysis(BaseModel):
     )
     questions: list[str] = Field(
         description=(
-            "Step 3: short yes/no questions, each asking whether the "
-            "candidate genuinely has a MISSING skill from `gaps` but failed "
-            "to list it. ONLY ask about missing skills — do NOT ask about "
-            "anything in `matched`. Cap at MAX 6 questions, prioritized by "
-            "impact (the JD's must-haves first). Empty list is valid when "
-            "there are no gaps."
+            "Step 3: short YES/NO questions that surface truthful detail to "
+            "strengthen the resume, grounded in the JD-vs-resume gaps. Vary the "
+            "TYPE so they don't all read the same — use a MIX of: "
+            "(a) skill presence ('Have you used <gap skill>?'), "
+            "(b) scope/scale ('Did you do <X> at production scale / for a large "
+            "user base?'), "
+            "(c) relevance ('Is your <role/project> your most relevant "
+            "experience for this job?'), and "
+            "(d) metrics ('Do you have a specific number for <achievement> — "
+            "e.g. %, $, team size?'). "
+            "Prioritize the JD's must-haves; lead with gap skills but don't ask "
+            "only about presence. NEVER invent a premise — every question must "
+            "be answerable truthfully from the candidate's real experience and "
+            "tied to a real JD requirement; do NOT ask about anything already in "
+            "`matched`. Cap at MAX 6 questions. Empty list is valid when there "
+            "are no gaps."
         ),
     )
     genuine_lacks: list[str] = Field(
@@ -741,12 +751,17 @@ _SYSTEM_ANALYZE = (
     "conservative — only put something in `matched` when you can point to "
     "concrete evidence in the candidate profile.\n"
     "\n"
-    "3. GAP-ONLY QUESTIONS → `questions`. Produce short yes/no questions "
-    "asking whether the candidate genuinely has a MISSING skill (from "
-    "`gaps`) but failed to list it. Do NOT ask about anything in "
-    "`matched`. NEVER invent skills — your questions are the only path by "
-    "which a gap can be added later. If `gaps` is empty, return an empty "
-    "`questions` list.\n"
+    "3. CLARIFYING QUESTIONS → `questions`. Produce short YES/NO questions, "
+    "grounded in the JD-vs-resume gaps, that surface truthful detail to "
+    "strengthen the resume. VARY the type so they don't all read the same — "
+    "mix: (a) skill presence ('Have you used <gap skill>?'), (b) scope/scale "
+    "('Did you do <X> at production scale?'), (c) relevance ('Is <role/project> "
+    "your most relevant experience for this JD?'), (d) metrics ('Do you have a "
+    "number for <achievement>?'). Lead with gap skills but don't ask only about "
+    "presence. Do NOT ask about anything already in `matched`. NEVER invent a "
+    "premise — every question must be answerable truthfully from the "
+    "candidate's real experience and tied to a real JD requirement. If there's "
+    "nothing to clarify, return an empty `questions` list.\n"
     "\n"
     "   HARD CAP: AT MOST 6 questions. If `gaps` has more than 6 entries, "
     "   choose the 6 questions that would most change the candidate's "
@@ -1263,10 +1278,34 @@ def _cap_questions(analysis: Analysis) -> Analysis:
     return analysis.model_copy(update={"questions": analysis.questions[:_MAX_QUESTIONS]})
 
 
-def _question_for_gap(skill: str) -> str:
-    """Deterministic question text used by demo mode AND by tests that need
-    to map an answer back to its originating gap."""
-    return f"[demo] Have you used {skill} in production?"
+# Demo question templates — rotated by gap index so demo mode shows the same
+# VARIETY (presence / scope / relevance / metrics) the live prompt asks for.
+# Each wraps the skill in «…» so `_skill_from_demo_question` can recover it
+# regardless of which template was used. `[demo]` prefix marks it as a mock.
+_DEMO_Q_TEMPLATES = (
+    "[demo] Have you used «{skill}»?",
+    "[demo] Did you work with «{skill}» at production scale?",
+    "[demo] Is your experience with «{skill}» your most relevant for this role?",
+    "[demo] Do you have a specific metric for your «{skill}» work?",
+)
+
+
+def _question_for_gap(skill: str, idx: int = 0) -> str:
+    """Deterministic question text for demo mode. Rotates template by `idx` so
+    the demo screen isn't all "have you used X?". The skill is wrapped in «…»
+    so it's recoverable by `_skill_from_demo_question`."""
+    return _DEMO_Q_TEMPLATES[idx % len(_DEMO_Q_TEMPLATES)].format(skill=skill)
+
+
+def _skill_from_demo_question(question: str) -> str | None:
+    """Recover the gap skill from a demo question (the «…»-wrapped name),
+    independent of which template produced it. None if not a demo question."""
+    if not question.startswith("[demo] "):
+        return None
+    a, b = question.find("«"), question.rfind("»")
+    if a >= 0 and b > a:
+        return question[a + 1 : b]
+    return None
 
 
 def _demo_analysis(job: Job, *, candidate: dict[str, Any]) -> Analysis:
@@ -1290,7 +1329,7 @@ def _demo_analysis(job: Job, *, candidate: dict[str, Any]) -> Analysis:
         gaps=gaps,
         # One question per gap, capped at `_MAX_QUESTIONS` so demo mode
         # mirrors the same ceiling the live path enforces.
-        questions=[_question_for_gap(g) for g in gaps[:_MAX_QUESTIONS]],
+        questions=[_question_for_gap(g, i) for i, g in enumerate(gaps[:_MAX_QUESTIONS])],
         # Demo can't tell apart "gap" from "genuinely lacks", so leave empty.
         genuine_lacks=[],
     )
@@ -1316,15 +1355,14 @@ def _demo_resume(
     spec's categorized-skills / dated-entry / ats shapes. Skills the user
     didn't confirm are never added — same rule the live prompt enforces."""
     # Recover confirmed gaps from the answer keys (generated by
-    # `_question_for_gap`, so the skill name is parseable back out).
+    # `_question_for_gap`, so the «…»-wrapped skill name is parseable back out).
     confirmed_gaps: list[str] = []
     for question, answer in answers.items():
         if not _is_affirmative(answer):
             continue
-        prefix = "[demo] Have you used "
-        suffix = " in production?"
-        if question.startswith(prefix) and question.endswith(suffix):
-            confirmed_gaps.append(question[len(prefix) : -len(suffix)])
+        skill = _skill_from_demo_question(question)
+        if skill:
+            confirmed_gaps.append(skill)
 
     candidate_skills = _flat_skills(candidate)
     candidate_lower = {x.lower() for x in candidate_skills}

@@ -82,7 +82,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     getToken().then(async (t) => {
       if (!t) return sendResponse({ error: "auth" });
       try {
-        const res = await api.resumeFile(msg.runId);
+        // No explicit run chosen → fall back to the user's active autofill run
+        // (set via "Add to Chrome extension" on the web app).
+        let runId = msg.runId;
+        if (!runId) {
+          try {
+            runId = await api.activeRunId();
+          } catch (_) {
+            runId = null;
+          }
+        }
+        if (!runId) return sendResponse({ error: "no_run" });
+        const res = await api.resumeFile(runId);
         const buf = await res.arrayBuffer();
         sendResponse({
           base64: arrayBufferToBase64(buf),

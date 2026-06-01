@@ -180,8 +180,16 @@ async function renderAts(me, tab, info, experimental) {
   } catch (_) {
     /* ignore */
   }
+  // Pre-select the run the user marked "Add to Chrome extension" on the web
+  // app (their active autofill resume), if it's still in the recent list.
+  const activeId = me.active_autofill_run_id || "";
   const options = runs
-    .map((r) => `<option value="${r.id}">${r.job_title || "Tailored resume"}</option>`)
+    .map(
+      (r) =>
+        `<option value="${r.id}"${r.id === activeId ? " selected" : ""}>${
+          r.job_title || "Tailored resume"
+        }${r.id === activeId ? " (your autofill resume)" : ""}</option>`,
+    )
     .join("");
   // Workday support is unverified — surface that prominently so the user knows
   // to scrutinise every field, not just trust the dots.

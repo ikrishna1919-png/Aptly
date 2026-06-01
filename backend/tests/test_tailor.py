@@ -662,9 +662,14 @@ def test_analyze_prompt_embodies_the_ats_spec():
     # Step 2 — cross-reference & gap detection
     assert "cross-reference" in p
     assert "gaps" in p
-    # Step 3 — gap-only questions
-    assert "gap-only" in p
-    assert "do not ask about anything in `matched`" in p
+    # Step 3 — clarifying yes/no questions, grounded in gaps, VARIED in type,
+    # never about matched skills.
+    assert "clarifying questions" in p
+    assert "yes/no" in p
+    assert "vary the type" in p
+    assert "do not ask about anything already in `matched`" in p
+    # The varied types are named (presence / scope / relevance / metrics).
+    assert "scope/scale" in p and "relevance" in p and "metrics" in p
     # MAX 6 questions, prioritised by impact — the prompt must state both.
     assert "max" in p and "6" in p
     assert "prioritis" in p or "prioritiz" in p

@@ -37,6 +37,9 @@ async function call(path, { method = "GET", body, raw = false } = {}) {
 
 export const api = {
   me: () => call("/api/extension/me"),
+  // The user's active autofill run id (set via "Add to Chrome extension" on the
+  // web app), or null. Used as the fallback when no run is explicitly chosen.
+  activeRunId: async () => (await call("/api/extension/me")).active_autofill_run_id || null,
   profile: () => call("/api/extension/profile"),
   tailorRuns: () => call("/api/extension/tailor-runs?limit=5"),
   resume: (runId) => call(`/api/extension/tailor-runs/${encodeURIComponent(runId)}/resume`),
