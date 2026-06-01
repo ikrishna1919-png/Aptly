@@ -277,6 +277,115 @@ function setSelectByText(el, value) {
   return true;
 }
 
+// ── react-select driver ─────────────────────────────────────────────────────
+// Greenhouse's new application forms render sponsorship/EEO dropdowns as
+// react-select: a `div.select__control` wrapping `input[role="combobox"]`, with
+// NO native <select>/<option>. Options mount lazily in a PORTAL (often on
+// <body>) as `[id*="-option-"][role="option"]` / `.select__option`. react-select
+// listens on pointer/mouse events, NOT `click`, so a native value set or a click
+// does nothing. This drives it the way a user would: open → pick by text → commit.
+// Async (the menu mounts after a tick). Returns true only if the control's
+// rendered value actually changed; leaves the field untouched otherwise.
+
+// The react-select control wrapper for a combobox input, if this IS one.
+function reactSelectControl(el) {
+  if (!el || el.getAttribute("role") !== "combobox") return null;
+  const control = el.closest("[class*='select__control']");
+  return control || null;
+}
+
+function dispatchMouse(node, type) {
+  node.dispatchEvent(
+    new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 }),
+  );
+}
+function dispatchPointer(node, type) {
+  // PointerEvent may be unavailable in some stubs — fall back to MouseEvent.
+  const Ctor = typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+  node.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, view: window, button: 0 }));
+}
+
+// The currently-rendered text of a react-select control (the
+// `.select__single-value`, else the control's own text minus the input).
+function reactSelectValueText(control) {
+  if (!control) return "";
+  const sv = control.querySelector("[class*='select__single-value']");
+  if (sv) return (sv.textContent || "").trim();
+  return (control.textContent || "").trim();
+}
+
+async function setReactSelectByText(input, value, { waitMs = 1500 } = {}) {
+  if (!value) return false;
+  const control = reactSelectControl(input);
+  if (!control) return false;
+  const before = reactSelectValueText(control);
+
+  // Open the menu: react-select listens on pointerdown/mousedown on the control.
+  try {
+    input.focus();
+  } catch (_) {
+    /* ignore */
+  }
+  dispatchPointer(control, "pointerdown");
+  dispatchMouse(control, "mousedown");
+  dispatchMouse(control, "mouseup");
+  // Fallback to keyboard open if the menu didn't mount.
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+
+  const optionSel = "[id*='-option-'][role='option'], [class*='select__option']";
+  const options = await _pollFor(() => queryAllDeep(document, optionSel).filter(isVisible), waitMs);
+  if (!options || !options.length) {
+    _closeReactSelect(input);
+    return false;
+  }
+  const match = matchOptionByText(options, value);
+  if (!match) {
+    _closeReactSelect(input);
+    return false;
+  }
+
+  // Commit: react-select selects on mouse events / Enter, not a bare click.
+  dispatchPointer(match, "pointerdown");
+  dispatchMouse(match, "mousedown");
+  dispatchMouse(match, "mouseup");
+  dispatchMouse(match, "click");
+
+  // Verify the control's rendered value actually changed (else report failure
+  // so the caller can leave the field for the user).
+  const after = await _pollFor(() => {
+    const now = reactSelectValueText(control);
+    return now && now !== before ? now : null;
+  }, 600);
+  return !!after;
+}
+
+function _closeReactSelect(input) {
+  try {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+// Poll `fn` until it returns a truthy value or `ms` elapses. Resolves the value
+// or null. Used for react-select's async portal menu.
+function _pollFor(fn, ms) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    (function tick() {
+      let v = null;
+      try {
+        v = fn();
+      } catch (_) {
+        v = null;
+      }
+      if (v && (!Array.isArray(v) || v.length)) return resolve(v);
+      if (Date.now() - start >= ms) return resolve(null);
+      setTimeout(tick, 60);
+    })();
+  });
+}
+
 // Match a desired value against a list of option-like nodes by their visible
 // text. Used by the Workday adapter for custom (non-<select>) dropdowns, where
 // the trigger opens a [role="listbox"] of [role="option"] nodes. Pure and
@@ -290,7 +399,17 @@ function matchOptionByText(options, value) {
   //    match regardless of option order (e.g. "No" beats "Not sure").
   let i = texts.findIndex((t) => t === v);
   if (i >= 0) return options[i];
-  // 2) Loose containment either direction, length-guarded to avoid 1-char
+  // 2) Yes/No polarity: a saved "Yes"/"No" matches the option whose text STARTS
+  //    WITH that polarity word ("Yes, I require sponsorship…"), and never the
+  //    opposite ("No, …"). We return here without falling through to the loose
+  //    rule below — generic containment is unsafe for a 2-char "no" (it would
+  //    match "Not sure"), so polarity is the ONLY loose path for yes/no.
+  if (v === "yes" || v === "no") {
+    const startsWithWord = (t, w) => t === w || t.startsWith(w + " ") || t.startsWith(w + ",");
+    i = texts.findIndex((t) => startsWithWord(t, v));
+    return i >= 0 ? options[i] : null;
+  }
+  // 3) Loose containment either direction, length-guarded to avoid 1-char
   //    noise. Handles a Workday label carrying a longer/shorter form than the
   //    saved value (e.g. "United States of America" vs "United States").
   if (v.length >= 2) {
@@ -421,7 +540,19 @@ function attachFileToInput(input, file) {
     const dt = new DataTransfer();
     dt.items.add(file);
     input.files = dt.files;
+    // Fire the fuller sequence a file <input>'s listeners expect. Greenhouse's
+    // uploader wires onChange; some widgets also need focus + a bubbling input
+    // event before change. Order matters: focus → input → change.
+    try {
+      input.focus();
+    } catch (_) {
+      /* ignore */
+    }
     input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    // Some React file inputs read the native `change` via the prototype setter;
+    // dispatch a second change after a microtask so a controlled handler that
+    // re-rendered still sees the files.
     input.dispatchEvent(new Event("change", { bubbles: true }));
     return !!(input.files && input.files.length > 0);
   } catch (_) {
@@ -596,7 +727,7 @@ function init() {
 }
 
 async function fillFields({ profile, runId, prefs }) {
-  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0, fileAttached: 0, attachedName: "" };
+  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0, fileAttached: 0, attachedName: "", fileError: "" };
   for (const f of STATE.fields) {
     const question = questionFor(f.el);
     if (!question) continue;
@@ -615,7 +746,7 @@ async function fillFields({ profile, runId, prefs }) {
     if (cKey && profile) {
       const cValue = complianceValue(cKey, profile);
       if (cValue) {
-        const ok = applyComplianceValue(f, cValue);
+        const ok = await applyComplianceValue(f, cValue);
         setDot(f.el, ok ? COLORS.green : COLORS.yellow);
         if (ok) f.filled = true;
         ok ? summary.green++ : summary.yellow++;
@@ -684,13 +815,20 @@ function applyValue(f, value) {
   return setInputValue(f.el, value);
 }
 
-// Compliance/EEO answers are almost always SELECT dropdowns or radio groups
-// whose option wording varies by ATS, so match by TEXT (loose). Returns true
-// only if an option actually matched — a non-match leaves the field untouched.
-function applyComplianceValue(f, value) {
+// Compliance/EEO answers are almost always dropdowns (native <select>,
+// react-select, or a radio group) whose option wording varies by ATS, so match
+// by TEXT (loose). Tries, in order: native <select> → react-select widget →
+// radio/checkbox. Returns true only if a value actually committed — a non-match
+// leaves the field UNTOUCHED (the caller marks it yellow for the user). Async
+// because react-select's menu mounts after a tick.
+async function applyComplianceValue(f, value) {
   if (f.type === "select") return setSelectByText(f.el, value);
   if (f.type === "radio" || f.type === "checkbox")
     return clickRadioOrCheckbox(f.group || [f.el], value);
+  // react-select renders as input[role=combobox] inside .select__control — it
+  // has no native options, so setInputValue would just type into the search box
+  // without committing. Drive the widget instead.
+  if (reactSelectControl(f.el)) return setReactSelectByText(f.el, value);
   return setInputValue(f.el, value);
 }
 
@@ -713,16 +851,22 @@ async function attachResume(runId, root, summary) {
   let data = null;
   try {
     data = await chrome.runtime.sendMessage({ type: "RESUME_FILE", runId });
-  } catch (_) {
-    data = null;
+  } catch (e) {
+    data = { error: String(e) };
   }
+  // Branch 1 — the service worker couldn't produce the file (fetch/auth/no-run).
+  // Record the REAL reason so the popup stops blaming a "browser security rule".
   if (!data || !data.base64) {
+    summary.fileError = (data && data.error) || "fetch_failed";
     for (const el of inputs) {
       setDot(el, COLORS.yellow);
       summary.file++;
     }
     return;
   }
+  // Branch 2 — file fetched OK; try to attach it. If the uploader refuses a
+  // programmatic file, fall back to the manual download (reason recorded so the
+  // copy can name it honestly).
   const file = base64ToFile(data.base64, data.filename, data.mime);
   for (const el of inputs) {
     let ok = attachFileToInput(el, file);
@@ -734,6 +878,7 @@ async function attachResume(runId, root, summary) {
     } else {
       setDot(el, COLORS.yellow);
       summary.file++;
+      summary.fileError = "uploader_rejected";
     }
   }
 }

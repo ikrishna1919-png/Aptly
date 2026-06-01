@@ -8,6 +8,7 @@ import {
   complianceKeyFor,
   complianceValue,
   contactKeyFor,
+  matchOptionByText,
   setSelectByText,
 } from "../src/content/shared.js";
 
@@ -110,5 +111,30 @@ function selectStub(optionTexts) {
 
 // country is a recognised contact field (standard fill), distinct from compliance.
 check("country recognised as a contact field", contactKeyFor("Country") === "country");
+
+// ── Yes/No polarity matching (sponsorship/work-auth full-phrase options) ─────
+const opt = (t) => ({ textContent: t });
+{
+  const os = [opt("Please select"), opt("Yes, I require sponsorship now or in the future"), opt("No")];
+  check(
+    "'Yes' → the 'Yes, …' option",
+    matchOptionByText(os, "Yes") === os[1],
+  );
+}
+{
+  // "Yes" must NEVER match a "No, …" option, even when no plain "Yes" exists.
+  const os = [opt("No, I do not require sponsorship"), opt("Yes, I do")];
+  check("'Yes' never matches a 'No, …' option", matchOptionByText(os, "Yes") === os[1]);
+  check("'No' → the 'No, …' option", matchOptionByText(os, "No") === os[0]);
+}
+{
+  // Guard: "No" must not loose-match "Not sure" / "Not authorized".
+  const os = [opt("Not sure"), opt("Authorized"), opt("No")];
+  check("'No' → exact 'No', not 'Not sure'", matchOptionByText(os, "No") === os[2]);
+}
+{
+  const os = [opt("Decline"), opt("Maybe")];
+  check("'Yes' with no yes-option → null", matchOptionByText(os, "Yes") === null);
+}
 
 console.log(`compliance.test: ${passed} assertions passed`);

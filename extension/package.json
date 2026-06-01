@@ -7,6 +7,6 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "validate": "node scripts/build.mjs --check",
-    "test": "node test/detection.test.mjs && node test/workday.test.mjs && node test/compliance.test.mjs"
+    "test": "node test/detection.test.mjs && node test/workday.test.mjs && node test/compliance.test.mjs && node test/react-select.test.mjs"
   }
 }

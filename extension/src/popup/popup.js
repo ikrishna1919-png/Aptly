@@ -314,6 +314,28 @@ function renderProfileSummary(p) {
   return `<div class="profile-summary">${rows.map((r) => `<div>${r}</div>`).join("")}</div>`;
 }
 
+// Honest, reason-specific copy for the resume file-attach fallback. `fileError`
+// is set by the content script: a fetch/auth/no-run failure vs the uploader
+// rejecting a programmatic file. We no longer blame a generic "browser security
+// rule" — we name what actually happened.
+function fileFallbackNote(summary, runId) {
+  const err = summary.fileError || "";
+  const dl = `<a href="${api.downloadUrl(runId)}" target="_blank">Download your DOCX</a> and drop it into the resume field.`;
+  if (err === "auth") {
+    return `<div class="hint">Couldn't fetch your resume — your session expired. Sign in again, then ${dl}</div>`;
+  }
+  if (err === "no_run") {
+    return `<div class="hint">No tailored resume selected yet. Pick one above (or set one on aptly.fyi), then ${dl}</div>`;
+  }
+  if (err && err !== "uploader_rejected") {
+    return `<div class="hint">Couldn't fetch your resume from Aptly (${err}). ${dl}</div>`;
+  }
+  // uploader_rejected (or unspecified): the file was fetched but this site's
+  // uploader needs a manual drop — name that, don't blame a vague rule.
+  return `<div class="hint">This site's uploader needs a manual drop — it won't accept a file placed by an extension.
+     ${dl}</div>`;
+}
+
 function renderSummary(summary, runId) {
   if (!summary) return;
   const el = document.getElementById("result");
@@ -323,12 +345,7 @@ function renderSummary(summary, runId) {
           summary.attachedName ? `: <b>${summary.attachedName}</b>` : ""
         }. Confirm it on the page before submitting.</div>`
       : "";
-  const fileNote =
-    summary.file > 0
-      ? `<div class="hint">Couldn't auto-attach the resume to ${summary.file} field(s)
-         (a browser security rule can block it). <a href="${api.downloadUrl(runId)}" target="_blank">Download
-         your DOCX</a> and drop it into the resume field.</div>`
-      : "";
+  const fileNote = summary.file > 0 ? fileFallbackNote(summary, runId) : "";
   el.innerHTML = `
     <div class="card summary">
       <p style="margin:0 0 6px"><b>${summary.green}</b> from profile ·

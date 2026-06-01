@@ -26,6 +26,8 @@ import {
   setInputValue,
   setSelectValue,
   setSelectByText,
+  setReactSelectByText,
+  reactSelectControl,
   clickRadioOrCheckbox,
   queryAllDeep,
   findFileInputs,
@@ -135,7 +137,7 @@ function init() {
 }
 
 async function fillFields({ profile, runId, prefs }) {
-  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0, fileAttached: 0, attachedName: "" };
+  const summary = { green: 0, yellow: 0, red: 0, sensitive: 0, file: 0, fileAttached: 0, attachedName: "", fileError: "" };
   for (const f of STATE.fields) {
     const question = questionFor(f.el);
     if (!question) continue;
@@ -154,7 +156,7 @@ async function fillFields({ profile, runId, prefs }) {
     if (cKey && profile) {
       const cValue = complianceValue(cKey, profile);
       if (cValue) {
-        const ok = applyComplianceValue(f, cValue);
+        const ok = await applyComplianceValue(f, cValue);
         setDot(f.el, ok ? COLORS.green : COLORS.yellow);
         if (ok) f.filled = true;
         ok ? summary.green++ : summary.yellow++;
@@ -223,13 +225,20 @@ function applyValue(f, value) {
   return setInputValue(f.el, value);
 }
 
-// Compliance/EEO answers are almost always SELECT dropdowns or radio groups
-// whose option wording varies by ATS, so match by TEXT (loose). Returns true
-// only if an option actually matched — a non-match leaves the field untouched.
-function applyComplianceValue(f, value) {
+// Compliance/EEO answers are almost always dropdowns (native <select>,
+// react-select, or a radio group) whose option wording varies by ATS, so match
+// by TEXT (loose). Tries, in order: native <select> → react-select widget →
+// radio/checkbox. Returns true only if a value actually committed — a non-match
+// leaves the field UNTOUCHED (the caller marks it yellow for the user). Async
+// because react-select's menu mounts after a tick.
+async function applyComplianceValue(f, value) {
   if (f.type === "select") return setSelectByText(f.el, value);
   if (f.type === "radio" || f.type === "checkbox")
     return clickRadioOrCheckbox(f.group || [f.el], value);
+  // react-select renders as input[role=combobox] inside .select__control — it
+  // has no native options, so setInputValue would just type into the search box
+  // without committing. Drive the widget instead.
+  if (reactSelectControl(f.el)) return setReactSelectByText(f.el, value);
   return setInputValue(f.el, value);
 }
 
@@ -252,16 +261,22 @@ async function attachResume(runId, root, summary) {
   let data = null;
   try {
     data = await chrome.runtime.sendMessage({ type: "RESUME_FILE", runId });
-  } catch (_) {
-    data = null;
+  } catch (e) {
+    data = { error: String(e) };
   }
+  // Branch 1 — the service worker couldn't produce the file (fetch/auth/no-run).
+  // Record the REAL reason so the popup stops blaming a "browser security rule".
   if (!data || !data.base64) {
+    summary.fileError = (data && data.error) || "fetch_failed";
     for (const el of inputs) {
       setDot(el, COLORS.yellow);
       summary.file++;
     }
     return;
   }
+  // Branch 2 — file fetched OK; try to attach it. If the uploader refuses a
+  // programmatic file, fall back to the manual download (reason recorded so the
+  // copy can name it honestly).
   const file = base64ToFile(data.base64, data.filename, data.mime);
   for (const el of inputs) {
     let ok = attachFileToInput(el, file);
@@ -273,6 +288,7 @@ async function attachResume(runId, root, summary) {
     } else {
       setDot(el, COLORS.yellow);
       summary.file++;
+      summary.fileError = "uploader_rejected";
     }
   }
 }
