@@ -7,11 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   type ExtensionSession,
+  type Profile,
   type SavedQA,
   deleteSavedQA,
+  fetchProfile,
   listExtensionSessions,
   listSavedQA,
   revokeExtensionSession,
+  saveProfile,
   updateSavedQA,
 } from "@/lib/api";
 
@@ -27,6 +30,7 @@ export function ExtensionSettings() {
   return (
     <div className="space-y-10">
       <ConnectedDevices />
+      <FormFillingGuide />
       <SavedAnswers />
     </div>
   );
@@ -191,5 +195,184 @@ function SavedAnswers() {
         </ul>
       )}
     </section>
+  );
+}
+
+// ── Form-filling guide ────────────────────────────────────────────────────────
+// One place to set the compliance/EEO answers the extension echoes into ATS
+// forms. Saved on the profile JSON via the existing PUT /profile. The four EEO
+// fields DEFAULT TO BLANK ("Decline / prefer not to say") and are only filled
+// by the extension when the user explicitly picks a value here.
+
+const SPONSORSHIP_OPTS = ["", "No", "Yes"];
+const WORK_AUTH_OPTS = [
+  "",
+  "Authorized to work in the US",
+  "Not authorized — require sponsorship",
+];
+// Standard ATS self-identification option wording. "" renders as the blank /
+// decline default so nothing is ever auto-selected for the user.
+const VETERAN_OPTS = [
+  "",
+  "I am not a protected veteran",
+  "I identify as one or more of the classifications of a protected veteran",
+  "I don't wish to answer",
+];
+const DISABILITY_OPTS = ["", "Yes", "No", "I do not want to answer"];
+const RACE_OPTS = [
+  "",
+  "Hispanic or Latino",
+  "White",
+  "Black or African American",
+  "Asian",
+  "Native Hawaiian or Other Pacific Islander",
+  "American Indian or Alaska Native",
+  "Two or more races",
+  "I do not wish to self-identify",
+];
+const GENDER_OPTS = ["", "Male", "Female", "Non-binary", "I do not wish to self-identify"];
+
+type ComplianceKey =
+  | "requires_sponsorship"
+  | "work_authorization"
+  | "veteran_status"
+  | "disability_status"
+  | "race_ethnicity"
+  | "gender";
+
+function FormFillingGuide() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [savedNote, setSavedNote] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchProfile()
+      .then(setProfile)
+      .catch(() => setError("Couldn't load your profile."));
+  }, []);
+
+  function set(key: ComplianceKey, value: string) {
+    setProfile((p) => (p ? { ...p, [key]: value } : p));
+    setSavedNote(false);
+  }
+
+  async function save() {
+    if (!profile) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await saveProfile(profile);
+      setProfile(next);
+      setSavedNote(true);
+    } catch {
+      setError("Couldn't save. Try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (error && !profile) {
+    return (
+      <section>
+        <h2 className="font-display text-lg font-semibold">Form-filling guide</h2>
+        <p className="mt-1 text-sm text-destructive">{error}</p>
+      </section>
+    );
+  }
+  if (!profile) return null;
+
+  return (
+    <section>
+      <h2 className="font-display text-lg font-semibold">Form-filling guide</h2>
+      <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+        Set these once and the Aptly extension fills them on supported job applications. The
+        demographic (EEO) answers below are <strong>optional and blank by default</strong> — the
+        extension only fills one if you explicitly choose it here, and never guesses.
+      </p>
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <GuideField
+          label="Do you require visa sponsorship?"
+          value={profile.requires_sponsorship ?? ""}
+          opts={SPONSORSHIP_OPTS}
+          onChange={(v) => set("requires_sponsorship", v)}
+        />
+        <GuideField
+          label="Work authorization"
+          value={profile.work_authorization ?? ""}
+          opts={WORK_AUTH_OPTS}
+          onChange={(v) => set("work_authorization", v)}
+        />
+      </div>
+
+      <h3 className="mt-6 text-sm font-semibold">
+        Voluntary self-identification (EEO){" "}
+        <span className="font-normal text-muted-foreground">— optional, blank by default</span>
+      </h3>
+      <div className="mt-2 grid gap-4 sm:grid-cols-2">
+        <GuideField
+          label="Protected veteran status"
+          value={profile.veteran_status ?? ""}
+          opts={VETERAN_OPTS}
+          onChange={(v) => set("veteran_status", v)}
+        />
+        <GuideField
+          label="Disability status"
+          value={profile.disability_status ?? ""}
+          opts={DISABILITY_OPTS}
+          onChange={(v) => set("disability_status", v)}
+        />
+        <GuideField
+          label="Race / ethnicity"
+          value={profile.race_ethnicity ?? ""}
+          opts={RACE_OPTS}
+          onChange={(v) => set("race_ethnicity", v)}
+        />
+        <GuideField
+          label="Gender"
+          value={profile.gender ?? ""}
+          opts={GENDER_OPTS}
+          onChange={(v) => set("gender", v)}
+        />
+      </div>
+
+      <div className="mt-4 flex items-center gap-3">
+        <Button disabled={saving} onClick={() => void save()}>
+          {saving ? "Saving…" : "Save form-filling answers"}
+        </Button>
+        {savedNote && <span className="text-sm text-primary">Saved.</span>}
+        {error && <span className="text-sm text-destructive">{error}</span>}
+      </div>
+    </section>
+  );
+}
+
+function GuideField({
+  label,
+  value,
+  opts,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  opts: string[];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-sm">
+      <span className="font-medium">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {opts.map((o) => (
+          <option key={o} value={o}>
+            {o === "" ? "Prefer not to say / leave blank" : o}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

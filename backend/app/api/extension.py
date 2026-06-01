@@ -178,6 +178,15 @@ def extension_profile(
         "work_auth_status": c.get("work_authorization") or c.get("work_auth_status") or "",
         "current_company": current.get("company") or "",
         "current_title": current.get("title") or c.get("headline") or "",
+        # Compliance / EEO answers the user saved in the Form-filling guide. The
+        # EEO four are "" when unset → the extension leaves those fields blank
+        # and never auto-selects a demographic answer the user didn't choose.
+        "requires_sponsorship": c.get("requires_sponsorship") or "",
+        "work_authorization": c.get("work_authorization") or "",
+        "veteran_status": c.get("veteran_status") or "",
+        "disability_status": c.get("disability_status") or "",
+        "race_ethnicity": c.get("race_ethnicity") or "",
+        "gender": c.get("gender") or "",
     }
 
 

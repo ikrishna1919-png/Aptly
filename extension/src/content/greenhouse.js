@@ -18,10 +18,14 @@ import {
   fieldType,
   contactKeyFor,
   contactValue,
+  complianceKeyFor,
+  complianceValue,
+  EEO_KEYS,
   isSensitive,
   isApplicationInput,
   setInputValue,
   setSelectValue,
+  setSelectByText,
   clickRadioOrCheckbox,
   queryAllDeep,
   findFileInputs,
@@ -136,17 +140,41 @@ async function fillFields({ profile, runId, prefs }) {
     const question = questionFor(f.el);
     if (!question) continue;
 
-    // Sensitive/demographic: never auto-fill unless opted in.
+    // File inputs are handled by the dedicated resume-attach pass after this
+    // loop (it also covers HIDDEN inputs behind drop-zones, which detection
+    // skips because they aren't visible).
+    if (f.type === "file") continue;
+
+    // Compliance / EEO: sponsorship + work-auth + the demographic four. We fill
+    // ONLY when the user explicitly saved a value; a blank profile value leaves
+    // the field UNTOUCHED — we never auto-select a demographic answer the user
+    // didn't choose. Handled before the generic sensitive-skip below so an
+    // explicitly-set EEO value is honoured.
+    const cKey = complianceKeyFor(question);
+    if (cKey && profile) {
+      const cValue = complianceValue(cKey, profile);
+      if (cValue) {
+        const ok = applyComplianceValue(f, cValue);
+        setDot(f.el, ok ? COLORS.green : COLORS.yellow);
+        if (ok) f.filled = true;
+        ok ? summary.green++ : summary.yellow++;
+        continue;
+      }
+      // No saved value → leave it for the user. Mark yellow (review) and, for
+      // the EEO four, count it as a deliberately-blank sensitive field.
+      setDot(f.el, COLORS.yellow);
+      if (EEO_KEYS.has(cKey)) summary.sensitive++;
+      else summary.yellow++;
+      continue;
+    }
+
+    // Any other sensitive/demographic phrasing we recognise but don't have a
+    // profile key for: never auto-fill unless opted in.
     if (isSensitive(question) && !prefs.rememberDemographics) {
       setDot(f.el, COLORS.yellow);
       summary.sensitive++;
       continue;
     }
-
-    // File inputs are handled by the dedicated resume-attach pass after this
-    // loop (it also covers HIDDEN inputs behind drop-zones, which detection
-    // skips because they aren't visible).
-    if (f.type === "file") continue;
 
     // Contact info → profile (high confidence).
     const key = contactKeyFor(question);
@@ -190,6 +218,16 @@ async function fillFields({ profile, runId, prefs }) {
 
 function applyValue(f, value) {
   if (f.type === "select") return setSelectValue(f.el, value);
+  if (f.type === "radio" || f.type === "checkbox")
+    return clickRadioOrCheckbox(f.group || [f.el], value);
+  return setInputValue(f.el, value);
+}
+
+// Compliance/EEO answers are almost always SELECT dropdowns or radio groups
+// whose option wording varies by ATS, so match by TEXT (loose). Returns true
+// only if an option actually matched — a non-match leaves the field untouched.
+function applyComplianceValue(f, value) {
+  if (f.type === "select") return setSelectByText(f.el, value);
   if (f.type === "radio" || f.type === "checkbox")
     return clickRadioOrCheckbox(f.group || [f.el], value);
   return setInputValue(f.el, value);

@@ -13,15 +13,48 @@ import { SENSITIVE_PATTERNS, SALARY_PATTERNS } from "../lib/config.js";
 //   qa        → free/clustered question (yellow if suggested, red if novel)
 export const CONTACT_FIELDS = {
   name: ["full name", "your name", "name"],
-  first_name: ["first name", "given name"],
-  last_name: ["last name", "family name", "surname"],
+  first_name: ["first name", "given name", "legal first name"],
+  last_name: ["last name", "family name", "surname", "legal last name"],
   email: ["email"],
   phone: ["phone", "mobile", "telephone"],
   linkedin: ["linkedin"],
   github: ["github"],
   portfolio: ["portfolio", "website", "personal site"],
-  location: ["location", "city", "where are you based"],
+  location: ["location", "city", "where are you based", "current location"],
+  country: ["country"],
 };
+
+// Compliance / EEO questions → profile keys. Sponsorship + work-authorization
+// are "standard" answers; the EEO four are demographic and only filled when the
+// user explicitly set them (see complianceValue). Matched against the
+// normalized question text; order matters (most specific first).
+export const COMPLIANCE_FIELDS = {
+  requires_sponsorship: [
+    "require sponsorship",
+    "need sponsorship",
+    "visa sponsorship",
+    "sponsorship now or in the future",
+    "will you now or in the future require",
+  ],
+  work_authorization: [
+    "authorized to work",
+    "legally authorized",
+    "work authorization",
+    "eligible to work",
+  ],
+  veteran_status: ["veteran", "protected veteran"],
+  disability_status: ["disability", "disabled"],
+  race_ethnicity: ["race", "ethnicity", "hispanic or latino"],
+  gender: ["gender", "sex"],
+};
+
+// The EEO keys we NEVER auto-select unless the user explicitly set a value.
+export const EEO_KEYS = new Set([
+  "veteran_status",
+  "disability_status",
+  "race_ethnicity",
+  "gender",
+]);
 
 function norm(s) {
   return (s || "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -154,9 +187,30 @@ export function contactValue(key, p) {
       return p.portfolio;
     case "location":
       return p.location;
+    case "country":
+      // Profile has no dedicated country field; fill only if one is present
+      // (never fabricated from location). Empty → the field is left untouched.
+      return p.country || "";
     default:
       return "";
   }
+}
+
+// Which compliance/EEO key (if any) a question is asking about.
+export function complianceKeyFor(question) {
+  const q = norm(question);
+  for (const [key, patterns] of Object.entries(COMPLIANCE_FIELDS)) {
+    if (patterns.some((p) => q.includes(p))) return key;
+  }
+  return null;
+}
+
+// The profile value for a compliance key, or "" when unset. EEO keys return ""
+// unless the user explicitly set them — the caller then leaves the field
+// untouched (never auto-selects a demographic answer the user didn't choose).
+export function complianceValue(key, p) {
+  if (!p) return "";
+  return (p[key] || "").trim();
 }
 
 // React-friendly value setters: set via the native descriptor then dispatch
@@ -181,6 +235,20 @@ export function setSelectValue(el, value) {
     return true;
   }
   return false;
+}
+
+// Set a native <select> by matching `value` against option TEXT (loose, via
+// matchOptionByText) — for compliance/EEO dropdowns whose option wording varies
+// across ATSes ("Yes, I require sponsorship" vs the saved "Yes"). Returns true
+// only if an option actually matched + was selected. Never selects a fallback.
+export function setSelectByText(el, value) {
+  if (!value) return false;
+  const options = Array.from(el.options || []);
+  const match = matchOptionByText(options, value);
+  if (!match) return false;
+  el.value = match.value;
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
 }
 
 // Match a desired value against a list of option-like nodes by their visible

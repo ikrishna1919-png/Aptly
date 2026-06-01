@@ -39,15 +39,48 @@ const SALARY_PATTERNS = ["salary", "compensation", "pay expectation", "desired p
 //   qa        → free/clustered question (yellow if suggested, red if novel)
 const CONTACT_FIELDS = {
   name: ["full name", "your name", "name"],
-  first_name: ["first name", "given name"],
-  last_name: ["last name", "family name", "surname"],
+  first_name: ["first name", "given name", "legal first name"],
+  last_name: ["last name", "family name", "surname", "legal last name"],
   email: ["email"],
   phone: ["phone", "mobile", "telephone"],
   linkedin: ["linkedin"],
   github: ["github"],
   portfolio: ["portfolio", "website", "personal site"],
-  location: ["location", "city", "where are you based"],
+  location: ["location", "city", "where are you based", "current location"],
+  country: ["country"],
 };
+
+// Compliance / EEO questions → profile keys. Sponsorship + work-authorization
+// are "standard" answers; the EEO four are demographic and only filled when the
+// user explicitly set them (see complianceValue). Matched against the
+// normalized question text; order matters (most specific first).
+const COMPLIANCE_FIELDS = {
+  requires_sponsorship: [
+    "require sponsorship",
+    "need sponsorship",
+    "visa sponsorship",
+    "sponsorship now or in the future",
+    "will you now or in the future require",
+  ],
+  work_authorization: [
+    "authorized to work",
+    "legally authorized",
+    "work authorization",
+    "eligible to work",
+  ],
+  veteran_status: ["veteran", "protected veteran"],
+  disability_status: ["disability", "disabled"],
+  race_ethnicity: ["race", "ethnicity", "hispanic or latino"],
+  gender: ["gender", "sex"],
+};
+
+// The EEO keys we NEVER auto-select unless the user explicitly set a value.
+const EEO_KEYS = new Set([
+  "veteran_status",
+  "disability_status",
+  "race_ethnicity",
+  "gender",
+]);
 
 function norm(s) {
   return (s || "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -180,9 +213,30 @@ function contactValue(key, p) {
       return p.portfolio;
     case "location":
       return p.location;
+    case "country":
+      // Profile has no dedicated country field; fill only if one is present
+      // (never fabricated from location). Empty → the field is left untouched.
+      return p.country || "";
     default:
       return "";
   }
+}
+
+// Which compliance/EEO key (if any) a question is asking about.
+function complianceKeyFor(question) {
+  const q = norm(question);
+  for (const [key, patterns] of Object.entries(COMPLIANCE_FIELDS)) {
+    if (patterns.some((p) => q.includes(p))) return key;
+  }
+  return null;
+}
+
+// The profile value for a compliance key, or "" when unset. EEO keys return ""
+// unless the user explicitly set them — the caller then leaves the field
+// untouched (never auto-selects a demographic answer the user didn't choose).
+function complianceValue(key, p) {
+  if (!p) return "";
+  return (p[key] || "").trim();
 }
 
 // React-friendly value setters: set via the native descriptor then dispatch
@@ -207,6 +261,20 @@ function setSelectValue(el, value) {
     return true;
   }
   return false;
+}
+
+// Set a native <select> by matching `value` against option TEXT (loose, via
+// matchOptionByText) — for compliance/EEO dropdowns whose option wording varies
+// across ATSes ("Yes, I require sponsorship" vs the saved "Yes"). Returns true
+// only if an option actually matched + was selected. Never selects a fallback.
+function setSelectByText(el, value) {
+  if (!value) return false;
+  const options = Array.from(el.options || []);
+  const match = matchOptionByText(options, value);
+  if (!match) return false;
+  el.value = match.value;
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
 }
 
 // Match a desired value against a list of option-like nodes by their visible
@@ -533,17 +601,41 @@ async function fillFields({ profile, runId, prefs }) {
     const question = questionFor(f.el);
     if (!question) continue;
 
-    // Sensitive/demographic: never auto-fill unless opted in.
+    // File inputs are handled by the dedicated resume-attach pass after this
+    // loop (it also covers HIDDEN inputs behind drop-zones, which detection
+    // skips because they aren't visible).
+    if (f.type === "file") continue;
+
+    // Compliance / EEO: sponsorship + work-auth + the demographic four. We fill
+    // ONLY when the user explicitly saved a value; a blank profile value leaves
+    // the field UNTOUCHED — we never auto-select a demographic answer the user
+    // didn't choose. Handled before the generic sensitive-skip below so an
+    // explicitly-set EEO value is honoured.
+    const cKey = complianceKeyFor(question);
+    if (cKey && profile) {
+      const cValue = complianceValue(cKey, profile);
+      if (cValue) {
+        const ok = applyComplianceValue(f, cValue);
+        setDot(f.el, ok ? COLORS.green : COLORS.yellow);
+        if (ok) f.filled = true;
+        ok ? summary.green++ : summary.yellow++;
+        continue;
+      }
+      // No saved value → leave it for the user. Mark yellow (review) and, for
+      // the EEO four, count it as a deliberately-blank sensitive field.
+      setDot(f.el, COLORS.yellow);
+      if (EEO_KEYS.has(cKey)) summary.sensitive++;
+      else summary.yellow++;
+      continue;
+    }
+
+    // Any other sensitive/demographic phrasing we recognise but don't have a
+    // profile key for: never auto-fill unless opted in.
     if (isSensitive(question) && !prefs.rememberDemographics) {
       setDot(f.el, COLORS.yellow);
       summary.sensitive++;
       continue;
     }
-
-    // File inputs are handled by the dedicated resume-attach pass after this
-    // loop (it also covers HIDDEN inputs behind drop-zones, which detection
-    // skips because they aren't visible).
-    if (f.type === "file") continue;
 
     // Contact info → profile (high confidence).
     const key = contactKeyFor(question);
@@ -587,6 +679,16 @@ async function fillFields({ profile, runId, prefs }) {
 
 function applyValue(f, value) {
   if (f.type === "select") return setSelectValue(f.el, value);
+  if (f.type === "radio" || f.type === "checkbox")
+    return clickRadioOrCheckbox(f.group || [f.el], value);
+  return setInputValue(f.el, value);
+}
+
+// Compliance/EEO answers are almost always SELECT dropdowns or radio groups
+// whose option wording varies by ATS, so match by TEXT (loose). Returns true
+// only if an option actually matched — a non-match leaves the field untouched.
+function applyComplianceValue(f, value) {
+  if (f.type === "select") return setSelectByText(f.el, value);
   if (f.type === "radio" || f.type === "checkbox")
     return clickRadioOrCheckbox(f.group || [f.el], value);
   return setInputValue(f.el, value);
