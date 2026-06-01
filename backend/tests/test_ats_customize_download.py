@@ -59,7 +59,7 @@ class _Capture:
         return type("M", (), {"content": [block]})()
 
 
-def test_compute_keyword_edits_folds_option_b_answers_and_only_touches_existing():
+def test_yes_no_gap_answers_fold_into_prompt_and_only_touch_existing():
     # Model returns one PRESENT-original edit ("Python") + one ABSENT one ("Java").
     cap = _Capture(
         '{"edits":['
@@ -71,27 +71,24 @@ def test_compute_keyword_edits_folds_option_b_answers_and_only_touches_existing(
         resume_text,
         "Need Kafka.",
         answers={
-            "missing_experience": "shipped a Kafka pipeline at scale",
-            "skills": ["Kafka"],
-            "roles": ["Engineer at Acme"],
-            "metrics": "cut latency 40%",
+            # Yes/No gap confirmations: only the YES (+details) steers; NO is ignored.
+            "gaps": [
+                {"question": "Kafka", "answer": "yes", "details": "ran a prod cluster"},
+                {"question": "Rust", "answer": "no", "details": ""},
+            ],
             "additional": "lean into streaming systems",
         },
         settings=_key_settings(),
         client=cap,
     )
-    # The 5-question steer (incl. the free-text fields) folds into the prompt,
-    # with the HARD RULE.
     u = cap.user
     assert "CANDIDATE STEER" in u and "HARD RULE" in u
-    assert "shipped a Kafka pipeline at scale" in u  # #1 missing_experience
-    assert "Kafka" in u  # #2 skills-gap
-    assert "Engineer at Acme" in u  # #3 most-relevant roles
-    assert "cut latency 40%" in u  # #4 metrics
-    assert "lean into streaming systems" in u  # #5 free text
+    # The confirmed (Yes) skill + its details fold in; the No one does NOT.
+    assert "Kafka" in u and "ran a prod cluster" in u
+    assert "Rust" not in u
+    assert "lean into streaming systems" in u  # free text
 
-    # Steer-only: APPLY touches ONLY existing text — the present edit lands, the
-    # absent one is skipped (a suggestion), never inserted.
+    # Steer-only: APPLY touches ONLY existing text — present applied, absent skipped.
     blob = _docx_bytes(["I use Python daily."])
     _, applied, skipped = ats.apply_docx_edits(blob, out)
     assert [e["original_text"] for e in applied] == ["Python"]
@@ -193,6 +190,9 @@ def test_filename_sanitization_unit():
     assert f("report.DOCX", default="d") == "report.docx"  # case-insensitive ext
     assert f("", default="fallback") == "fallback.docx"  # blank → default
     assert f(None, default="fallback") == "fallback.docx"
+    # The frontend's Firstname_Lastname_RESUME default survives intact
+    # (underscores are word chars).
+    assert f("Ada_Lovelace_RESUME", default="d") == "Ada_Lovelace_RESUME.docx"
     long = f("a" * 300, default="d")
     assert long.endswith(".docx") and len(long) <= 133
 

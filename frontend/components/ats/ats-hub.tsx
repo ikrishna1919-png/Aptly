@@ -56,7 +56,23 @@ const DEFAULT_ANSWERS: AtsQuestions = {
   additional: "",
   missing_experience: "",
   metrics: "",
+  gaps: [],
 };
+
+// Default output filename. Prefer "<First>_<Last>_RESUME" from the profile name
+// (first + last token, each reduced to word chars); else the saved resume's
+// stem; else "Resume". The server re-sanitizes and enforces the .docx suffix.
+function defaultDocxName(profileName: string, savedResumeName: string): string {
+  const clean = (s: string) => s.replace(/[^\w]/g, "");
+  const parts = (profileName || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    const first = clean(parts[0]);
+    const last = clean(parts[parts.length - 1]);
+    if (first && last) return `${first}_${last}_RESUME`;
+  }
+  const stem = (savedResumeName || "").replace(/\.[^.]+$/, "").trim();
+  return stem || "Resume";
+}
 
 export function AtsHub() {
   const reduce = useReducedMotion();
@@ -94,6 +110,9 @@ export function AtsHub() {
   });
   const [profileSkills, setProfileSkills] = useState<string[]>([]);
   const [profileRoles, setProfileRoles] = useState<string[]>([]);
+  // Default-filename sources: profile full-name + the saved resume's filename.
+  const [profileName, setProfileName] = useState<string>("");
+  const [savedResumeName, setSavedResumeName] = useState<string>("");
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<AtsRun | null>(null);
   const [busy, setBusy] = useState(false);
@@ -143,13 +162,14 @@ export function AtsHub() {
       });
     // Whether a DOCX is saved (needed for the "match my resume format" route).
     getActiveResume()
-      .then((r) =>
+      .then((r) => {
         setHasDocx(
           !!r.present &&
             r.content_type ===
               "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ),
-      )
+        );
+        if (r.present && r.filename) setSavedResumeName(r.filename);
+      })
       .catch(() => setHasDocx(false));
   }, []);
 
@@ -158,6 +178,7 @@ export function AtsHub() {
     (async () => {
       try {
         const p = await fetchProfile();
+        if (p.name) setProfileName(p.name);
         const skills = (p.skills ?? []).flatMap((s: unknown) =>
           typeof s === "string" ? [s] : ((s as { items?: string[] }).items ?? []),
         );
@@ -347,7 +368,6 @@ export function AtsHub() {
               answers={answers}
               onChange={setAnswers}
               gapSkills={gapSkills}
-              roles={profileRoles}
               onBack={() => setStep("entry")}
               onContinue={() => void onGenerate()}
               busy={busy}
@@ -393,7 +413,14 @@ export function AtsHub() {
           )}
 
           {step === "preview" && (
-            <Preview run={run} format={format} custom={custom} runId={runId} onStartOver={reset} />
+            <Preview
+              run={run}
+              format={format}
+              custom={custom}
+              runId={runId}
+              defaultName={defaultDocxName(profileName, savedResumeName)}
+              onStartOver={reset}
+            />
           )}
         </motion.div>
       </AnimatePresence>
@@ -607,13 +634,12 @@ function UploadEntry({
   );
 }
 
-// ─── Step 2 (option B): 5 gap/relevance questions, STEER-ONLY ─────────────────
+// ─── Step 2 (option B): Yes/No gap-confirmation questions, STEER-ONLY ─────────
 
 function OptionBQuestions({
   answers,
   onChange,
   gapSkills,
-  roles,
   onBack,
   onContinue,
   busy,
@@ -621,85 +647,92 @@ function OptionBQuestions({
   answers: AtsQuestions;
   onChange: (a: AtsQuestions) => void;
   gapSkills: string[];
-  roles: string[];
   onBack: () => void;
   onContinue: () => void;
   busy: boolean;
 }) {
-  const set = <K extends keyof AtsQuestions>(k: K, v: AtsQuestions[K]) =>
-    onChange({ ...answers, [k]: v });
-  const toggle = (k: "skills" | "roles", v: string) => {
-    const cur = answers[k];
-    set(k, cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v]);
+  const gaps = answers.gaps ?? [];
+  const answerFor = (q: string) => gaps.find((g) => g.question === q);
+  const setGap = (q: string, patch: Partial<{ answer: "yes" | "no"; details: string }>) => {
+    const cur = answerFor(q) ?? { question: q, answer: "no" as const, details: "" };
+    const next = [...gaps.filter((g) => g.question !== q), { ...cur, ...patch }];
+    onChange({ ...answers, gaps: next });
   };
-  const themes = gapSkills.length
-    ? gapSkills.slice(0, 6).join(", ")
-    : "the role's core requirements";
+  const skills = gapSkills.slice(0, 6);
   return (
     <StepShell title="A few quick questions" onBack={onBack}>
       <p className="mb-4 text-sm text-muted-foreground">
-        These steer which of your <span className="font-medium text-foreground">existing</span>{" "}
-        wording gets rewritten toward this job. We never add new lines or sections — your format
-        stays intact.
+        These JD skills aren&apos;t clearly on your resume. Tell us which you genuinely have — we&apos;ll
+        reword your <span className="font-medium text-foreground">existing</span> lines to surface
+        them. We never add new lines or sections.
       </p>
-      <div className="space-y-6">
-        <QRow label="Missing experience" hint={`The JD emphasizes ${themes}.`}>
-          <Textarea
-            rows={2}
-            value={answers.missing_experience ?? ""}
-            onChange={(e) => set("missing_experience", e.target.value)}
-            placeholder="Which of these have you done that isn't clearly on your resume? We'll reword existing lines to surface it — not add new ones."
-            className="text-sm"
-          />
-        </QRow>
-
-        <QRow
-          label="Skills you genuinely have"
-          hint="JD skills not currently surfaced on your resume. Pick the ones you can honestly back up."
-        >
-          {gapSkills.length ? (
-            <Chips items={gapSkills} selected={answers.skills} onToggle={(v) => toggle("skills", v)} empty="" />
-          ) : (
-            <p className="text-sm text-muted-foreground">No obvious skill gaps detected for this JD.</p>
-          )}
-        </QRow>
-
-        <QRow label="Most-relevant experience" hint="Foreground these roles when rewriting.">
-          <Chips
-            items={roles}
-            selected={answers.roles}
-            onToggle={(v) => toggle("roles", v)}
-            empty="Add experience on your profile to pick here."
-          />
-        </QRow>
-
-        <QRow
-          label="Metrics / scale"
-          hint="Real numbers for your most relevant work — we weave them into existing lines only where truthful."
-        >
-          <Textarea
-            rows={2}
-            value={answers.metrics ?? ""}
-            onChange={(e) => set("metrics", e.target.value)}
-            placeholder="e.g. cut latency 40%, led a team of 6, $2M budget"
-            className="text-sm"
-          />
-        </QRow>
+      <div className="space-y-4">
+        {skills.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No obvious skill gaps detected for this JD.</p>
+        ) : (
+          skills.map((skill) => {
+            const a = answerFor(skill);
+            const yes = a?.answer === "yes";
+            const no = a?.answer === "no";
+            return (
+              <div key={skill} className="rounded-lg border border-border p-3">
+                <p className="text-sm">
+                  Do you genuinely have <span className="font-semibold">{skill}</span>?
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setGap(skill, { answer: "yes" })}
+                    className={cn(
+                      "rounded-full border px-4 py-1 text-sm font-medium",
+                      yes
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    Yes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGap(skill, { answer: "no", details: "" })}
+                    className={cn(
+                      "rounded-full border px-4 py-1 text-sm font-medium",
+                      no
+                        ? "border-primary bg-primary-soft text-foreground"
+                        : "border-border text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    No
+                  </button>
+                </div>
+                {yes && (
+                  <Textarea
+                    rows={2}
+                    value={a?.details ?? ""}
+                    onChange={(e) => setGap(skill, { details: e.target.value })}
+                    placeholder="Add details (optional) — where/how you used it. We reword existing lines, never add new ones."
+                    className="mt-2 text-sm"
+                  />
+                )}
+              </div>
+            );
+          })
+        )}
 
         <QRow label="Anything else to reflect?">
           <Textarea
             rows={2}
             value={answers.additional}
-            onChange={(e) => set("additional", e.target.value)}
+            onChange={(e) => onChange({ ...answers, additional: e.target.value })}
             className="text-sm"
           />
         </QRow>
       </div>
 
       <p className="mt-6 rounded-lg border border-primary/15 bg-primary-soft/40 px-3 py-2 text-sm text-muted-foreground">
-        Using your saved resume&apos;s original format — keywords are woven into the existing text
-        in place; your formatting and layout are preserved. These answers steer wording choice
-        only; they never add content that isn&apos;t already in your resume.
+        Using your saved resume&apos;s original format — confirmed skills are woven into your
+        existing text in place; formatting and layout are preserved. Steer-only: we never add
+        content that isn&apos;t already in your resume.
       </p>
 
       <div className="mt-6 flex items-center justify-between">
@@ -984,12 +1017,14 @@ function Preview({
   format,
   custom,
   runId,
+  defaultName,
   onStartOver,
 }: {
   run: AtsRun | null;
   format: AtsFormat;
   custom: AtsCustomOptions;
   runId: string | null;
+  defaultName: string;
   onStartOver: () => void;
 }) {
   if (!run || run.status === "analyzing" || run.status === "generating") {
@@ -1014,6 +1049,7 @@ function Preview({
         diff={run.diff}
         demoMode={run.demo_mode}
         runId={runId!}
+        defaultName={defaultName}
         onStartOver={onStartOver}
       />
     );
@@ -1098,15 +1134,17 @@ function DiffView({
   diff,
   demoMode,
   runId,
+  defaultName,
   onStartOver,
 }: {
   diff: { applied: { original_text: string; replacement_text: string }[]; skipped: { original_text: string }[] };
   demoMode: boolean;
   runId: string;
+  defaultName: string;
   onStartOver: () => void;
 }) {
   const [accepted, setAccepted] = useState<boolean[]>(diff.applied.map(() => true));
-  const [filename, setFilename] = useState("");
+  const [filename, setFilename] = useState(defaultName);
   const [downloading, setDownloading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   async function dl() {
@@ -1131,11 +1169,13 @@ function DiffView({
     }
   }
   return (
-    <StepShell title="Review keyword changes" onBack={onStartOver} backLabel="Start over">
+    <StepShell title="Review Keyword Changes" onBack={onStartOver} backLabel="Start over">
       {diff.applied.length > 0 && (
         <p className="mb-3 text-sm text-muted-foreground">
           {diff.applied.length} in-place keyword edit{diff.applied.length === 1 ? "" : "s"} applied —
-          wording only; your formatting, sections, and layout are unchanged. Review and download below.
+          wording only; your formatting, sections, and layout are unchanged.{" "}
+          <span className="font-medium text-foreground">Uncheck any change to revert it to your
+          original wording.</span>
         </p>
       )}
       {diff.applied.length === 0 && (
@@ -1167,8 +1207,9 @@ function DiffView({
       </ul>
       {diff.skipped.length > 0 && (
         <div className="mt-4">
+          <p className="text-xs font-semibold text-foreground">Suggestions</p>
           <p className="text-xs font-medium text-muted-foreground">
-            {diff.skipped.length} suggestion(s) not in your resume — left as suggestions only
+            {diff.skipped.length} item(s) not in your resume — left as suggestions only
             (option B never inserts new content). Consider adding these to your base resume:
           </p>
           <ul className="mt-1 space-y-1">

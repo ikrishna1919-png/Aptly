@@ -294,6 +294,23 @@ def _keyword_addendum(answers: dict[str, Any] | None) -> str:
     a = answers or {}
     lines: list[str] = []
 
+    # Yes/No gap confirmations: only "yes" entries steer rewrites; details (if
+    # given) sharpen WHICH existing phrase to reword. "no" is ignored.
+    confirmed: list[str] = []
+    for g in a.get("gaps") or []:
+        if isinstance(g, dict) and str(g.get("answer", "")).strip().lower() == "yes":
+            q = str(g.get("question") or g.get("skill") or "").strip()
+            d = str(g.get("details") or "").strip()
+            if q:
+                confirmed.append(f"{q} ({d})" if d else q)
+    if confirmed:
+        lines.append(
+            "- Skills/experience the candidate CONFIRMED they genuinely have — reword "
+            "EXISTING phrases to surface these where truthful (never add new lines): "
+            + "; ".join(confirmed)
+            + "."
+        )
+
     missing_exp = str(a.get("missing_experience") or "").strip()
     if missing_exp:
         lines.append(

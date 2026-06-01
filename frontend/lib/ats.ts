@@ -26,6 +26,9 @@ export type AtsQuestions = {
   // generate flow is unaffected; they steer WHICH existing wording to rewrite.
   missing_experience?: string;
   metrics?: string;
+  // Yes/No gap-confirmation answers (option B): each JD gap skill the candidate
+  // confirms (or not), with optional details. Only "yes" entries steer rewrites.
+  gaps?: { question: string; answer: "yes" | "no"; details: string }[];
 };
 
 export type DocxEdit = { original_text: string; replacement_text: string; reason?: string };
