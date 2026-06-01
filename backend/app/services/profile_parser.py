@@ -335,6 +335,22 @@ class Profile(BaseModel):
     # template that uses non-standard headers still survives.
     section_order: list[str] = Field(default_factory=list)
 
+    # ── Compliance / EEO answers (the extension echoes these into ATS forms) ──
+    # All saved by the user once in the "Form-filling guide" and stored as plain
+    # strings matching common ATS option wording. NEVER parsed from a resume,
+    # NEVER inferred. The column is JSON so these add no migration.
+    #
+    # requires_sponsorship / work_authorization: normal fields, fill when set.
+    requires_sponsorship: str = ""  # e.g. "Yes" | "No"
+    work_authorization: str = ""  # e.g. "Authorized to work in the US"
+    # The EEO four DEFAULT TO BLANK and are filled ONLY when the user explicitly
+    # sets them — blank means "leave the form field untouched" (the extension
+    # never auto-selects a demographic answer the user didn't choose).
+    veteran_status: str = ""  # the standard 4 self-identification options
+    disability_status: str = ""  # "Yes" | "No" | "Decline to self-identify"
+    race_ethnicity: str = ""
+    gender: str = ""
+
     def flat_skills(self) -> list[str]:
         """Flatten the `skills` field to a plain list of strings.
         Use this in any code path that needs a flat list — the

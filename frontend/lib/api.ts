@@ -297,6 +297,16 @@ export type Profile = {
   // resume. Defaulted to [] on the backend so the form always sees
   // an array.
   section_order: string[];
+  // Compliance / EEO answers saved once in the Form-filling guide; the
+  // extension echoes them into ATS forms. The EEO four default to "" and are
+  // only filled when explicitly set (never inferred). Optional so older code +
+  // partial payloads still typecheck; the backend defaults each to "".
+  requires_sponsorship?: string;
+  work_authorization?: string;
+  veteran_status?: string;
+  disability_status?: string;
+  race_ethnicity?: string;
+  gender?: string;
 };
 
 // All user-facing endpoints carry the session cookie via

@@ -1006,3 +1006,45 @@ def _schema_contains_forbidden_keys(schema: dict) -> list[str]:
 
     _walk(schema, "$")
     return hits
+
+
+# ── Compliance / EEO fields (JSON profile, no migration) ──────────────────────
+
+
+def test_compliance_fields_round_trip(client_no_key):
+    """The 6 compliance keys round-trip through PUT → GET /profile."""
+    test_client, _ = client_no_key
+    body = {
+        **VALID_PROFILE_BODY,
+        "requires_sponsorship": "Yes",
+        "work_authorization": "Authorized to work in the US",
+        "veteran_status": "I am not a protected veteran",
+        "disability_status": "No",
+        "race_ethnicity": "Two or more races",
+        "gender": "Female",
+    }
+    assert test_client.put("/api/profile", json=body, headers=AUTH).status_code == 200
+    got = test_client.get("/api/profile", headers=AUTH).json()
+    assert got["requires_sponsorship"] == "Yes"
+    assert got["work_authorization"] == "Authorized to work in the US"
+    assert got["veteran_status"] == "I am not a protected veteran"
+    assert got["disability_status"] == "No"
+    assert got["race_ethnicity"] == "Two or more races"
+    assert got["gender"] == "Female"
+
+
+def test_eeo_fields_default_blank(client_no_key):
+    """Unset EEO fields default to "" — never inferred, never populated."""
+    test_client, _ = client_no_key
+    # Save a profile that omits all compliance keys.
+    assert test_client.put("/api/profile", json=VALID_PROFILE_BODY, headers=AUTH).status_code == 200
+    got = test_client.get("/api/profile", headers=AUTH).json()
+    for key in (
+        "requires_sponsorship",
+        "work_authorization",
+        "veteran_status",
+        "disability_status",
+        "race_ethnicity",
+        "gender",
+    ):
+        assert got[key] == "", f"{key} should default blank, got {got[key]!r}"
