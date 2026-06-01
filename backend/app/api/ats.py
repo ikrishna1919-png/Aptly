@@ -16,7 +16,7 @@ import io
 import re
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Path, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -27,7 +27,14 @@ from app.config import Settings, get_settings
 from app.database import get_db
 from app.models.tailor_run import TailorRun
 from app.models.user import User
-from app.services import ats, ats_runs, default_formats, keyword_coverage, linkedin_import
+from app.services import (
+    active_autofill,
+    ats,
+    ats_runs,
+    default_formats,
+    keyword_coverage,
+    linkedin_import,
+)
 from app.services.demo_candidate import get_candidate
 
 router = APIRouter()
@@ -278,6 +285,29 @@ def ats_download_docx(
         media_type=_DOCX_MIME,
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+# ─── Active autofill resume (Chrome extension pointer) ───────────────────────
+
+
+class ActiveAutofillRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/ats/active-autofill-run", status_code=status.HTTP_204_NO_CONTENT)
+def set_active_autofill_run(
+    payload: ActiveAutofillRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Mark a completed tailor run as the user's active autofill resume — the
+    one the Chrome extension fills with when no run is explicitly selected. Sets
+    a pointer only (no file is pushed to the browser)."""
+    try:
+        active_autofill.set_active_run(db, user.id, payload.run_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="completed tailor run not found") from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ─── Default formats (Feature #1 / #5) ───────────────────────────────────────

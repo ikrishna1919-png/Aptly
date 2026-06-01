@@ -472,9 +472,14 @@ def apply_docx_edits(
 
 def _apply_one_edit(paragraphs: list, original: str, replacement: str) -> bool:
     """Replace the FIRST occurrence of `original` in the FIRST paragraph that
-    contains it (across run boundaries), preserving each run's formatting.
-    Returns True if applied. Pure run-splicing — no new runs, no formatting
-    changes, no net-new lines."""
+    contains it (across run boundaries), preserving each run's OWN formatting.
+
+    The replacement is DISTRIBUTED across the overlapped runs in proportion to
+    each run's share of the original span — so when a match crosses runs of
+    differing style (e.g. a bold label + a normal value), the bold portion stays
+    bold and the normal portion stays normal, instead of the whole replacement
+    inheriting the first run's style. Untouched runs are unchanged; no new runs,
+    no net-new lines. Returns True if applied."""
     if not original:
         return False
     for para in paragraphs:
@@ -489,21 +494,36 @@ def _apply_one_edit(paragraphs: list, original: str, replacement: str) -> bool:
         if idx < 0:
             continue
         end = idx + len(original)
+        orig_len = len(original)
+
+        # First pass: collect the overlapped runs (run, head, tail, frac) where
+        # `frac` is the run's share of the original span. head/tail are the
+        # parts of the run OUTSIDE the match, which we always keep verbatim.
+        spans = []
         pos = 0
-        first_overlap = True
         for run, t in zip(runs, texts, strict=True):
             r_start, r_end = pos, pos + len(t)
             pos = r_end
             ov_start, ov_end = max(idx, r_start), min(end, r_end)
             if ov_start >= ov_end:
-                continue  # this run doesn't overlap the match
+                continue
             ls, le = ov_start - r_start, ov_end - r_start
-            if first_overlap:
-                # Whole replacement lands here, inheriting THIS run's formatting.
-                run.text = t[:ls] + replacement + t[le:]
-                first_overlap = False
+            frac = (ov_end - ov_start) / orig_len if orig_len else 0.0
+            spans.append({"run": run, "head": t[:ls], "tail": t[le:], "frac": frac})
+
+        # Second pass: slice `replacement` across the overlapped runs by `frac`,
+        # so each run carries the proportional chunk in ITS own formatting. The
+        # LAST overlapped run takes the remainder (no characters dropped to
+        # rounding). Single-overlap case → the whole replacement in that run.
+        n = len(spans)
+        cursor = 0
+        for i, sp in enumerate(spans):
+            if i == n - 1:
+                chunk = replacement[cursor:]
             else:
-                # Blank only the overlapped slice; keep this run's tail + style.
-                run.text = t[:ls] + t[le:]
+                take = round(sp["frac"] * len(replacement))
+                chunk = replacement[cursor : cursor + take]
+                cursor += take
+            sp["run"].text = sp["head"] + chunk + sp["tail"]
         return True
     return False

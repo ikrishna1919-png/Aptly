@@ -26,7 +26,7 @@ from app.models.extension_session import ExtensionSession
 from app.models.saved_qa_pair import SavedQAPair
 from app.models.tailor_run import TailorRun
 from app.models.user import User
-from app.services import qa_clustering
+from app.services import active_autofill, qa_clustering
 from app.services.demo_candidate import get_candidate
 from app.services.docx_export import render_docx
 from app.services.extension_auth import (
@@ -149,6 +149,9 @@ def extension_me(
         "name": user.name,
         "email": user.email,
         "has_active_tailor_run": _has_done_run(db, user.id),
+        # The run the user marked "Add to Chrome extension" (autofill default),
+        # or None. The popup pre-selects it; the worker falls back to it.
+        "active_autofill_run_id": active_autofill.get_active_run_id(db, user.id),
     }
 
 

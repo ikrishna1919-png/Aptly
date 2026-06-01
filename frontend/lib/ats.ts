@@ -104,6 +104,19 @@ export async function fetchAtsRun(runId: string): Promise<AtsRun> {
   return res.json();
 }
 
+/** Mark a completed tailor run as the user's active autofill resume — the one
+ * the Chrome extension fills with by default. Sets a pointer only; it does NOT
+ * push a file into the browser. */
+export async function setActiveAutofillRun(runId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/ats/active-autofill-run`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_id: runId }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
 /** Download the keyword-injected DOCX (Option 2). `accepted` = indices into
  * the run's applied edits to keep (omit = all). `filename` = optional output
  * name (sanitized server-side; omit = default). */
