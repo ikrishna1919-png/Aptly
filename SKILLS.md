@@ -55,6 +55,8 @@ A real example: a task said "delete the orphan Vercel project `aptly-buvg`" — 
   `cd backend && black --check app tests && ruff check app tests && pytest`
   `cd frontend && npx tsc --noEmit && npm run build`
   `cd extension && npm run build && npm test`
+- **`tsc`/`next build` exit code is the gate — never bundle `git push`/PR creation in the same tool batch as the build.** A frontend build can print "✓ Compiled successfully" and still FAIL typecheck on the next line (`Type error:`), exiting non-zero. Confirm the exit code in a prior step, THEN commit/push. (Force-pushing broken code happened twice in one cycle by batching push with verification.)
+- **After ANY extension merge/change: `git pull` → `cd extension && npm run build` → reload the unpacked extension at `chrome://extensions` → RELOAD THE JOB TAB.** Skipping the tab reload tests the stale, cached content script — the #1 false "still broken" signal this cycle. Put this reminder in every extension PR's manual checklist.
 
 ## Render & Vercel patterns
 
@@ -62,6 +64,18 @@ A real example: a task said "delete the orphan Vercel project `aptly-buvg`" — 
 - A failed migration crashes the deploy and Render holds the prior good deploy live (`set -euo pipefail` in `start.sh`). The live backend stays up while you fix the migration — fix forward, don't panic-roll-back.
 - Vercel free tier has a daily build rate limit; pushing many PRs in a day can exhaust it.
 - Two Vercel projects on the same repo (`aptly` + `aptly-buvg`) is a known footgun. **Live is `aptly-buvg`.** Be EXTREMELY careful before deleting either; confirm in the dashboard first.
+
+## Backend / DB patterns
+
+- **Never hold a DB transaction open across network I/O.** SQLAlchemy autobegins a transaction on the first statement and holds it until commit/rollback. With `expire_on_commit=True` (the default), reading any attribute of a committed-then-expired ORM object lazy-loads it — and if that happens just before/inside a long fetch, the transaction idles through the network wait. **Neon kills idle-in-transaction connections** (`idle_in_transaction_session_timeout`, minutes, not ours to raise), and the next write fails on a dead connection. Fix: commit/clear the tx before the network phase, pass plain detached structs (not ORM rows) into the async work, and re-query rows by id afterward. (This was the ingestion "attempted stays 0" crash.)
+- Long background jobs: heartbeat progress to a status row, write a terminal status in `finally`, and reap stale `running` rows on the next trigger — never leave a job masquerading as live.
+
+## ATS / extension autofill patterns
+
+- **ATS dropdowns are often react-select, not native `<select>`.** Tell: no `el.options`; the control is `input[role="combobox"]` inside `div.select__control`; options mount lazily in a body **portal** (`[id*="-option-"][role="option"]` / `.select__option`). react-select listens on pointer/mouse events, **not `click`** — a native value set or a click does nothing. Drive it: focus → `pointerdown`+`mousedown` on the control → poll the portal (`queryAllDeep`) → match by text → commit with the mouse sequence → **verify the rendered value changed** (else report failure and leave it). `setReactSelectByText` in `extension/src/content/shared.js`.
+- **Demographic/EEO fields: fill ONLY when the user explicitly set a value.** Blank profile value → leave the field untouched; never auto-select a demographic answer. Match Yes/No by polarity (a saved "Yes" matches "Yes, I require…" but never "No,…"); don't let a 2-char "No" loose-match "Not sure".
+- **Extensions cannot force a trusted file-pick.** `DataTransfer` → `input.files` + fired events works on some uploaders, not all; when an uploader rejects a programmatic file, fall back to a manual download/drop and **name the real reason** — never a vague "browser security rule". When attach fails, surface WHY (auth/no-run/uploader-rejected), not a generic message.
+- **Diagnose the branch before fixing — don't assume.** For a failing browser-side path you can't run from the repo (e.g. resume attach), ask the operator to read the service-worker console / run a probe; if you must ship blind, implement both branches defensively and have the PR report which one actually fired.
 
 ## Common debugging patterns
 

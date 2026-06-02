@@ -21,21 +21,24 @@ Not competing on breadth with LinkedIn/Indeed. Competing on **fit for the sponso
 ## 5. Core features
 
 ### Available now (MVP)
-1. **Sponsorship-aware job aggregation** — pulls tech jobs directly from ATS origins (Greenhouse, Lever, Workday, SmartRecruiters, Ashby), one searchable list, with sponsorship signals.
-2. **AI resume & cover-letter tailoring** — tailors the user's profile/resume to a specific job description; asks follow-up questions only about genuinely missing skills; outputs ATS-safe, human-sounding, truthful documents (DOCX/PDF).
-3. **Profile** — manual entry (primary) of full career data; optional resume upload (PDF/DOCX/text) parsed as a convenience and as reference context for tailoring. All fields user-editable.
+1. **Sponsorship-aware job aggregation** — pulls tech jobs directly from ATS origins (Greenhouse, Lever, Workday, SmartRecruiters, Ashby), one searchable list, with sponsorship signals. Ingestion completes reliably; full single-pass coverage requires an always-on host (Render Starter).
+2. **AI resume & cover-letter tailoring (two modes, user's choice via saved default format):**
+   - **AI-generated** — builds a tailored, ATS-safe resume from the profile + job description; asks follow-up questions only about genuine gaps; truthful, never fabricated; DOCX/PDF.
+   - **Match my resume format** — in-place, **steer-only** keyword edits on the user's saved DOCX: rewrites only wording that already exists (preserving the original formatting/layout, adding no new lines); 5 gap questions steer which existing phrasing to strengthen; per-edit revert + custom filename. The saved choice drives both the Jobs "Tailor" CTA and the ATS generator.
+3. **Profile** — manual entry (primary) of full career data; optional resume upload (DOCX saved as the autofill/tailoring source; PDF/text parsed for reference). Includes a Form-filling guide for compliance/EEO answers. All fields user-editable.
+4. **Chrome extension (dev-install today; user-initiated, never auto-submits)** — autofills standard application fields (Greenhouse/Lever/Ashby; SmartRecruiters detection; Workday experimental) and sponsorship/EEO dropdowns from the profile, EEO only when explicitly set; attaches the active tailored resume. Not yet on the Chrome Web Store.
 
 ### Roadmap (coming soon)
-4. **Job alerts** — notify on new matching postings.
-5. **Semi-auto apply** — Chrome extension to speed up applications. (Must respect platform terms.)
-6. **Email finder** — surface recruiter/hiring-manager contacts for outreach. (Must respect privacy/terms.)
-7. **Interview prep** — role- and sponsorship-specific preparation.
-8. **Application tracker** — track applications and statuses end-to-end.
-9. **Sponsorship intelligence dashboard** — richer insights from DOL/LCA data.
+5. **Job alerts** — notify on new matching postings.
+6. **Smarter autofill** — AI/semantic answers for company-specific & free-text application questions (today those are flagged for manual answer, never guessed); Chrome Web Store listing. (Must respect platform terms.)
+7. **Email finder** — surface recruiter/hiring-manager contacts for outreach. (Must respect privacy/terms.)
+8. **Interview prep** — role- and sponsorship-specific preparation.
+9. **Application tracker** — track applications and statuses end-to-end.
+10. **Sponsorship intelligence dashboard** — richer insights from DOL/LCA data.
 
 ## 6. Key flows
 - **Onboarding:** Landing page → Get Started → Google sign-in → Profile (create/save) → Jobs unlocked.
-- **Tailoring:** Pick a job → AI uses (profile + optional uploaded resume + job description + follow-up answers) → tailored resume + cover letter → download.
+- **Tailoring:** Pick a job → the saved default-format choice routes to either AI-generate (profile + JD + follow-up answers) or in-place keyword edits on the saved DOCX → tailored resume + cover letter → download (and optionally set as the extension's autofill resume).
 - **Admin:** admin-only manual data entry (gated server-side by ADMIN_EMAILS).
 
 ## 7. Principles & constraints
@@ -48,7 +51,8 @@ Not competing on breadth with LinkedIn/Indeed. Competing on **fit for the sponso
 - Frontend: Next.js (App Router), TS, Tailwind, shadcn/ui, Framer Motion. On Vercel at aptly.fyi.
 - Backend: FastAPI, SQLAlchemy, Alembic, Anthropic SDK. On Render at api.aptly.fyi.
 - DB: Postgres (Neon). Auth: Google OAuth, first-party cookie on `.aptly.fyi`.
-- Ingestion: per-ATS adapters → `sources` table → one `jobs` table; async fetch, rotation.
+- Ingestion: per-ATS adapters → `sources` table → one `jobs` table; async fetch, rotation, per-source heartbeat + terminal status; transaction cleared before the network phase (no idle-in-transaction). `INGEST_MAX_PER_RUN=0` = all sources (always-on only); `HOURS_WINDOW` default 720.
+- Extension: MV3, plain JS, IIFE-bundled content scripts; separate bearer-token auth (`extension_sessions`); dev-install ("Load unpacked") only.
 
 ## 9. Success metrics (early)
 - Users completing a profile.
