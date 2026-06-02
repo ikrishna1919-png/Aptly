@@ -7,6 +7,14 @@ A job platform for **international students who need visa (H-1B) sponsorship**. 
 
 Audience is high-stakes (visa timelines). Trustworthiness > flashiness. Never fabricate data on a user's resume.
 
+## Current state (what IS — updated after the ingestion + ATS-autofill cycle)
+- **Ingestion completes reliably.** The idle-in-transaction bug is fixed (the worker no longer holds a DB transaction open across the per-batch HTTP fetches — Neon was killing the idle connection mid-run). Runs heartbeat per source, self-heal stale `running` rows, and write a terminal status. `INGEST_MAX_PER_RUN=0` means "all enabled sources in one pass" — **safe only when the host is always-on** (Render Starter); on the free tier keep it bounded (e.g. 150) and/or use `INGEST_RUN_BUDGET_SECONDS`. `HOURS_WINDOW` default widened to 720 (the window only takes effect once a run actually FINISHES).
+- **ATS aggregation:** Greenhouse, Lever, Workday, SmartRecruiters, Ashby ingest into the `jobs` table.
+- **Resume tailoring has two modes, driven by the saved `default_resume_format.source`:**
+  - `"ai"` → from-scratch generate (the original tailor pipeline).
+  - `"resume"` (Match my resume format) → **in-place, steer-only keyword edits** on the user's saved DOCX (`active_resume_blob`): rewrites ONLY text already present (summary/skills/bullets), across runs, preserving per-run formatting; **never inserts new lines/sections**. The 5 gap questions + free text STEER which existing wording to rewrite — they cannot add absent content. The saved default routes BOTH entry points (the Jobs "Tailor" CTA and `/ats/generate`).
+- **Chrome extension (dev-install only — no Web Store listing yet):** Greenhouse/Lever/Ashby standard fields autofill from the profile; SmartRecruiters detection + the apply-workflow host are matched; Workday is experimental. Compliance/EEO answers live on the profile (Form-filling guide) and the EEO four are filled ONLY when explicitly set (blank → field untouched, never guessed). A react-select driver fills Greenhouse's portal dropdowns (sponsorship/EEO). Resume auto-attach + the react-select fill are the freshest work — verify on a live posting before trusting (see ROADMAP open items).
+
 ## Live infrastructure
 - **Domain:** aptly.fyi (bought via Vercel; Vercel = registrar + DNS host)
   - Frontend: `https://aptly.fyi` (Vercel)
@@ -42,7 +50,7 @@ Greenhouse, Lever, Ashby, SmartRecruiters, Workday — all plug into the `source
 ## Chrome Extension (`/extension`)
 - **Path:** `/extension` at repo root. Manifest V3, plain JS.
 - **Build:** content scripts are bundled to a flat **IIFE** by `extension/scripts/build.mjs` (`npm run build`), output committed to `extension/content/greenhouse.js` and referenced by the manifest. **DO NOT** reference ESM-`import` source files directly in the manifest — MV3 content scripts can't load ES modules and crash with `SyntaxError`. Popup (HTML) and background (manifest `"type":"module"`) CAN use ESM.
-- **Supports:** Greenhouse only (v1.0). Lever/Ashby/Workday adapters are separate phased PRs (not built).
+- **Supports:** Greenhouse, Lever, Ashby, SmartRecruiters (standard fields + Greenhouse react-select sponsorship/EEO) via the generic `content/greenhouse.js`; **Workday is experimental** (`content/workday.js`, separate match block, unverified on a live form). Standard contact fields, sponsorship, and EEO autofill from the profile; EEO filled ONLY when explicitly set. Resume auto-attach + the react-select dropdown driver are the newest paths — confirm on a live posting (ROADMAP).
 - **Auth:** separate token system from the web app — `extension_sessions` table, bearer token in `chrome.storage.local`. NOT cookies. Backend validates the token on every `/api/extension/*` call.
 - **Distribution:** dev install via "Load unpacked" today. Chrome Web Store submission not yet done.
 - **Hard rule:** the extension is a **user-initiated form-fill assistant** — it NEVER auto-submits. The user clicks submit themselves; demographic/sensitive fields are left blank unless explicitly opted in.
@@ -81,7 +89,7 @@ Default formats persist on the candidate row (`default_resume_format` / `default
 - `extension_sessions` (bearer tokens), `saved_qa_pairs` (extension learning loop), `tailor_runs` (tailor + /ats runs), `cover_letters`.
 
 ## Env vars (names only; values in dashboards)
-- Render: ADMIN_TOKEN, ANTHROPIC_API_KEY, DATABASE_URL (Neon pooled, `postgresql+psycopg://`), CORS_ORIGINS=https://aptly.fyi, FRONTEND_URL=https://aptly.fyi, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI=https://api.aptly.fyi/api/auth/google/callback, COOKIE_DOMAIN=.aptly.fyi, ADMIN_EMAILS (comma-sep; starts with ikrishna1919@gmail.com), HOURS_WINDOW (48), INGEST_CONCURRENCY (default 10), INGEST_MAX_PER_RUN (default 150).
+- Render: ADMIN_TOKEN, ANTHROPIC_API_KEY, DATABASE_URL (Neon pooled, `postgresql+psycopg://`), CORS_ORIGINS=https://aptly.fyi, FRONTEND_URL=https://aptly.fyi, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI=https://api.aptly.fyi/api/auth/google/callback, COOKIE_DOMAIN=.aptly.fyi, ADMIN_EMAILS (comma-sep; starts with ikrishna1919@gmail.com), HOURS_WINDOW (default 720; only matters once a run FINISHES), INGEST_CONCURRENCY (default 10), INGEST_MAX_PER_RUN (default 150; **0 = all enabled sources — only when always-on**), INGEST_RUN_BUDGET_SECONDS (default 0 = unlimited; soft per-run wall-clock budget to end a long pass cleanly + rotate), STALE_RUN_MINUTES (default 15; a `running` IngestRun older than this is reported `stale` + reaped to `failed` on the next trigger).
 - Vercel: NEXT_PUBLIC_API_URL=https://api.aptly.fyi
 - GitHub Actions: APTLY_API_URL=https://api.aptly.fyi, APTLY_ADMIN_TOKEN
 
@@ -96,6 +104,10 @@ Default formats persist on the candidate row (`default_resume_format` / `default
 8. `Cannot GET` = wrong host (Node/Express 404). FastAPI 404 = `{"detail":"Not Found"}` = right host, wrong path.
 9. After a failed Vercel build: the LIVE site stays on the last good deploy, but the broken build sits in `main` and blocks the NEXT deploy. Fix the build; don't just roll back.
 10. Keep risky changes (auth, migrations) in separate PRs from cosmetic ones.
+11. **Never hold a DB transaction open across network I/O.** SQLAlchemy autobegins a tx on the first statement; `expire_on_commit=True` then lazy-loads an expired attribute mid-fetch, opening a tx that idles through the HTTP wait → Neon's `idle_in_transaction_session_timeout` kills the connection. Commit/clear before the network phase; pass plain detached structs (not ORM rows) into async work; re-query by id afterward.
+12. **ATS dropdowns are often react-select, not native `<select>`.** No `el.options`; the control is `input[role=combobox]` inside `div.select__control`; options render lazily in a body PORTAL (`[id*="-option-"][role="option"]`). Drive via pointer events (it ignores `click`) + portal option search, then verify the rendered value changed. (`setReactSelectByText` in `extension/src/content/shared.js`.)
+13. **Extensions cannot force a trusted file-pick.** `DataTransfer`→`input.files` works on some uploaders, not all; when an uploader rejects a programmatic file, fall back to a manual download/drop and name the real reason — never a vague "browser security rule".
+14. **After ANY extension merge: `git pull` → `cd extension && npm run build` → reload the unpacked extension at `chrome://extensions` → RELOAD THE JOB TAB.** Skipping the tab reload tests stale content-script code (a repeated false-failure source this cycle).
 
 ## Free-tier note
 - **Render:** `plan: free` per `render.yaml` — sleeps and cold-starts (~30s). Starter (~$7/mo, always-on) is the biggest snappiness lever before real users. Set an Anthropic billing alert (usage-based cost is the wild card). *(Render dashboard is authoritative if it diverges from render.yaml — confirm there.)*
